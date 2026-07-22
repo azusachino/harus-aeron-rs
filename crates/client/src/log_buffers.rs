@@ -1,4 +1,11 @@
 //! LogBuffers: memory-mapped or in-memory abstraction over Aeron 3-term log layout.
+//!
+//! The raw bytes live behind an `Arc` so that every `LogBuffers` clone — and every
+//! `AtomicBuffer` handed out by [`LogBuffers::duplicate_term_buffers`] /
+//! [`LogBuffers::meta_data_buffer`] — refers to the *same* underlying memory. This mirrors
+//! upstream's memory-mapped log file being shared (zero-copy) across the driver, publishers,
+//! and subscribers; mutation happens exclusively through `AtomicBuffer`'s atomic operations,
+//! the same way `UnsafeBuffer` mutation works concurrently across threads/processes upstream.
 
 use crate::error::{AeronError, Result};
 use crate::logbuffer::{
@@ -8,19 +15,25 @@ use crate::logbuffer::{
 use agrona::AtomicBuffer;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 #[allow(dead_code)]
 enum BufferStorage {
     File(std::fs::File),
-    Bytes(Vec<u8>),
+    Bytes,
 }
 
-/// Represents an Aeron log file containing 3 term buffers and a log metadata buffer.
-pub struct LogBuffers {
+struct LogBuffersInner {
     _storage: BufferStorage,
     raw_buffer: Vec<u8>,
     term_length: usize,
 }
+
+/// Represents an Aeron log file containing 3 term buffers and a log metadata buffer.
+///
+/// Cheap to clone: clones share the same underlying byte storage via `Arc`.
+#[derive(Clone)]
+pub struct LogBuffers(Arc<LogBuffersInner>);
 
 impl LogBuffers {
     /// Load and validate an Aeron log buffer file from a path on disk.
@@ -43,7 +56,7 @@ impl LogBuffers {
 
     /// Construct `LogBuffers` from an in-memory byte buffer.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
-        Self::from_storage(BufferStorage::Bytes(vec![]), bytes)
+        Self::from_storage(BufferStorage::Bytes, bytes)
     }
 
     fn from_storage(storage: BufferStorage, raw_buffer: Vec<u8>) -> Result<Self> {
@@ -70,41 +83,52 @@ impl LogBuffers {
             return Err(AeronError::IllegalState(msg));
         }
 
-        Ok(Self {
+        Ok(Self(Arc::new(LogBuffersInner {
             _storage: storage,
             raw_buffer,
             term_length: term_len as usize,
-        })
+        })))
     }
 
     /// Returns the length of each term in bytes.
     pub fn term_length(&self) -> usize {
-        self.term_length
+        self.0.term_length
     }
 
     /// Duplicate the term buffers for thread-local or concurrent access.
-    pub fn duplicate_term_buffers(&mut self) -> Vec<AtomicBuffer<'_>> {
-        let term_len = self.term_length;
+    ///
+    /// Every returned [`AtomicBuffer`] aliases the same underlying storage as `self` and any
+    /// clone of `self` — writes through one are visible through all of them, matching
+    /// upstream's shared memory-mapped log semantics.
+    pub fn duplicate_term_buffers(&self) -> Vec<AtomicBuffer<'static>> {
+        let term_len = self.0.term_length;
         let total_terms_len = term_len * PARTITION_COUNT as usize;
         let mut buffers = Vec::with_capacity(PARTITION_COUNT as usize);
 
-        if self.raw_buffer.len() >= total_terms_len {
-            let mut remaining = &mut self.raw_buffer[..total_terms_len];
-            for _ in 0..PARTITION_COUNT as usize {
-                let (first, rest) = remaining.split_at_mut(term_len);
-                buffers.push(AtomicBuffer::new(first));
-                remaining = rest;
+        if self.0.raw_buffer.len() >= total_terms_len {
+            let base_ptr = self.0.raw_buffer.as_ptr() as *mut u8;
+            for i in 0..PARTITION_COUNT as usize {
+                // Safety: `base_ptr` points into `self.0.raw_buffer`, which is kept alive for
+                // as long as any clone of this `Arc` (including `self`) is alive, and is never
+                // resized/reallocated after construction — only mutated in place via
+                // `AtomicBuffer`'s atomic operations.
+                let ptr = unsafe { base_ptr.add(i * term_len) };
+                buffers.push(unsafe { AtomicBuffer::from_raw_parts(ptr, term_len) });
             }
         }
 
         buffers
     }
 
-    /// Get atomic buffer view over the metadata section.
-    pub fn meta_data_buffer(&mut self) -> AtomicBuffer<'_> {
-        let meta_offset = self.raw_buffer.len() - LOG_META_DATA_LENGTH;
-        let slice = &mut self.raw_buffer[meta_offset..];
-        AtomicBuffer::new(slice)
+    /// Get an atomic buffer view over the metadata section.
+    ///
+    /// Aliases the same underlying storage as `self` and any clone of `self`; see
+    /// [`LogBuffers::duplicate_term_buffers`].
+    pub fn meta_data_buffer(&self) -> AtomicBuffer<'static> {
+        let meta_offset = self.0.raw_buffer.len() - LOG_META_DATA_LENGTH;
+        // Safety: see `duplicate_term_buffers`.
+        let ptr = unsafe { (self.0.raw_buffer.as_ptr() as *mut u8).add(meta_offset) };
+        unsafe { AtomicBuffer::from_raw_parts(ptr, LOG_META_DATA_LENGTH) }
     }
 }
 
@@ -170,10 +194,40 @@ mod tests {
         set_page_size(&meta_buf, PAGE_MIN_SIZE);
         contents[meta_offset..].copy_from_slice(&meta_slice);
 
-        let mut log_buffers = LogBuffers::from_bytes(contents).unwrap();
+        let log_buffers = LogBuffers::from_bytes(contents).unwrap();
         assert_eq!(log_buffers.term_length(), term_len);
         let terms = log_buffers.duplicate_term_buffers();
         assert_eq!(terms.len(), 3);
         assert_eq!(terms[0].capacity(), term_len);
+    }
+
+    #[test]
+    fn duplicate_term_buffers_share_the_same_underlying_memory() {
+        let term_len = TERM_MIN_LENGTH as usize;
+        let total_len = term_len * 3 + LOG_META_DATA_LENGTH;
+        let mut contents = vec![0u8; total_len];
+
+        let meta_offset = total_len - LOG_META_DATA_LENGTH;
+        let mut meta_slice = contents[meta_offset..].to_vec();
+        let meta_buf = AtomicBuffer::new(&mut meta_slice);
+        set_term_length(&meta_buf, TERM_MIN_LENGTH);
+        set_page_size(&meta_buf, PAGE_MIN_SIZE);
+        contents[meta_offset..].copy_from_slice(&meta_slice);
+
+        let log_buffers = LogBuffers::from_bytes(contents).unwrap();
+
+        // A write through one handle's term-buffer view must be visible through a
+        // freshly-duplicated view from a clone of the same LogBuffers.
+        let writer_terms = log_buffers.duplicate_term_buffers();
+        writer_terms[0].put_i32(0, 0x1234_5678);
+
+        let cloned = log_buffers.clone();
+        let reader_terms = cloned.duplicate_term_buffers();
+        assert_eq!(reader_terms[0].get_i32(0), 0x1234_5678);
+
+        let meta_writer = log_buffers.meta_data_buffer();
+        meta_writer.put_i32(0, 42);
+        let meta_reader = cloned.meta_data_buffer();
+        assert_eq!(meta_reader.get_i32(0), 42);
     }
 }

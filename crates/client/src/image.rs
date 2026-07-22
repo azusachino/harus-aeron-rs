@@ -2,7 +2,7 @@
 
 use crate::error::{AeronError, Result};
 use crate::log_buffers::LogBuffers;
-use crate::logbuffer::{Header, PARTITION_COUNT, TermReader, index_by_position};
+use crate::logbuffer::{Header, TermReader, index_by_position};
 use agrona::AtomicBuffer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -18,8 +18,12 @@ pub struct Image {
     correlation_id: i64,
     source_identity: String,
     subscriber_position: Arc<AtomicI64>,
+    // Kept alive so `term_buffers`' raw-pointer AtomicBuffer views stay valid; both this
+    // Image and any Publication/Subscription over the same log clone the same Arc, so writes
+    // through one are visible through all — see LogBuffers' doc comment.
+    #[allow(dead_code)]
     log_buffers: LogBuffers,
-    term_buffers: Vec<Vec<u8>>,
+    term_buffers: Vec<AtomicBuffer<'static>>,
     is_closed: bool,
 }
 
@@ -31,7 +35,7 @@ impl Image {
         initial_term_id: i32,
         initial_position: i64,
         subscriber_position: Arc<AtomicI64>,
-        mut log_buffers: LogBuffers,
+        log_buffers: LogBuffers,
         source_identity: String,
         correlation_id: i64,
     ) -> Self {
@@ -41,13 +45,7 @@ impl Image {
 
         subscriber_position.store(initial_position, Ordering::Release);
 
-        let term_atomic_bufs = log_buffers.duplicate_term_buffers();
-        let mut term_buffers = Vec::with_capacity(PARTITION_COUNT as usize);
-        for buf in term_atomic_bufs {
-            let mut bytes = vec![0u8; buf.capacity()];
-            buf.get_bytes(0, &mut bytes);
-            term_buffers.push(bytes);
-        }
+        let term_buffers = log_buffers.duplicate_term_buffers();
 
         Self {
             subscription_registration_id,
@@ -147,8 +145,7 @@ impl Image {
         let index = index_by_position(position, self.position_bits_to_shift);
         let term_offset = (position & self.term_length_mask as i64) as usize;
 
-        let term_buf_bytes = &mut self.term_buffers[index];
-        let term_buffer = AtomicBuffer::new(term_buf_bytes);
+        let term_buffer = self.term_buffers[index];
 
         let mut handler_adapter = |buf: &AtomicBuffer, offset: usize, length: i32, hdr: &Header| {
             fragment_handler(buf, offset, length as usize, hdr);
@@ -253,7 +250,7 @@ mod tests {
         let initial_position =
             compute_position(INITIAL_TERM_ID, 0, position_bits_to_shift, INITIAL_TERM_ID);
         let subscriber_pos = Arc::new(AtomicI64::new(initial_position));
-        let mut log_buffers = create_test_log_buffers();
+        let log_buffers = create_test_log_buffers();
 
         let data = [1u8; 36];
         let msg_len = HEADER_LENGTH as usize + data.len();
@@ -283,8 +280,6 @@ mod tests {
             "ipc".to_string(),
             CORRELATION_ID,
         );
-
-        image.term_buffers[0][..aligned_frame_len].copy_from_slice(&frame_bytes);
 
         let mut called = false;
         let read = image.poll(

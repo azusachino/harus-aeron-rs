@@ -25,8 +25,28 @@ pub const TERM_MAX_LENGTH: i32 = 1024 * 1024 * 1024;
 pub const PAGE_MIN_SIZE: i32 = 4 * 1024;
 pub const PAGE_MAX_SIZE: i32 = 1024 * 1024 * 1024;
 
+pub const LOG_MTU_LENGTH_OFFSET: usize = 272;
 pub const LOG_TERM_LENGTH_OFFSET: usize = 276;
 pub const LOG_PAGE_SIZE_OFFSET: usize = 280;
+
+/// Maximum length allowed for a message, mirroring `FrameDescriptor.MAX_MESSAGE_LENGTH`.
+pub const MAX_MESSAGE_LENGTH: i32 = 16 * 1024 * 1024;
+
+/// The MTU length used for the publication associated with this log, in bytes.
+pub fn mtu_length(metadata_buffer: &AtomicBuffer) -> i32 {
+    metadata_buffer.get_i32(LOG_MTU_LENGTH_OFFSET)
+}
+
+/// Set the MTU length used for the publication associated with this log, in bytes.
+pub fn set_mtu_length(metadata_buffer: &AtomicBuffer, mtu_length: i32) {
+    metadata_buffer.put_i32(LOG_MTU_LENGTH_OFFSET, mtu_length);
+}
+
+/// Compute the maximum supported message length for a given term length, mirroring
+/// `FrameDescriptor.computeMaxMessageLength`.
+pub fn compute_max_message_length(term_length: i32) -> i32 {
+    (term_length >> 3).min(MAX_MESSAGE_LENGTH)
+}
 
 pub fn term_length(metadata_buffer: &AtomicBuffer) -> i32 {
     metadata_buffer.get_i32(LOG_TERM_LENGTH_OFFSET)
@@ -748,6 +768,16 @@ pub fn set_frame_term_offset(term_buffer: &AtomicBuffer, term_offset: usize) {
 /// Set term ID field at `term_offset`.
 pub fn set_frame_term_id(term_buffer: &AtomicBuffer, term_offset: usize, term_id: i32) {
     term_buffer.put_i32(term_offset + protocol::DATA_TERM_ID_FIELD_OFFSET, term_id);
+}
+
+/// Set the flags byte of the frame at `term_offset`.
+pub fn set_frame_flags(term_buffer: &AtomicBuffer, term_offset: usize, flags: u8) {
+    term_buffer.put_u8(term_offset + protocol::FLAGS_FIELD_OFFSET, flags);
+}
+
+/// Set the reserved-value field of the frame at `term_offset`.
+pub fn set_frame_reserved_value(term_buffer: &AtomicBuffer, term_offset: usize, value: i64) {
+    term_buffer.put_i64(term_offset + protocol::DATA_RESERVED_VALUE_OFFSET, value);
 }
 
 /// Set frame length at `term_offset` using ordered/release store.
