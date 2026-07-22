@@ -40,3 +40,7 @@ panic = "abort"
 
 [profile.bench]
 inherits = "release"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
