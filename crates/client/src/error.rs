@@ -13,6 +13,12 @@ pub enum AeronError {
     #[error("{0}")]
     IllegalArgument(String),
 
+    #[error("context was concluded more than once")]
+    ConcurrentConclude,
+
+    #[error("{0}")]
+    Configuration(String),
+
     #[error("channel URI error: {0}")]
     ChannelUri(#[from] crate::uri::ChannelUriError),
 

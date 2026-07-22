@@ -12,6 +12,7 @@
 
 pub mod buffer_builder;
 pub mod command;
+pub mod context;
 pub mod counters;
 pub mod driver_proxy;
 pub mod error;
