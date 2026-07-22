@@ -3,7 +3,7 @@
 
 use tutorial_agrona::AtomicBuffer;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub struct HeaderFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
 }
@@ -22,7 +22,7 @@ impl<'a> HeaderFlyweight<'a> {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub struct DataHeaderFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
 }
