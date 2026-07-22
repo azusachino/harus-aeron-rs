@@ -1,0 +1,8 @@
+[submodule "vendor/aeron"]
+	path = vendor/aeron
+	url = https://github.com/aeron-io/aeron.git
+	branch = release/1.50.x
+[submodule "vendor/tokio"]
+	path = vendor/tokio
+	url = https://github.com/tokio-rs/tokio.git
+	branch = master

@@ -1,0 +1,78 @@
+NIX_RUN := $(if $(IN_NIX_SHELL),,nix develop --command )
+AERON_UPSTREAM_REPO ?= https://github.com/aeron-io/aeron.git
+AERON_UPSTREAM_REF ?= release/1.50.x
+AERON_UPSTREAM_DIR ?= vendor/aeron
+TOKIO_UPSTREAM_REPO ?= https://github.com/tokio-rs/tokio.git
+TOKIO_UPSTREAM_REF ?= master
+TOKIO_UPSTREAM_DIR ?= vendor/tokio
+INTEROP_SOAK_MESSAGES ?= 1000
+
+.DEFAULT_GOAL := help
+
+.PHONY: help fmt fmt-check build build-driver test test-unit test-integration lint check clean run \
+       tutorial-check bench stress \
+       setup-upstream-aeron setup-upstream-tokio \
+       interop interop-smoke status
+
+help:  ## Show this help
+	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
+		/^[a-zA-Z0-9_-]+:.*?##/ {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+fmt:  ## Format Rust + config files
+	$(NIX_RUN) cargo fmt --all
+	$(NIX_RUN) prettier --write "**/*.{json,yaml,yml}"
+
+fmt-check:  ## Check formatting without writing
+	$(NIX_RUN) cargo fmt --all -- --check
+	$(NIX_RUN) prettier --check "**/*.{json,yaml,yml}"
+
+build:  ## Build the main workspace
+	$(NIX_RUN) cargo build --workspace
+
+build-driver:  ## Build the driver binary only
+	$(NIX_RUN) cargo build -p aeron-driver --bin aeron-driver
+
+lint:  ## Run clippy across the workspace
+	$(NIX_RUN) cargo clippy --workspace --all-targets -- -D warnings
+
+test:  ## Run all tests
+	$(NIX_RUN) cargo test --workspace
+
+test-unit:  ## Run unit tests only (lib targets)
+	$(NIX_RUN) cargo test --workspace --lib
+
+test-integration:  ## Run integration tests only
+	$(NIX_RUN) cargo test --workspace --test '*'
+
+check: fmt-check lint build test  ## fmt-check + lint + build + test
+
+clean:  ## Remove build artifacts
+	$(NIX_RUN) cargo clean
+
+run:  ## Run the media driver
+	$(NIX_RUN) cargo run -p aeron-driver --bin aeron-driver
+
+tutorial-check:  ## Build the tutorial learner-stub workspace
+	$(NIX_RUN) cargo build --manifest-path tutorial/Cargo.toml --workspace
+
+bench:  ## Run benchmarks (once crates/*/benches exist)
+	$(NIX_RUN) cargo bench --workspace
+
+stress:  ## Run long-running soak scenarios (once test/stress exists)
+	@echo "stress targets not yet implemented — see test/stress/"
+
+setup-upstream-aeron:  ## Shadow-clone upstream Aeron into vendor/aeron
+	git submodule update --init --depth 1 --remote $(AERON_UPSTREAM_DIR)
+
+setup-upstream-tokio:  ## Shadow-clone upstream Tokio into vendor/tokio
+	git submodule update --init --depth 1 --remote $(TOKIO_UPSTREAM_DIR)
+
+interop-smoke:  ## Run the Java<->Rust interop smoke test (not yet implemented)
+	@echo "interop-smoke not yet implemented — see deploy/interop/"
+
+interop:  ## Run the full interop suite (not yet implemented)
+	@echo "interop not yet implemented — see deploy/interop/"
+
+status:  ## Show repo + submodule status
+	@git status --short
+	@git submodule status

@@ -1,0 +1,14 @@
+[package]
+name = "aeron-cluster"
+description = "Cluster: Raft consensus, replicated log, ClusteredService lifecycle — mirrors io.aeron's aeron-cluster module (future phase)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aeron-client.workspace = true
+aeron-archive.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
