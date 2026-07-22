@@ -44,5 +44,20 @@ make check
 - If `vendor/aeron` is missing or stale, refresh it with `make setup-upstream-aeron`.
 - Preferred source of truth for Tokio API checks: local `vendor/tokio` when present.
 - If `vendor/tokio` is missing or stale, refresh it with `make setup-upstream-tokio`.
+- Preferred source of truth for Rust stdlib API checks: local `vendor/rust` when present.
+- If `vendor/rust` is missing or stale, refresh it with `make setup-upstream-rust`.
+
+## Test parity
+
+`0.1.0` ships once near-100% of upstream Aeron's 268 test files have a Rust
+equivalent (see [`docs/plan.md`](docs/plan.md)). Track progress with:
+
+```bash
+make test-parity   # wraps: uv run scripts/upstream_tests.py report
+```
+
+`test/upstream_map.jsonl` is the source of truth for per-file status. Regenerate it
+after pulling new upstream commits with `uv run scripts/upstream_tests.py init`
+(additive only — never overwrites an existing entry's status).
 
 See [`AGENTS.md`](AGENTS.md) for the full architecture and conventions.

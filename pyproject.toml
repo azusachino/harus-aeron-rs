@@ -1,0 +1,7 @@
+[project]
+name = "harus-aeron-rs-scripts"
+version = "0.1.0"
+description = "Orchestration/reporting tooling for harus-aeron-rs (scripts/ use PEP 723 inline deps via `uv run --script`; this project marker just pins the interpreter)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []

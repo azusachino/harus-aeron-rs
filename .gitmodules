@@ -6,3 +6,7 @@
 	path = vendor/tokio
 	url = https://github.com/tokio-rs/tokio.git
 	branch = master
+[submodule "vendor/rust"]
+	path = vendor/rust
+	url = https://github.com/rust-lang/rust.git
+	branch = stable

@@ -5,14 +5,17 @@ AERON_UPSTREAM_DIR ?= vendor/aeron
 TOKIO_UPSTREAM_REPO ?= https://github.com/tokio-rs/tokio.git
 TOKIO_UPSTREAM_REF ?= master
 TOKIO_UPSTREAM_DIR ?= vendor/tokio
+RUST_UPSTREAM_REPO ?= https://github.com/rust-lang/rust.git
+RUST_UPSTREAM_REF ?= stable
+RUST_UPSTREAM_DIR ?= vendor/rust
 INTEROP_SOAK_MESSAGES ?= 1000
 
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check build build-driver test test-unit test-integration lint check clean run \
        tutorial-check bench stress \
-       setup-upstream-aeron setup-upstream-tokio \
-       interop interop-smoke status
+       setup-upstream-aeron setup-upstream-tokio setup-upstream-rust \
+       interop interop-smoke status test-parity
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -66,6 +69,12 @@ setup-upstream-aeron:  ## Shadow-clone upstream Aeron into vendor/aeron
 
 setup-upstream-tokio:  ## Shadow-clone upstream Tokio into vendor/tokio
 	git submodule update --init --depth 1 --remote $(TOKIO_UPSTREAM_DIR)
+
+setup-upstream-rust:  ## Shadow-clone upstream rust-lang/rust into vendor/rust (stdlib API reference)
+	git submodule update --init --depth 1 --remote $(RUST_UPSTREAM_DIR)
+
+test-parity:  ## Report Rust test-file parity against vendor/aeron's upstream test suite
+	uv run scripts/upstream_tests.py
 
 interop-smoke:  ## Run the Java<->Rust interop smoke test (not yet implemented)
 	@echo "interop-smoke not yet implemented — see deploy/interop/"

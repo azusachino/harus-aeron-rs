@@ -28,6 +28,13 @@ Re-run the survey before trusting these numbers as current:
 find vendor/aeron/aeron-{client,driver,archive,cluster,system-tests}/src/test -name '*.java' | wc -l
 ```
 
+Or use the tracked, per-file version: `make test-parity` (wraps
+`scripts/upstream_tests.py report`, reading `test/upstream_map.jsonl`). Run
+`scripts/upstream_tests.py init` after `make setup-upstream-aeron` picks up new
+upstream commits — it adds newly-appeared upstream test files as `todo` entries
+without touching existing status. Flip an entry's `status` to `done` (with
+`rust_equivalent` pointing at the ported test) or `skip` (with a reason) as work lands.
+
 "Near-100%" means: every upstream test file has a Rust equivalent covering the same
 behavior, and it passes. A handful of upstream tests that are Java-specific (JMX,
 annotation-processor checks, JUnit extension plumbing) are expected exceptions —
@@ -40,8 +47,10 @@ GitHub milestones with one issue per exit-criteria bullet (see "Workflow" below)
 
 ### v0.0.1 — Foundations (current)
 Cargo workspace mirroring upstream's module graph, Nix/Make tooling, `vendor/aeron` +
-`vendor/tokio` pinned as submodules, `rust-toolchain.toml` pinned, this roadmap.
-No subsystem implemented.
+`vendor/tokio` + `vendor/rust` (stdlib API reference) pinned as submodules,
+`rust-toolchain.toml` pinned, `uv`-managed `scripts/` (see `scripts/upstream_tests.py`,
+which generated `test/upstream_map.jsonl` — the 268-entry parity tracker this roadmap
+is gated on), this roadmap. No subsystem implemented.
 
 ### v0.0.2 — agrona core
 Ring buffer (SPSC/MPSC), broadcast transmitter/receiver, atomic buffer wrapper, idle

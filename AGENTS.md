@@ -10,7 +10,9 @@ Sibling project: `harus-aeron-zig` (same protocol, different language) — see
 - **Language**: Rust (stable, edition 2024)
 - **Async runtime**: tokio, used for UDP transport in the driver's duty-cycle agents
 - **Build**: Cargo workspace via Makefile
-- **Dev tooling**: Nix devShell (`nix develop`)
+- **Dev tooling**: Nix devShell (`nix develop`); `scripts/` are `uv`-run Python (PEP 723
+  inline deps, `#!/usr/bin/env -S uv run --script`) for orchestration/reporting only —
+  never in the Rust build/test path
 - **Components** (crate boundaries mirror upstream `aeron-io/aeron`'s real Gradle
   modules — see `vendor/aeron/build.gradle` — not the zig repo's file layout):
   - `crates/agrona` — generic concurrent primitives (ring buffer, broadcast, atomic
@@ -68,6 +70,8 @@ make tutorial-check   # build tutorial/ learner-stub workspace
 - `crates/driver/src/lib.rs` — DriverConductor equivalent (command/control core)
 - `docs/plan.md` — phased implementation roadmap
 - `docs/guides/architecture.md` — system architecture
+- `scripts/upstream_tests.py` — test-parity tracker/reporter (`make test-parity`);
+  `test/upstream_map.jsonl` is the per-upstream-test-file status ledger it reads/writes
 
 ## Tutorial Layer
 

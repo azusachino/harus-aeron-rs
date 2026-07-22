@@ -20,6 +20,7 @@
             rustfmt
             rust-analyzer
             prettier
+            uv # orchestration scripts (scripts/*.py, PEP 723 inline deps)
             podman-compose # local CI interop smoke, once deploy/interop exists
           ];
 
