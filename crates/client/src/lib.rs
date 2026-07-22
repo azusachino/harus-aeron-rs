@@ -7,21 +7,24 @@
 //!
 //! `protocol` (`HeaderFlyweight`/`ErrorFlyweight`/`DataHeaderFlyweight`) and `logbuffer`
 //! (`LogBufferDescriptor` layout, `Header`/`HeaderWriter`, term scan/read/rebuild/unblock
-//! utilities) are implemented as of v0.0.3. `Publication`/`Subscription`/`ClientConductor`
-//! at the crate root are not yet implemented — see `docs/plan.md`'s v0.0.4 milestone.
+//! utilities), plus the initial Publication/Subscription/ClientConductor and context APIs
+//! from the v0.0.4 client milestone.
 
 pub mod buffer_builder;
 pub mod command;
+pub mod conductor;
 pub mod context;
 pub mod counters;
 pub mod driver_proxy;
 pub mod error;
+pub mod exceptions;
 pub mod fragment_assembler;
 pub mod image;
 pub mod log_buffers;
 pub mod logbuffer;
 pub mod protocol;
 pub mod publication;
+pub mod security;
 pub mod subscription;
 pub mod timestamp_util;
 pub mod uri;
