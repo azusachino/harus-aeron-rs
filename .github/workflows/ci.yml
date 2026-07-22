@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  IN_NIX_SHELL: "1" # skip the Makefile's `nix develop --command` wrapper; tools installed directly below
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install prettier
+        run: npm install -g prettier
+
+      - run: make check
+
+      - name: Build tutorial learner-stub workspace
+        run: make tutorial-check
+
+      - name: Test-parity report (informational)
+        run: make test-parity

@@ -1,0 +1,21 @@
+[package]
+name = "agrona"
+description = "Generic high-performance concurrent primitives: ring buffer, broadcast, atomic buffer, idle strategies, counters — mirrors org.agrona, a dependency of Aeron rather than part of it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+loom.workspace = true
+proptest.workspace = true
+criterion.workspace = true
+
+# Uncomment once crates/agrona has a real ring buffer/broadcast implementation to bench:
+# [[bench]]
+# name = "ring_buffer"
+# harness = false

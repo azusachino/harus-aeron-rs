@@ -1,0 +1,12 @@
+[package]
+name = "aeron-archive"
+description = "Archive: recording, replay, catalog persistence — mirrors io.aeron's aeron-archive module (future phase)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aeron-client.workspace = true
+thiserror.workspace = true

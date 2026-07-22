@@ -1,0 +1,16 @@
+[package]
+name = "aeron-client"
+description = "Aeron client: wire protocol frame codecs, log buffer, Publication/Subscription API — mirrors io.aeron's aeron-client module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agrona.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true # frame/logbuffer encode-decode roundtrip tests

@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/agrona",
+  "crates/client",
+  "crates/driver",
+  "crates/archive",
+  "crates/cluster",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/azusachino/harus-aeron-rs"
+rust-version = "1.85"
+
+[workspace.dependencies]
+agrona = { path = "crates/agrona" }
+aeron-client = { path = "crates/client" }
+aeron-driver = { path = "crates/driver" }
+aeron-archive = { path = "crates/archive" }
+aeron-cluster = { path = "crates/cluster" }
+
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal"] }
+bytes = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# test/quality tooling — see AGENTS.md "Quality Standards"
+loom = "0.7"       # exhaustive concurrency-interleaving tests for lock-free structures
+proptest = "1.11"  # property-based tests for codec/buffer roundtrips
+criterion = "0.7"  # benchmark harness (stable-Rust `cargo bench` needs this; built-in bench is nightly-only)
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"

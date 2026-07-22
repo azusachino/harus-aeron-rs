@@ -1,0 +1,20 @@
+[package]
+name = "aeron-driver"
+description = "MediaDriver: Conductor, Sender, Receiver agents, UDP transport — mirrors io.aeron's aeron-driver module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "aeron-driver"
+path = "src/bin/aeron-driver.rs"
+
+[dependencies]
+agrona.workspace = true
+aeron-client.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
