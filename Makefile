@@ -2,19 +2,18 @@ NIX_RUN := $(if $(IN_NIX_SHELL),,nix develop --command )
 AERON_UPSTREAM_REPO ?= https://github.com/aeron-io/aeron.git
 AERON_UPSTREAM_REF ?= release/1.50.x
 AERON_UPSTREAM_DIR ?= vendor/aeron
+# Pinned to the exact tag matching workspace.dependencies.tokio in Cargo.toml — not a
+# tracked branch, since "master" is unreleased/bleeding-edge. Bump both together.
 TOKIO_UPSTREAM_REPO ?= https://github.com/tokio-rs/tokio.git
-TOKIO_UPSTREAM_REF ?= master
+TOKIO_UPSTREAM_REF ?= tokio-1.53.1
 TOKIO_UPSTREAM_DIR ?= vendor/tokio
-RUST_UPSTREAM_REPO ?= https://github.com/rust-lang/rust.git
-RUST_UPSTREAM_REF ?= stable
-RUST_UPSTREAM_DIR ?= vendor/rust
 INTEROP_SOAK_MESSAGES ?= 1000
 
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check build build-driver test test-unit test-integration test-py lint check clean run \
-       tutorial-check bench stress \
-       setup-upstream-aeron setup-upstream-tokio setup-upstream-rust \
+       tutorial-check bench stress miri \
+       setup-upstream-aeron setup-upstream-tokio \
        interop interop-smoke status test-parity
 
 help:  ## Show this help
@@ -74,11 +73,12 @@ stress:  ## Run long-running soak scenarios (once test/stress exists)
 setup-upstream-aeron:  ## Shadow-clone upstream Aeron into vendor/aeron
 	git submodule update --init --depth 1 --remote $(AERON_UPSTREAM_DIR)
 
-setup-upstream-tokio:  ## Shadow-clone upstream Tokio into vendor/tokio
-	git submodule update --init --depth 1 --remote $(TOKIO_UPSTREAM_DIR)
+setup-upstream-tokio:  ## Fetch and pin vendor/tokio to TOKIO_UPSTREAM_REF (bump together with the tokio Cargo.toml version)
+	git -C $(TOKIO_UPSTREAM_DIR) fetch origin tag $(TOKIO_UPSTREAM_REF) --no-tags
+	git -C $(TOKIO_UPSTREAM_DIR) checkout $(TOKIO_UPSTREAM_REF)
 
-setup-upstream-rust:  ## Shadow-clone upstream rust-lang/rust into vendor/rust (stdlib API reference)
-	git submodule update --init --depth 1 --remote $(RUST_UPSTREAM_DIR)
+miri:  ## Run Miri UB checks on crates with unsafe code (requires: rustup +nightly component add miri)
+	cargo +nightly miri test -p agrona
 
 test-parity:  ## Report Rust test-file parity against vendor/aeron's upstream test suite
 	uv run scripts/upstream_tests.py

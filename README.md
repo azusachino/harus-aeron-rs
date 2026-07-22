@@ -44,8 +44,11 @@ make check
 - If `vendor/aeron` is missing or stale, refresh it with `make setup-upstream-aeron`.
 - Preferred source of truth for Tokio API checks: local `vendor/tokio` when present.
 - If `vendor/tokio` is missing or stale, refresh it with `make setup-upstream-tokio`.
-- Preferred source of truth for Rust stdlib API checks: local `vendor/rust` when present.
-- If `vendor/rust` is missing or stale, refresh it with `make setup-upstream-rust`.
+- For Rust stdlib API/source checks, use the `rust-src` rustup component (pinned by
+  `rust-toolchain.toml`, so it always matches the active toolchain exactly) rather than
+  a vendored clone: `rustup component add rust-src` (already listed in
+  `rust-toolchain.toml`'s `components`), then browse
+  `$(rustc --print sysroot)/lib/rustlib/src/rust/library`.
 
 ## Test parity
 

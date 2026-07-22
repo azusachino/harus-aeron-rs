@@ -92,8 +92,20 @@ This repo is also a structured course, mirroring `harus-aeron-zig`. Two parallel
 
 ## Quality Standards
 
-- `make check` must pass before every commit.
+- `make check` must pass before every commit; CI (`.github/workflows/ci.yml`) enforces
+  it on every push/PR.
 - All frame types must have `const _: () = assert!(size_of::<T>() == N);` size checks
   once implemented, matching the spec.
 - No `unwrap()`/`expect()`/`panic!()` in receiver/conductor paths.
 - Unit tests for every codec function; integration tests for pub/sub round-trip.
+- `proptest` for codec/buffer roundtrip properties (`crates/client`, `crates/agrona`
+  dev-dependency).
+- `loom` for lock-free structures in `crates/agrona` — see that crate's `lib.rs` doc
+  comment for the `#[cfg(loom)]` convention. Exhaustive interleaving checks matter here
+  specifically because `harus-aeron-zig`'s headline unresolved bug was a concurrency
+  race (see `docs/plan.md`); don't skip this for ring buffer/broadcast code.
+- `cargo +nightly miri test -p agrona` (`make miri`) once `crates/agrona` has real
+  `unsafe` — requires a nightly toolchain + `miri` component, separate from the pinned
+  stable `rust-toolchain.toml`.
+- `criterion` (`make bench`) for anything perf-sensitive; add `[[bench]]` targets as
+  real implementations land (see the commented-out stanza in `crates/agrona/Cargo.toml`).

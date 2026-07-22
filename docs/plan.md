@@ -47,8 +47,9 @@ GitHub milestones with one issue per exit-criteria bullet (see "Workflow" below)
 
 ### v0.0.1 — Foundations (current)
 Cargo workspace mirroring upstream's module graph, Nix/Make tooling, `vendor/aeron` +
-`vendor/tokio` + `vendor/rust` (stdlib API reference) pinned as submodules,
-`rust-toolchain.toml` pinned, `uv`-managed `scripts/` (see `scripts/upstream_tests.py`,
+`vendor/tokio` pinned as submodules, `rust-toolchain.toml` pinned (including the
+`rust-src` component for stdlib API/source checks — no need to vendor rust-lang/rust
+itself), `uv`-managed `scripts/` (see `scripts/upstream_tests.py`,
 which generated `test/upstream_map.jsonl` — the 268-entry parity tracker this roadmap
 is gated on), this roadmap. No subsystem implemented.
 
