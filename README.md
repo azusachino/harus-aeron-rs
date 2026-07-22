@@ -7,11 +7,16 @@ Aeron reimplemented in Rust — wire-compatible with the real Aeron UDP protocol
 
 ## Project Status
 
-Skeleton only. Cargo workspace mirroring upstream Aeron's actual module boundaries:
-`agrona` (generic concurrent primitives, a dependency of Aeron rather than part of it),
+Cargo workspace mirroring upstream Aeron's actual module boundaries: `agrona`
+(generic concurrent primitives, a dependency of Aeron rather than part of it),
 `aeron-client` (protocol + logbuffer + Publication/Subscription), `aeron-driver`
 (Conductor/Sender/Receiver + UDP transport, also home to the `aeron-driver` binary),
-`aeron-archive`, and `aeron-cluster`. Nothing is implemented yet.
+`aeron-archive`, and `aeron-cluster`.
+
+`agrona` (v0.0.2) is implemented: ring buffers (SPSC/MPSC), broadcast
+transmitter/receiver, atomic buffer, idle strategies, counters manager. `aeron-client`,
+`aeron-driver`, `aeron-archive`, `aeron-cluster` are still skeletons — see
+[`docs/plan.md`](docs/plan.md) for the milestone roadmap.
 
 ## Getting Started
 
