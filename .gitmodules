@@ -5,3 +5,4 @@
 [submodule "vendor/tokio"]
 	path = vendor/tokio
 	url = https://github.com/tokio-rs/tokio.git
+	branch = tokio-1.53.1
