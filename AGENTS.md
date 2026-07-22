@@ -11,8 +11,12 @@ Sibling project: `harus-aeron-zig` (same protocol, different language) — see
 - **Async runtime**: tokio, used for UDP transport in the driver's duty-cycle agents
 - **Build**: Cargo workspace via Makefile
 - **Dev tooling**: Nix devShell (`nix develop`); `scripts/` are `uv`-run Python (PEP 723
-  inline deps, `#!/usr/bin/env -S uv run --script`) for orchestration/reporting only —
-  never in the Rust build/test path
+  inline deps, `#!/usr/bin/env -S uv run --script`) for orchestration/reporting that
+  doesn't belong in Cargo — no reimplementing what `cargo`/`clippy` already do. The
+  Makefile stays a thin dispatcher: prefer delegating logic into a `uv`-run script
+  over growing Makefile recipes, same as `test-parity` -> `scripts/upstream_tests.py`.
+  `pytest`/`ruff` (via `uv run --group dev`) cover `scripts/` itself and are wired into
+  `make fmt`/`make fmt-check`/`make test`.
 - **Components** (crate boundaries mirror upstream `aeron-io/aeron`'s real Gradle
   modules — see `vendor/aeron/build.gradle` — not the zig repo's file layout):
   - `crates/agrona` — generic concurrent primitives (ring buffer, broadcast, atomic

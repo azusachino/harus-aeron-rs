@@ -15,6 +15,9 @@ target
 
 # uv / Python (scripts/ orchestration tooling)
 .venv
+__pycache__/
+.pytest_cache/
+.ruff_cache/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

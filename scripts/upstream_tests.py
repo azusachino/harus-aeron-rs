@@ -34,8 +34,7 @@ STATUSES = ("todo", "in-progress", "done", "skip")
 
 def upstream_tests() -> dict[str, list[Path]]:
     return {
-        module: sorted((UPSTREAM / module / "src" / "test").rglob("*.java"))
-        for module in MODULES
+        module: sorted((UPSTREAM / module / "src" / "test").rglob("*.java")) for module in MODULES
     }
 
 
@@ -82,7 +81,8 @@ def cmd_init() -> int:
 def cmd_report() -> int:
     entries = load_map()
     if not entries:
-        print(f"{MAP.relative_to(ROOT)} is empty or missing — run `scripts/upstream_tests.py init` first")
+        rel = MAP.relative_to(ROOT)
+        print(f"{rel} is empty or missing — run `scripts/upstream_tests.py init` first")
         return 1
 
     by_layer: dict[str, Counter[str]] = {}
@@ -102,7 +102,9 @@ def cmd_report() -> int:
         grand_total.update(counts)
     total_all = sum(grand_total.values())
     print("-" * len(header))
-    footer = f"{'total':14}" + "".join(f"{grand_total[s]:>13}" for s in STATUSES) + f"{total_all:>8}"
+    footer = (
+        f"{'total':14}" + "".join(f"{grand_total[s]:>13}" for s in STATUSES) + f"{total_all:>8}"
+    )
     print(footer)
 
     done = grand_total["done"] + grand_total["skip"]
