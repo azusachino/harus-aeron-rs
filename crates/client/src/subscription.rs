@@ -3,6 +3,10 @@
 use crate::image::Image;
 use crate::logbuffer::Header;
 use agrona::AtomicBuffer;
+use std::sync::Arc;
+
+pub type AvailableImageHandler = Arc<dyn Fn(&Image) + Send + Sync>;
+pub type UnavailableImageHandler = Arc<dyn Fn(&Image) + Send + Sync>;
 
 /// Subscriber for receiving messages over an Aeron channel and stream.
 pub struct Subscription {
@@ -11,6 +15,9 @@ pub struct Subscription {
     channel: String,
     images: Vec<Image>,
     round_robin_index: usize,
+    channel_status_counter_id: Option<i32>,
+    available_image_handler: Option<AvailableImageHandler>,
+    unavailable_image_handler: Option<UnavailableImageHandler>,
     is_closed: bool,
 }
 
@@ -22,6 +29,9 @@ impl Subscription {
             channel,
             images: Vec::new(),
             round_robin_index: 0,
+            channel_status_counter_id: None,
+            available_image_handler: None,
+            unavailable_image_handler: None,
             is_closed: false,
         }
     }
@@ -36,6 +46,22 @@ impl Subscription {
 
     pub fn channel(&self) -> &str {
         &self.channel
+    }
+
+    pub fn channel_status_counter_id(&self) -> Option<i32> {
+        self.channel_status_counter_id
+    }
+
+    pub fn set_channel_status_counter_id(&mut self, counter_id: i32) {
+        self.channel_status_counter_id = Some(counter_id);
+    }
+
+    pub fn set_available_image_handler(&mut self, handler: AvailableImageHandler) {
+        self.available_image_handler = Some(handler);
+    }
+
+    pub fn set_unavailable_image_handler(&mut self, handler: UnavailableImageHandler) {
+        self.unavailable_image_handler = Some(handler);
     }
 
     pub fn is_closed(&self) -> bool {
@@ -89,6 +115,11 @@ impl Subscription {
 
     pub fn add_image(&mut self, image: Image) {
         self.images.push(image);
+        if let Some(handler) = &self.available_image_handler {
+            if let Some(image) = self.images.last() {
+                handler(image);
+            }
+        }
     }
 
     pub fn remove_image(&mut self, correlation_id: i64) -> Option<Image> {
@@ -99,6 +130,9 @@ impl Subscription {
         {
             let mut img = self.images.remove(pos);
             img.close();
+            if let Some(handler) = &self.unavailable_image_handler {
+                handler(&img);
+            }
             Some(img)
         } else {
             None

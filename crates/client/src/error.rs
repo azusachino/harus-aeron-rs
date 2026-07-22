@@ -7,6 +7,16 @@ pub enum AeronError {
     #[error("failed to write command to driver: {0}")]
     CommandWriteFailed(String),
 
+    #[error("driver error for correlation {correlation_id}: {message} (code {code})")]
+    DriverResponse {
+        correlation_id: i64,
+        code: i32,
+        message: String,
+    },
+
+    #[error("media driver timed out client {0}")]
+    ClientTimeout(i64),
+
     #[error("{0}")]
     IllegalState(String),
 

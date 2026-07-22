@@ -15,6 +15,7 @@ pub mod command;
 pub mod conductor;
 pub mod context;
 pub mod counters;
+pub mod driver_events;
 pub mod driver_proxy;
 pub mod error;
 pub mod exceptions;

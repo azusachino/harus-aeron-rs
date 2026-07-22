@@ -1,26 +1,71 @@
-//! Client-side command lifecycle coordinator.
+//! Client-side resource lifecycle coordinator.
+//!
+//! Commands are submitted through [`DriverProxy`], while driver responses are consumed from an
+//! Agrona broadcast buffer and reconciled into ready publications, subscriptions, and images.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::sync::{Arc, atomic::AtomicI64};
 
+use agrona::{AtomicBuffer, BroadcastReceiver};
+
+use crate::driver_events::{self, DriverEvent};
 use crate::driver_proxy::DriverProxy;
 use crate::error::{AeronError, Result};
+use crate::image::Image;
+use crate::log_buffers::LogBuffers;
+use crate::logbuffer::initial_term_id;
+use crate::publication::ConcurrentPublication;
+use crate::subscription::Subscription;
 
-/// Tracks client registrations and forwards their lifecycle commands to the driver.
+struct PendingPublication {
+    channel: String,
+}
+
+struct PendingSubscription {
+    channel: String,
+    stream_id: i32,
+}
+
+/// Coordinates the asynchronous command and response lifecycle of an Aeron client.
 pub struct ClientConductor<'a> {
     driver_proxy: DriverProxy<'a>,
-    publication_registrations: HashSet<i64>,
-    subscription_registrations: HashSet<i64>,
+    event_receiver: Option<BroadcastReceiver<'a>>,
+    pending_publications: HashMap<i64, PendingPublication>,
+    pending_subscriptions: HashMap<i64, PendingSubscription>,
+    publications: HashMap<i64, ConcurrentPublication>,
+    subscriptions: HashMap<i64, Subscription>,
+    counter_values: HashMap<i32, Arc<AtomicI64>>,
+    log_buffers: HashMap<String, LogBuffers>,
     is_closed: bool,
+    timed_out: bool,
 }
 
 impl<'a> ClientConductor<'a> {
+    /// Construct a conductor without a response buffer. `on_*` methods can still be used by a
+    /// driver integration or test harness to deliver decoded events directly.
     pub fn new(driver_proxy: DriverProxy<'a>) -> Self {
         Self {
             driver_proxy,
-            publication_registrations: HashSet::new(),
-            subscription_registrations: HashSet::new(),
+            event_receiver: None,
+            pending_publications: HashMap::new(),
+            pending_subscriptions: HashMap::new(),
+            publications: HashMap::new(),
+            subscriptions: HashMap::new(),
+            counter_values: HashMap::new(),
+            log_buffers: HashMap::new(),
             is_closed: false,
+            timed_out: false,
         }
+    }
+
+    /// Construct a conductor connected to the media driver's broadcast event buffer.
+    pub fn with_event_buffer(
+        driver_proxy: DriverProxy<'a>,
+        to_client_buffer: AtomicBuffer<'a>,
+    ) -> Result<Self> {
+        let mut conductor = Self::new(driver_proxy);
+        conductor.event_receiver = Some(BroadcastReceiver::new(to_client_buffer)?);
+        Ok(conductor)
     }
 
     pub fn driver_proxy(&self) -> &DriverProxy<'a> {
@@ -31,70 +76,392 @@ impl<'a> ClientConductor<'a> {
         self.is_closed
     }
 
+    pub fn timed_out(&self) -> bool {
+        self.timed_out
+    }
+
+    /// Register a shared counter value buffer entry referenced by a driver response.
+    pub fn register_counter(&mut self, counter_id: i32, value: Arc<AtomicI64>) {
+        self.counter_values.insert(counter_id, value);
+    }
+
+    /// Register an already-open log buffer by the name used in a driver event. This is useful
+    /// for embedded drivers; normal clients fall back to opening the event's file path.
+    pub fn register_log_buffers(&mut self, name: impl Into<String>, buffers: LogBuffers) {
+        self.log_buffers.insert(name.into(), buffers);
+    }
+
+    /// Drain all currently available driver events.
+    pub fn service(&mut self) -> Result<usize> {
+        let mut events = Vec::new();
+        if let Some(receiver) = &mut self.event_receiver {
+            loop {
+                let mut decoded = None;
+                let received = receiver.receive_next(|message_type, buffer, offset, length| {
+                    decoded = Some(driver_events::decode(message_type, buffer, offset, length));
+                })?;
+                if !received {
+                    break;
+                }
+                events.push(decoded.ok_or_else(|| {
+                    AeronError::IllegalState(
+                        "driver event receiver did not provide a message".into(),
+                    )
+                })??);
+            }
+        }
+
+        let count = events.len();
+        for event in events {
+            self.on_event(event)?;
+        }
+        Ok(count)
+    }
+
+    pub fn on_event(&mut self, event: DriverEvent) -> Result<()> {
+        match event {
+            DriverEvent::PublicationReady {
+                correlation_id,
+                registration_id,
+                session_id,
+                stream_id,
+                publication_limit_counter_id,
+                channel_status_counter_id,
+                log_file_name,
+            } => self.on_new_publication(
+                correlation_id,
+                registration_id,
+                session_id,
+                stream_id,
+                publication_limit_counter_id,
+                channel_status_counter_id,
+                &log_file_name,
+            ),
+            DriverEvent::SubscriptionReady {
+                correlation_id,
+                channel_status_counter_id,
+            } => self.on_new_subscription(correlation_id, channel_status_counter_id),
+            DriverEvent::AvailableImage {
+                correlation_id,
+                session_id,
+                stream_id,
+                subscription_registration_id,
+                subscriber_position_id,
+                log_file_name,
+                source_identity,
+            } => self.on_available_image(
+                correlation_id,
+                session_id,
+                stream_id,
+                subscription_registration_id,
+                subscriber_position_id,
+                &log_file_name,
+                &source_identity,
+            ),
+            DriverEvent::UnavailableImage {
+                correlation_id,
+                subscription_registration_id,
+            } => self.on_unavailable_image(correlation_id, subscription_registration_id),
+            DriverEvent::OperationSucceeded { .. } => Ok(()),
+            DriverEvent::Error {
+                correlation_id,
+                code,
+                message,
+            } => self.on_error(correlation_id, code, message),
+            DriverEvent::ClientTimeout { client_id } => self.on_client_timeout(client_id),
+        }
+    }
+
     pub fn add_publication(&mut self, channel: &str, stream_id: i32) -> Result<i64> {
         self.ensure_open()?;
-        let registration_id = self.driver_proxy.add_publication(channel, stream_id)?;
-        self.publication_registrations.insert(registration_id);
-        Ok(registration_id)
+        let correlation_id = self.driver_proxy.add_publication(channel, stream_id)?;
+        self.pending_publications.insert(
+            correlation_id,
+            PendingPublication {
+                channel: channel.into(),
+            },
+        );
+        Ok(correlation_id)
     }
 
     pub fn add_subscription(&mut self, channel: &str, stream_id: i32) -> Result<i64> {
         self.ensure_open()?;
-        let registration_id = self.driver_proxy.add_subscription(channel, stream_id)?;
-        self.subscription_registrations.insert(registration_id);
-        Ok(registration_id)
+        let correlation_id = self.driver_proxy.add_subscription(channel, stream_id)?;
+        self.pending_subscriptions.insert(
+            correlation_id,
+            PendingSubscription {
+                channel: channel.into(),
+                stream_id,
+            },
+        );
+        Ok(correlation_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_new_publication(
+        &mut self,
+        correlation_id: i64,
+        registration_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        publication_limit_counter_id: i32,
+        _channel_status_counter_id: i32,
+        log_file_name: &str,
+    ) -> Result<()> {
+        let pending = self
+            .pending_publications
+            .remove(&correlation_id)
+            .ok_or_else(|| {
+                AeronError::IllegalState(format!(
+                    "unknown publication correlation {correlation_id}"
+                ))
+            })?;
+        let buffers = self.load_log_buffers(log_file_name)?;
+        let initial_term_id = initial_term_id(&buffers.meta_data_buffer());
+        let publication_limit = self
+            .counter_values
+            .get(&publication_limit_counter_id)
+            .cloned()
+            .ok_or_else(|| {
+                AeronError::IllegalState(format!(
+                    "missing publication limit counter {publication_limit_counter_id}"
+                ))
+            })?;
+        let publication = ConcurrentPublication::new(
+            pending.channel,
+            stream_id,
+            session_id,
+            initial_term_id,
+            registration_id,
+            correlation_id,
+            publication_limit,
+            buffers,
+        );
+        self.publications.insert(registration_id, publication);
+        Ok(())
+    }
+
+    pub fn on_new_subscription(
+        &mut self,
+        correlation_id: i64,
+        channel_status_counter_id: i32,
+    ) -> Result<()> {
+        let pending = self
+            .pending_subscriptions
+            .remove(&correlation_id)
+            .ok_or_else(|| {
+                AeronError::IllegalState(format!(
+                    "unknown subscription correlation {correlation_id}"
+                ))
+            })?;
+        let mut subscription =
+            Subscription::new(correlation_id, pending.stream_id, pending.channel);
+        subscription.set_channel_status_counter_id(channel_status_counter_id);
+        self.subscriptions.insert(correlation_id, subscription);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_available_image(
+        &mut self,
+        correlation_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        subscription_registration_id: i64,
+        subscriber_position_id: i32,
+        log_file_name: &str,
+        source_identity: &str,
+    ) -> Result<()> {
+        if !self
+            .subscriptions
+            .contains_key(&subscription_registration_id)
+        {
+            return Ok(());
+        }
+        let buffers = self.load_log_buffers(log_file_name)?;
+        let position = self
+            .counter_values
+            .get(&subscriber_position_id)
+            .cloned()
+            .ok_or_else(|| {
+                AeronError::IllegalState(format!(
+                    "missing subscriber position counter {subscriber_position_id}"
+                ))
+            })?;
+        let initial_term_id = initial_term_id(&buffers.meta_data_buffer());
+        let image = Image::new(
+            subscription_registration_id,
+            session_id,
+            initial_term_id,
+            0,
+            position,
+            buffers,
+            source_identity.into(),
+            correlation_id,
+        );
+        if let Some(subscription) = self.subscriptions.get_mut(&subscription_registration_id) {
+            if subscription.stream_id() != stream_id {
+                return Err(AeronError::IllegalState(format!(
+                    "image stream {stream_id} does not match subscription stream {}",
+                    subscription.stream_id()
+                )));
+            }
+            subscription.add_image(image);
+        }
+        Ok(())
+    }
+
+    pub fn on_unavailable_image(
+        &mut self,
+        correlation_id: i64,
+        subscription_registration_id: i64,
+    ) -> Result<()> {
+        if let Some(subscription) = self.subscriptions.get_mut(&subscription_registration_id) {
+            subscription.remove_image(correlation_id);
+        }
+        Ok(())
+    }
+
+    pub fn on_error(&mut self, correlation_id: i64, code: i32, message: String) -> Result<()> {
+        self.pending_publications.remove(&correlation_id);
+        self.pending_subscriptions.remove(&correlation_id);
+        if let Some(mut subscription) = self.subscriptions.remove(&correlation_id) {
+            subscription.close();
+        }
+        let publication_id = self
+            .publications
+            .iter()
+            .find(|(_, publication)| publication.original_registration_id() == correlation_id)
+            .map(|(registration_id, _)| *registration_id);
+        if let Some(publication_id) = publication_id {
+            if let Some(mut publication) = self.publications.remove(&publication_id) {
+                publication.close();
+            }
+        }
+        Err(AeronError::DriverResponse {
+            correlation_id,
+            code,
+            message,
+        })
+    }
+
+    pub fn on_client_timeout(&mut self, client_id: i64) -> Result<()> {
+        if client_id != self.driver_proxy.client_id() {
+            return Ok(());
+        }
+        self.timed_out = true;
+        self.close_resources();
+        self.is_closed = true;
+        Err(AeronError::ClientTimeout(client_id))
+    }
+
+    pub fn publication(&self, registration_id: i64) -> Option<&ConcurrentPublication> {
+        self.publications.get(&registration_id)
+    }
+
+    pub fn subscription(&self, registration_id: i64) -> Option<&Subscription> {
+        self.subscriptions.get(&registration_id)
+    }
+
+    pub fn subscription_mut(&mut self, registration_id: i64) -> Option<&mut Subscription> {
+        self.subscriptions.get_mut(&registration_id)
     }
 
     pub fn remove_publication(&mut self, registration_id: i64) -> Result<bool> {
         self.ensure_open()?;
-        if self.publication_registrations.remove(&registration_id) {
+        if let Some(mut publication) = self.publications.remove(&registration_id) {
+            publication.close();
             self.driver_proxy
                 .remove_publication(registration_id, false)?;
-            Ok(true)
-        } else {
-            Ok(false)
+            return Ok(true);
         }
+        if self.pending_publications.remove(&registration_id).is_some() {
+            self.driver_proxy
+                .remove_publication(registration_id, false)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub fn remove_subscription(&mut self, registration_id: i64) -> Result<bool> {
         self.ensure_open()?;
-        if self.subscription_registrations.remove(&registration_id) {
+        if let Some(mut subscription) = self.subscriptions.remove(&registration_id) {
+            subscription.close();
             self.driver_proxy.remove_subscription(registration_id)?;
-            Ok(true)
-        } else {
-            Ok(false)
+            return Ok(true);
         }
+        if self
+            .pending_subscriptions
+            .remove(&registration_id)
+            .is_some()
+        {
+            self.driver_proxy.remove_subscription(registration_id)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub fn publication_count(&self) -> usize {
-        self.publication_registrations.len()
+        self.publications.len() + self.pending_publications.len()
     }
 
     pub fn subscription_count(&self) -> usize {
-        self.subscription_registrations.len()
+        self.subscriptions.len() + self.pending_subscriptions.len()
     }
 
     pub fn close(&mut self) -> Result<()> {
         if self.is_closed {
             return Ok(());
         }
-
-        for registration_id in self.publication_registrations.drain() {
+        for registration_id in self
+            .publications
+            .keys()
+            .copied()
+            .chain(self.pending_publications.keys().copied())
+            .collect::<Vec<_>>()
+        {
             self.driver_proxy
                 .remove_publication(registration_id, false)?;
         }
-        for registration_id in self.subscription_registrations.drain() {
+        for registration_id in self
+            .subscriptions
+            .keys()
+            .copied()
+            .chain(self.pending_subscriptions.keys().copied())
+            .collect::<Vec<_>>()
+        {
             self.driver_proxy.remove_subscription(registration_id)?;
         }
+        self.close_resources();
+        self.driver_proxy.client_close()?;
         self.is_closed = true;
         Ok(())
     }
 
+    fn close_resources(&mut self) {
+        for publication in self.publications.values_mut() {
+            publication.close();
+        }
+        for subscription in self.subscriptions.values_mut() {
+            subscription.close();
+        }
+        self.publications.clear();
+        self.subscriptions.clear();
+        self.pending_publications.clear();
+        self.pending_subscriptions.clear();
+    }
+
+    fn load_log_buffers(&self, name: &str) -> Result<LogBuffers> {
+        self.log_buffers
+            .get(name)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| LogBuffers::from_file(name))
+    }
+
     fn ensure_open(&self) -> Result<()> {
         if self.is_closed {
-            Err(AeronError::IllegalState(
-                "ClientConductor is closed".to_string(),
-            ))
+            Err(AeronError::IllegalState("ClientConductor is closed".into()))
         } else {
             Ok(())
         }
@@ -104,88 +471,131 @@ impl<'a> ClientConductor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{
-        PublicationMessageFlyweight, RemoveMessageFlyweight, SubscriptionMessageFlyweight,
-    };
     use crate::driver_proxy::{
-        ADD_PUBLICATION, ADD_SUBSCRIPTION, REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION,
+        ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE, REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION,
     };
-    use agrona::AtomicBuffer;
-    use agrona::ring_buffer::TRAILER_LENGTH;
+    use crate::logbuffer::{
+        LOG_META_DATA_LENGTH, PAGE_MIN_SIZE, TERM_MIN_LENGTH, set_initial_term_id, set_mtu_length,
+        set_page_size, set_term_length,
+    };
+    use agrona::ring_buffer::{TRAILER_LENGTH, mpsc::ManyToOneRingBuffer};
 
-    const CHANNEL: &str = "aeron:ipc";
-    const CLIENT_ID: i64 = 42;
-
-    fn conductor<'a>(
-        bytes: &'a mut [u8],
-    ) -> (
-        ClientConductor<'a>,
-        agrona::ring_buffer::mpsc::ManyToOneRingBuffer<'a>,
-    ) {
+    fn conductor<'a>(bytes: &'a mut [u8]) -> (ClientConductor<'a>, ManyToOneRingBuffer<'a>) {
         let buffer = ManyToOneRingBuffer::new(AtomicBuffer::new(bytes)).unwrap();
-        let reader = buffer.clone();
         (
-            ClientConductor::new(DriverProxy::new(buffer, CLIENT_ID)),
-            reader,
+            ClientConductor::new(DriverProxy::new(buffer.clone(), 42)),
+            buffer,
         )
     }
 
-    use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
-
     #[test]
-    fn forwards_registration_and_removal_commands() {
+    fn tracks_pending_commands_and_closes_with_driver_notification() {
         let mut bytes = vec![0u8; TRAILER_LENGTH + 4096];
         let (mut conductor, reader) = conductor(&mut bytes);
-        let publication_id = conductor.add_publication(CHANNEL, 7).unwrap();
-        let subscription_id = conductor.add_subscription(CHANNEL, 8).unwrap();
+        let publication = conductor.add_publication("aeron:ipc", 7).unwrap();
+        let subscription = conductor.add_subscription("aeron:ipc", 8).unwrap();
         assert_eq!(conductor.publication_count(), 1);
         assert_eq!(conductor.subscription_count(), 1);
-
-        assert!(conductor.remove_publication(publication_id).unwrap());
-        assert!(conductor.remove_subscription(subscription_id).unwrap());
-        assert_eq!(conductor.publication_count(), 0);
-        assert_eq!(conductor.subscription_count(), 0);
-
+        conductor.close().unwrap();
         let mut types = Vec::new();
-        reader.read(|message_type, buffer, index, _| {
-            types.push(message_type);
-            match message_type {
-                ADD_PUBLICATION => assert_eq!(
-                    PublicationMessageFlyweight::new(*buffer, index).channel(),
-                    CHANNEL
-                ),
-                ADD_SUBSCRIPTION => assert_eq!(
-                    SubscriptionMessageFlyweight::new(*buffer, index).channel(),
-                    CHANNEL
-                ),
-                REMOVE_PUBLICATION | REMOVE_SUBSCRIPTION => assert_eq!(
-                    RemoveMessageFlyweight::new(*buffer, index).client_id(),
-                    CLIENT_ID
-                ),
-                _ => panic!("unexpected command"),
-            }
-        });
+        reader.read(|message_type, _, _, _| types.push(message_type));
         assert_eq!(
             types,
             vec![
                 ADD_PUBLICATION,
                 ADD_SUBSCRIPTION,
                 REMOVE_PUBLICATION,
-                REMOVE_SUBSCRIPTION
+                REMOVE_SUBSCRIPTION,
+                CLIENT_CLOSE
             ]
+        );
+        assert!(publication > 0 && subscription > 0);
+    }
+
+    fn log_buffers() -> LogBuffers {
+        let mut bytes = vec![0u8; TERM_MIN_LENGTH as usize * 3 + LOG_META_DATA_LENGTH];
+        let metadata = AtomicBuffer::new(&mut bytes[TERM_MIN_LENGTH as usize * 3..]);
+        set_term_length(&metadata, TERM_MIN_LENGTH);
+        set_page_size(&metadata, PAGE_MIN_SIZE);
+        set_mtu_length(&metadata, 1408);
+        set_initial_term_id(&metadata, 11);
+        LogBuffers::from_bytes(bytes).unwrap()
+    }
+
+    #[test]
+    fn resolves_publication_subscription_and_image_events() {
+        let mut bytes = vec![0u8; TRAILER_LENGTH + 4096];
+        let (mut conductor, _) = conductor(&mut bytes);
+        let buffers = log_buffers();
+        conductor.register_log_buffers("pub.log", buffers.clone());
+        conductor.register_log_buffers("image.log", buffers);
+        let publication_limit = Arc::new(AtomicI64::new(4096));
+        let subscriber_position = Arc::new(AtomicI64::new(0));
+        conductor.register_counter(5, publication_limit);
+        conductor.register_counter(6, subscriber_position);
+
+        let publication_correlation = conductor.add_publication("aeron:ipc", 7).unwrap();
+        conductor
+            .on_new_publication(publication_correlation, 100, 33, 7, 5, 9, "pub.log")
+            .unwrap();
+        assert_eq!(conductor.publication(100).unwrap().session_id(), 33);
+        assert_eq!(conductor.publication(100).unwrap().initial_term_id(), 11);
+
+        let subscription_correlation = conductor.add_subscription("aeron:ipc", 7).unwrap();
+        conductor
+            .on_new_subscription(subscription_correlation, 10)
+            .unwrap();
+        conductor
+            .on_available_image(
+                77,
+                33,
+                7,
+                subscription_correlation,
+                6,
+                "image.log",
+                "udp://source",
+            )
+            .unwrap();
+        let subscription = conductor.subscription(subscription_correlation).unwrap();
+        assert_eq!(subscription.channel_status_counter_id(), Some(10));
+        assert_eq!(subscription.image_count(), 1);
+        assert_eq!(
+            subscription
+                .image_by_session_id(33)
+                .unwrap()
+                .source_identity(),
+            "udp://source"
+        );
+
+        conductor
+            .on_unavailable_image(77, subscription_correlation)
+            .unwrap();
+        assert_eq!(
+            conductor
+                .subscription(subscription_correlation)
+                .unwrap()
+                .image_count(),
+            0
         );
     }
 
     #[test]
-    fn close_is_idempotent_and_rejects_new_commands() {
+    fn driver_error_and_timeout_clear_client_state() {
         let mut bytes = vec![0u8; TRAILER_LENGTH + 4096];
         let (mut conductor, _) = conductor(&mut bytes);
-        conductor.close().unwrap();
-        conductor.close().unwrap();
-        assert!(conductor.is_closed());
+        let correlation = conductor.add_subscription("aeron:ipc", 7).unwrap();
         assert!(matches!(
-            conductor.add_subscription(CHANNEL, 1),
-            Err(AeronError::IllegalState(_))
+            conductor.on_error(correlation, 13, "bad channel".into()),
+            Err(AeronError::DriverResponse { .. })
         ));
+        assert_eq!(conductor.subscription_count(), 0);
+        let _ = conductor.add_publication("aeron:ipc", 8).unwrap();
+        assert!(matches!(
+            conductor.on_client_timeout(42),
+            Err(AeronError::ClientTimeout(42))
+        ));
+        assert!(conductor.timed_out());
+        assert!(conductor.is_closed());
+        assert_eq!(conductor.publication_count(), 0);
     }
 }

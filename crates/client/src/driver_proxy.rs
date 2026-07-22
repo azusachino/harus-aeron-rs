@@ -174,6 +174,25 @@ impl<'a> DriverProxy<'a> {
         Ok(correlation_id)
     }
 
+    /// Tell the media driver that this client is closing.
+    pub fn client_close(&self) -> Result<()> {
+        let mut buf = vec![0u8; crate::command::CORRELATED_MESSAGE_HEADER_LENGTH];
+        let length = buf.len();
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(-1);
+        let written = self
+            .to_driver_ring_buffer
+            .write(CLIENT_CLOSE, &atomic_buf, 0, length)?;
+        if !written {
+            return Err(AeronError::CommandWriteFailed(
+                "failed to write client close command".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn add_destination(&self, registration_id: i64, endpoint_channel: &str) -> Result<i64> {
         let correlation_id = self.next_correlation_id();
         let length = DestinationMessageFlyweight::compute_length(endpoint_channel.len());
