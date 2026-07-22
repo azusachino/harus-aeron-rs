@@ -6,3 +6,6 @@
 	path = vendor/tokio
 	url = https://github.com/tokio-rs/tokio.git
 	branch = tokio-1.53.1
+[submodule "vendor/loom"]
+	path = vendor/loom
+	url = https://github.com/tokio-rs/loom.git

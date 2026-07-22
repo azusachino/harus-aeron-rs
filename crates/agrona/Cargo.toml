@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 thiserror.workspace = true
 
@@ -15,7 +18,11 @@ loom.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 
-# Uncomment once crates/agrona has a real ring buffer/broadcast implementation to bench:
-# [[bench]]
-# name = "ring_buffer"
-# harness = false
+[[bench]]
+name = "atomic_buffer"
+harness = false
+
+[[bench]]
+name = "ring_buffer"
+harness = false
+
