@@ -6,3 +6,5 @@ license.workspace = true
 publish = false
 
 [dependencies]
+thiserror.workspace = true
+tutorial-agrona = { path = "../agrona" }

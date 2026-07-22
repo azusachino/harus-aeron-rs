@@ -15,6 +15,7 @@ name = "aeron-client"
 version = "0.0.1"
 dependencies = [
  "agrona",
+ "criterion",
  "proptest",
  "thiserror",
  "tracing",
