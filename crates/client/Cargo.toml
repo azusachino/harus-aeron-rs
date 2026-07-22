@@ -13,4 +13,10 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true # frame/logbuffer encode-decode roundtrip tests
+
+[[bench]]
+name = "logbuffer"
+harness = false
+

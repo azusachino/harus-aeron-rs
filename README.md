@@ -14,7 +14,10 @@ Cargo workspace mirroring upstream Aeron's actual module boundaries: `agrona`
 `aeron-archive`, and `aeron-cluster`.
 
 `agrona` (v0.0.2) is implemented: ring buffers (SPSC/MPSC), broadcast
-transmitter/receiver, atomic buffer, idle strategies, counters manager. `aeron-client`,
+transmitter/receiver, atomic buffer, idle strategies, counters manager. `aeron-client`
+(v0.0.3) has its wire protocol (`HeaderFlyweight`/`ErrorFlyweight`/`DataHeaderFlyweight`)
+and log buffer (`LogBufferDescriptor`, `Header`/`HeaderWriter`, term scan/read/rebuild/
+unblock utilities) implemented; `Publication`/`Subscription`/`ClientConductor` and
 `aeron-driver`, `aeron-archive`, `aeron-cluster` are still skeletons — see
 [`docs/plan.md`](docs/plan.md) for the milestone roadmap.
 
