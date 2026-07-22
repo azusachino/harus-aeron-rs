@@ -53,7 +53,7 @@ test-unit:  ## Run unit tests only (lib targets)
 test-integration:  ## Run integration tests only
 	$(NIX_RUN) cargo test --workspace --test '*'
 
-check: fmt-check lint build test  ## fmt-check + lint + build + test
+check: fmt-check lint build test tutorial-check  ## fmt-check + lint + build + test + tutorial-check (mirrors CI)
 
 clean:  ## Remove build artifacts
 	$(NIX_RUN) cargo clean
