@@ -41,7 +41,7 @@
 {"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/ImageTest.java"}
 {"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/LogBuffersTest.java"}
 {"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/PublicationTest.java"}
-{"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/SubscriptionTest.java"}
+{"layer": "client", "rust_equivalent": "crates/client/src/subscription.rs", "status": "implemented", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/SubscriptionTest.java"}
 {"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/TimestampUtilTest.java"}
 {"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/VerifyBuildTimePropertiesTest.java"}
 {"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/command/CounterMessageFlyweightTest.java"}

@@ -10,5 +10,17 @@
 //! utilities) are implemented as of v0.0.3. `Publication`/`Subscription`/`ClientConductor`
 //! at the crate root are not yet implemented — see `docs/plan.md`'s v0.0.4 milestone.
 
+pub mod buffer_builder;
+pub mod command;
+pub mod counters;
+pub mod driver_proxy;
+pub mod error;
+pub mod fragment_assembler;
+pub mod image;
+pub mod log_buffers;
 pub mod logbuffer;
 pub mod protocol;
+pub mod publication;
+pub mod subscription;
+pub mod timestamp_util;
+pub mod uri;

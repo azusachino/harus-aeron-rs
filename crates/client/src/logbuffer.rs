@@ -3,6 +3,8 @@
 //! Mirrors upstream `io.aeron.logbuffer.LogBufferDescriptor`, `Header`, and `HeaderWriter`.
 
 use crate::protocol;
+pub use crate::protocol::{BEGIN_FRAG_FLAG, END_FRAG_FLAG, UNFRAGMENTED};
+
 use agrona::AtomicBuffer;
 
 /// Number of partitions the log is divided into.
@@ -17,6 +19,74 @@ pub const LOG_ACTIVE_TERM_COUNT_OFFSET: usize =
 
 /// Minimum page size (4 KB). Mirrors upstream `LogBufferDescriptor.PAGE_MIN_SIZE`.
 pub const LOG_META_DATA_LENGTH: usize = 4096;
+
+pub const TERM_MIN_LENGTH: i32 = 64 * 1024;
+pub const TERM_MAX_LENGTH: i32 = 1024 * 1024 * 1024;
+pub const PAGE_MIN_SIZE: i32 = 4 * 1024;
+pub const PAGE_MAX_SIZE: i32 = 1024 * 1024 * 1024;
+
+pub const LOG_TERM_LENGTH_OFFSET: usize = 276;
+pub const LOG_PAGE_SIZE_OFFSET: usize = 280;
+
+pub fn term_length(metadata_buffer: &AtomicBuffer) -> i32 {
+    metadata_buffer.get_i32(LOG_TERM_LENGTH_OFFSET)
+}
+
+pub fn set_term_length(metadata_buffer: &AtomicBuffer, length: i32) {
+    metadata_buffer.put_i32(LOG_TERM_LENGTH_OFFSET, length);
+}
+
+pub fn page_size(metadata_buffer: &AtomicBuffer) -> i32 {
+    metadata_buffer.get_i32(LOG_PAGE_SIZE_OFFSET)
+}
+
+pub fn set_page_size(metadata_buffer: &AtomicBuffer, size: i32) {
+    metadata_buffer.put_i32(LOG_PAGE_SIZE_OFFSET, size);
+}
+
+pub fn check_term_length(term_length: i32) -> std::result::Result<(), String> {
+    if term_length < TERM_MIN_LENGTH {
+        return Err(format!(
+            "Term length less than min length of {}: length={}",
+            TERM_MIN_LENGTH, term_length
+        ));
+    }
+    if term_length > TERM_MAX_LENGTH {
+        return Err(format!(
+            "Term length more than max length of {}: length={}",
+            TERM_MAX_LENGTH, term_length
+        ));
+    }
+    if term_length <= 0 || (term_length & (term_length - 1)) != 0 {
+        return Err(format!(
+            "Term length not a power of 2: length={}",
+            term_length
+        ));
+    }
+    Ok(())
+}
+
+pub fn check_page_size(page_size: i32) -> std::result::Result<(), String> {
+    if page_size < PAGE_MIN_SIZE {
+        return Err(format!(
+            "Page size less than min size of {}: page size={}",
+            PAGE_MIN_SIZE, page_size
+        ));
+    }
+    if page_size > PAGE_MAX_SIZE {
+        return Err(format!(
+            "Page size more than max size of {}: page size={}",
+            PAGE_MAX_SIZE, page_size
+        ));
+    }
+    if page_size <= 0 || (page_size & (page_size - 1)) != 0 {
+        return Err(format!(
+            "Page size not a power of 2: page size={}",
+            page_size
+        ));
+    }
+    Ok(())
+}
 
 /// Frame header length (32 bytes).
 ///
@@ -46,6 +116,16 @@ pub fn compute_position(
     // negative `active_term_id` on i32 rollover, which upstream relies on intentionally.
     let term_count = active_term_id.wrapping_sub(initial_term_id) as i64;
     (term_count << position_bits_to_shift) + (term_offset as i64)
+}
+
+pub const LOG_IS_CONNECTED_OFFSET: usize = 136;
+
+pub fn is_connected(metadata_buffer: &AtomicBuffer) -> bool {
+    metadata_buffer.get_i32_volatile(LOG_IS_CONNECTED_OFFSET) == 1
+}
+
+pub fn set_is_connected(metadata_buffer: &AtomicBuffer, is_connected: bool) {
+    metadata_buffer.put_i32_volatile(LOG_IS_CONNECTED_OFFSET, if is_connected { 1 } else { 0 });
 }
 
 /// Get active term count from metadata buffer with volatile semantics.
