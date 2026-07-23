@@ -3,6 +3,8 @@
 //! Mirrors upstream `io.aeron.logbuffer.LogBufferDescriptor`, `Header`, and `HeaderWriter`.
 
 use crate::protocol;
+pub use crate::protocol::{BEGIN_FRAG_FLAG, END_FRAG_FLAG, UNFRAGMENTED};
+
 use agrona::AtomicBuffer;
 
 /// Number of partitions the log is divided into.
@@ -17,6 +19,94 @@ pub const LOG_ACTIVE_TERM_COUNT_OFFSET: usize =
 
 /// Minimum page size (4 KB). Mirrors upstream `LogBufferDescriptor.PAGE_MIN_SIZE`.
 pub const LOG_META_DATA_LENGTH: usize = 4096;
+
+pub const TERM_MIN_LENGTH: i32 = 64 * 1024;
+pub const TERM_MAX_LENGTH: i32 = 1024 * 1024 * 1024;
+pub const PAGE_MIN_SIZE: i32 = 4 * 1024;
+pub const PAGE_MAX_SIZE: i32 = 1024 * 1024 * 1024;
+
+pub const LOG_MTU_LENGTH_OFFSET: usize = 272;
+pub const LOG_TERM_LENGTH_OFFSET: usize = 276;
+pub const LOG_PAGE_SIZE_OFFSET: usize = 280;
+
+/// Maximum length allowed for a message, mirroring `FrameDescriptor.MAX_MESSAGE_LENGTH`.
+pub const MAX_MESSAGE_LENGTH: i32 = 16 * 1024 * 1024;
+
+/// The MTU length used for the publication associated with this log, in bytes.
+pub fn mtu_length(metadata_buffer: &AtomicBuffer) -> i32 {
+    metadata_buffer.get_i32(LOG_MTU_LENGTH_OFFSET)
+}
+
+/// Set the MTU length used for the publication associated with this log, in bytes.
+pub fn set_mtu_length(metadata_buffer: &AtomicBuffer, mtu_length: i32) {
+    metadata_buffer.put_i32(LOG_MTU_LENGTH_OFFSET, mtu_length);
+}
+
+/// Compute the maximum supported message length for a given term length, mirroring
+/// `FrameDescriptor.computeMaxMessageLength`.
+pub fn compute_max_message_length(term_length: i32) -> i32 {
+    (term_length >> 3).min(MAX_MESSAGE_LENGTH)
+}
+
+pub fn term_length(metadata_buffer: &AtomicBuffer) -> i32 {
+    metadata_buffer.get_i32(LOG_TERM_LENGTH_OFFSET)
+}
+
+pub fn set_term_length(metadata_buffer: &AtomicBuffer, length: i32) {
+    metadata_buffer.put_i32(LOG_TERM_LENGTH_OFFSET, length);
+}
+
+pub fn page_size(metadata_buffer: &AtomicBuffer) -> i32 {
+    metadata_buffer.get_i32(LOG_PAGE_SIZE_OFFSET)
+}
+
+pub fn set_page_size(metadata_buffer: &AtomicBuffer, size: i32) {
+    metadata_buffer.put_i32(LOG_PAGE_SIZE_OFFSET, size);
+}
+
+pub fn check_term_length(term_length: i32) -> std::result::Result<(), String> {
+    if term_length < TERM_MIN_LENGTH {
+        return Err(format!(
+            "Term length less than min length of {}: length={}",
+            TERM_MIN_LENGTH, term_length
+        ));
+    }
+    if term_length > TERM_MAX_LENGTH {
+        return Err(format!(
+            "Term length more than max length of {}: length={}",
+            TERM_MAX_LENGTH, term_length
+        ));
+    }
+    if term_length <= 0 || (term_length & (term_length - 1)) != 0 {
+        return Err(format!(
+            "Term length not a power of 2: length={}",
+            term_length
+        ));
+    }
+    Ok(())
+}
+
+pub fn check_page_size(page_size: i32) -> std::result::Result<(), String> {
+    if page_size < PAGE_MIN_SIZE {
+        return Err(format!(
+            "Page size less than min size of {}: page size={}",
+            PAGE_MIN_SIZE, page_size
+        ));
+    }
+    if page_size > PAGE_MAX_SIZE {
+        return Err(format!(
+            "Page size more than max size of {}: page size={}",
+            PAGE_MAX_SIZE, page_size
+        ));
+    }
+    if page_size <= 0 || (page_size & (page_size - 1)) != 0 {
+        return Err(format!(
+            "Page size not a power of 2: page size={}",
+            page_size
+        ));
+    }
+    Ok(())
+}
 
 /// Frame header length (32 bytes).
 ///
@@ -46,6 +136,16 @@ pub fn compute_position(
     // negative `active_term_id` on i32 rollover, which upstream relies on intentionally.
     let term_count = active_term_id.wrapping_sub(initial_term_id) as i64;
     (term_count << position_bits_to_shift) + (term_offset as i64)
+}
+
+pub const LOG_IS_CONNECTED_OFFSET: usize = 136;
+
+pub fn is_connected(metadata_buffer: &AtomicBuffer) -> bool {
+    metadata_buffer.get_i32_volatile(LOG_IS_CONNECTED_OFFSET) == 1
+}
+
+pub fn set_is_connected(metadata_buffer: &AtomicBuffer, is_connected: bool) {
+    metadata_buffer.put_i32_volatile(LOG_IS_CONNECTED_OFFSET, if is_connected { 1 } else { 0 });
 }
 
 /// Get active term count from metadata buffer with volatile semantics.
@@ -668,6 +768,16 @@ pub fn set_frame_term_offset(term_buffer: &AtomicBuffer, term_offset: usize) {
 /// Set term ID field at `term_offset`.
 pub fn set_frame_term_id(term_buffer: &AtomicBuffer, term_offset: usize, term_id: i32) {
     term_buffer.put_i32(term_offset + protocol::DATA_TERM_ID_FIELD_OFFSET, term_id);
+}
+
+/// Set the flags byte of the frame at `term_offset`.
+pub fn set_frame_flags(term_buffer: &AtomicBuffer, term_offset: usize, flags: u8) {
+    term_buffer.put_u8(term_offset + protocol::FLAGS_FIELD_OFFSET, flags);
+}
+
+/// Set the reserved-value field of the frame at `term_offset`.
+pub fn set_frame_reserved_value(term_buffer: &AtomicBuffer, term_offset: usize, value: i64) {
+    term_buffer.put_i64(term_offset + protocol::DATA_RESERVED_VALUE_OFFSET, value);
 }
 
 /// Set frame length at `term_offset` using ordered/release store.

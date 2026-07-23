@@ -65,6 +65,10 @@ version = "0.0.1"
 [[package]]
 name = "tutorial-client"
 version = "0.0.1"
+dependencies = [
+ "thiserror",
+ "tutorial-agrona",
+]
 
 [[package]]
 name = "tutorial-cluster"

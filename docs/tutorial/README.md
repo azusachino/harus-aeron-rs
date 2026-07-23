@@ -16,3 +16,7 @@ Planned parts (see [`docs/plan.md`](../plan.md) for phase ordering):
 4. Client API — Publication/Subscription, Java interop
 5. Archive — control protocol, persistent recording catalogs
 6. Cluster — Raft election, replicated log coordination
+
+Client chapters: [`02-client-wire-protocol.md`](02-client-wire-protocol.md),
+[`03-client-pub-sub.md`](03-client-pub-sub.md), and
+[`04-client-conductor.md`](04-client-conductor.md).

@@ -20,3 +20,6 @@ proptest.workspace = true # frame/logbuffer encode-decode roundtrip tests
 name = "logbuffer"
 harness = false
 
+[[bench]]
+name = "client_api"
+harness = false

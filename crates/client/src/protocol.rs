@@ -163,6 +163,10 @@ pub const BEGIN_AND_END_FLAGS: u8 = BEGIN_FLAG | END_FLAG;
 /// End of Stream (EOS) Flag.
 pub const EOS_FLAG: u8 = 0x20;
 
+pub const BEGIN_FRAG_FLAG: u8 = BEGIN_FLAG;
+pub const END_FRAG_FLAG: u8 = END_FLAG;
+pub const UNFRAGMENTED: u8 = BEGIN_AND_END_FLAGS;
+
 /// Length in bytes of the string length header used by [`agrona::AtomicBuffer`]'s
 /// string encoding (a 4-byte length prefix).
 const STR_HEADER_LEN: usize = 4;

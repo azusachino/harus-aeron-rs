@@ -1,9 +1,12 @@
 //! Property-based tests for Aeron client logbuffer and protocol primitives.
 
+use aeron_client::command::{PublicationMessageFlyweight, SubscriptionMessageFlyweight};
+use aeron_client::driver_events::PublicationBuffersReadyFlyweight;
 use aeron_client::logbuffer::{
     FRAME_ALIGNMENT, HEADER_LENGTH, TermGapScanner, TermReader, TermScanner, align,
 };
 use aeron_client::protocol::ErrorFlyweight;
+use aeron_client::uri::{ChannelUri, ChannelUriStringBuilder};
 use agrona::AtomicBuffer;
 use proptest::prelude::*;
 
@@ -82,5 +85,94 @@ proptest! {
 
         flyweight.set_error_message(&msg);
         prop_assert_eq!(flyweight.error_message(), msg);
+    }
+
+    #[test]
+    fn prop_channel_uri_builder_roundtrip(
+        media in prop::sample::select(vec!["ipc", "udp"]),
+        endpoint in "[a-z]{1,12}:[0-9]{1,5}",
+        alias in "[a-zA-Z0-9_-]{1,16}",
+        stream_id in any::<i32>(),
+    ) {
+        let mut builder = ChannelUriStringBuilder::new();
+        builder.media(media).endpoint(endpoint).alias(alias).session_id(stream_id as i64);
+        let uri = builder.build();
+        let parsed = ChannelUri::parse(&uri).unwrap();
+        let rebuilt = parsed.to_string();
+
+        prop_assert_eq!(ChannelUri::parse(&rebuilt).unwrap(), parsed);
+    }
+
+    #[test]
+    fn prop_publication_command_roundtrip(
+        client_id in any::<i64>(),
+        correlation_id in any::<i64>(),
+        stream_id in any::<i32>(),
+        channel in "[a-zA-Z0-9:/?=_-]{0,128}",
+    ) {
+        let mut bytes = vec![0u8; PublicationMessageFlyweight::compute_length(channel.len())];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        let command = PublicationMessageFlyweight::new(buffer, 0);
+        command.set_client_id(client_id);
+        command.set_correlation_id(correlation_id);
+        command.set_stream_id(stream_id);
+        command.set_channel(&channel);
+
+        prop_assert_eq!(command.client_id(), client_id);
+        prop_assert_eq!(command.correlation_id(), correlation_id);
+        prop_assert_eq!(command.stream_id(), stream_id);
+        prop_assert_eq!(command.channel(), channel);
+        prop_assert_eq!(command.length(), bytes.len());
+    }
+
+    #[test]
+    fn prop_subscription_command_roundtrip(
+        client_id in any::<i64>(),
+        correlation_id in any::<i64>(),
+        registration_correlation_id in any::<i64>(),
+        stream_id in any::<i32>(),
+        channel in "[a-zA-Z0-9:/?=_-]{0,128}",
+    ) {
+        let mut bytes = vec![0u8; SubscriptionMessageFlyweight::compute_length(channel.len())];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        let command = SubscriptionMessageFlyweight::new(buffer, 0);
+        command.set_client_id(client_id);
+        command.set_correlation_id(correlation_id);
+        command.set_registration_correlation_id(registration_correlation_id);
+        command.set_stream_id(stream_id);
+        command.set_channel(&channel);
+
+        prop_assert_eq!(command.client_id(), client_id);
+        prop_assert_eq!(command.correlation_id(), correlation_id);
+        prop_assert_eq!(command.registration_correlation_id(), registration_correlation_id);
+        prop_assert_eq!(command.stream_id(), stream_id);
+        prop_assert_eq!(command.channel(), channel);
+        prop_assert_eq!(command.length(), bytes.len());
+    }
+
+    #[test]
+    fn prop_publication_ready_response_roundtrip(
+        correlation_id in any::<i64>(),
+        registration_id in any::<i64>(),
+        session_id in any::<i32>(),
+        stream_id in any::<i32>(),
+        log_file_name in "[a-zA-Z0-9_./-]{1,64}",
+    ) {
+        let mut bytes = vec![0u8; 128];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        let response = PublicationBuffersReadyFlyweight::wrap(buffer, 0);
+        response.set_correlation_id(correlation_id);
+        response.set_registration_id(registration_id);
+        response.set_session_id(session_id);
+        response.set_stream_id(stream_id);
+        response.set_publication_limit_counter_id(17);
+        response.set_channel_status_counter_id(18);
+        response.set_log_file_name(&log_file_name);
+
+        prop_assert_eq!(response.correlation_id(), correlation_id);
+        prop_assert_eq!(response.registration_id(), registration_id);
+        prop_assert_eq!(response.session_id(), session_id);
+        prop_assert_eq!(response.stream_id(), stream_id);
+        prop_assert_eq!(response.log_file_name().unwrap(), log_file_name);
     }
 }
