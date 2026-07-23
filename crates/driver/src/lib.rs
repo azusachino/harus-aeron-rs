@@ -8,6 +8,7 @@
 
 pub mod conductor;
 pub mod configuration;
+pub mod driver;
 pub mod error;
 pub mod media;
 pub mod publication_params;
