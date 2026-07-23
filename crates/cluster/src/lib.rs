@@ -7,4 +7,5 @@
 //! failover scenario can be tried on Rust/tokio for comparison once the driver/client
 //! phases are solid.
 pub mod codecs;
+pub mod consensus_module;
 pub mod state_machine;
