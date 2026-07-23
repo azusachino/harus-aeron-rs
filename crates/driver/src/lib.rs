@@ -6,4 +6,5 @@
 //! transport into the standalone media driver process. Skeleton crate — not yet
 //! implemented.
 
+pub mod configuration;
 pub mod media;
