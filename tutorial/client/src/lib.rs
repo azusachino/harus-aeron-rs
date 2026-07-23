@@ -10,6 +10,7 @@ pub mod conductor;
 pub mod context;
 pub mod counters;
 pub mod driver_proxy;
+pub mod driver_events;
 pub mod error;
 pub mod exceptions;
 pub mod fragment_assembler;

@@ -130,6 +130,19 @@ impl LogBuffers {
         let ptr = unsafe { (self.0.raw_buffer.as_ptr() as *mut u8).add(meta_offset) };
         unsafe { AtomicBuffer::from_raw_parts(ptr, LOG_META_DATA_LENGTH) }
     }
+
+    /// Touch one byte per page in every mapped region, matching Aeron's optional pre-touch
+    /// startup behavior. The buffer remains shared and is not copied.
+    pub fn pre_touch(&self) {
+        for buffer in self.duplicate_term_buffers() {
+            for offset in (0..buffer.capacity()).step_by(4096) {
+                let _ = buffer.get_u8(offset);
+            }
+        }
+        for offset in (0..LOG_META_DATA_LENGTH).step_by(4096) {
+            let _ = self.meta_data_buffer().get_u8(offset);
+        }
+    }
 }
 
 #[cfg(test)]

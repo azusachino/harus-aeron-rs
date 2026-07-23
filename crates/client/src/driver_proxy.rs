@@ -24,6 +24,7 @@ pub const CLIENT_CLOSE: i32 = 0x0B;
 pub const ADD_RCV_DESTINATION: i32 = 0x0C;
 pub const REMOVE_RCV_DESTINATION: i32 = 0x0D;
 pub const TERMINATE_DRIVER: i32 = 0x0E;
+pub const GET_NEXT_AVAILABLE_SESSION_ID: i32 = 0x12;
 
 /// Proxy for communicating with the media driver over a ring buffer.
 pub struct DriverProxy<'a> {
@@ -189,6 +190,51 @@ impl<'a> DriverProxy<'a> {
             return Err(AeronError::CommandWriteFailed(
                 "failed to write client close command".to_string(),
             ));
+        }
+        Ok(())
+    }
+
+    pub fn client_keepalive(&self) -> Result<()> {
+        self.write_correlated_command(CLIENT_KEEPALIVE)
+    }
+
+    pub fn get_next_available_session_id(&self, stream_id: i32) -> Result<i64> {
+        let correlation_id = self.next_correlation_id();
+        let mut buf = vec![0u8; crate::command::CORRELATED_MESSAGE_HEADER_LENGTH + 4];
+        let length = buf.len();
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(correlation_id);
+        atomic_buf.put_i32(crate::command::CORRELATED_MESSAGE_HEADER_LENGTH, stream_id);
+        let written = self.to_driver_ring_buffer.write(
+            GET_NEXT_AVAILABLE_SESSION_ID,
+            &atomic_buf,
+            0,
+            length,
+        )?;
+        if !written {
+            return Err(AeronError::CommandWriteFailed(
+                "failed to write next session id command".into(),
+            ));
+        }
+        Ok(correlation_id)
+    }
+
+    fn write_correlated_command(&self, message_type: i32) -> Result<()> {
+        let mut buf = vec![0u8; crate::command::CORRELATED_MESSAGE_HEADER_LENGTH];
+        let length = buf.len();
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(-1);
+        let written = self
+            .to_driver_ring_buffer
+            .write(message_type, &atomic_buf, 0, length)?;
+        if !written {
+            return Err(AeronError::CommandWriteFailed(format!(
+                "failed to write command type {message_type}"
+            )));
         }
         Ok(())
     }

@@ -1,4 +1,5 @@
 use aeron_client::command::{PublicationMessageFlyweight, SubscriptionMessageFlyweight};
+use aeron_client::driver_events::PublicationBuffersReadyFlyweight;
 use aeron_client::uri::ChannelUri;
 use agrona::AtomicBuffer;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -55,6 +56,20 @@ fn bench_command_flyweights(c: &mut Criterion) {
                 command.stream_id(),
                 command.channel(),
             )
+        });
+    });
+
+    let mut response_bytes = vec![0u8; 128];
+    c.bench_function("publication_ready_response_encode_decode", |b| {
+        b.iter(|| {
+            let response =
+                PublicationBuffersReadyFlyweight::wrap(AtomicBuffer::new(&mut response_bytes), 0);
+            response.set_correlation_id(11);
+            response.set_registration_id(12);
+            response.set_session_id(13);
+            response.set_stream_id(1001);
+            response.set_log_file_name("/tmp/aeron.logbuffer");
+            (response.correlation_id(), response.log_file_name().unwrap())
         });
     });
 }

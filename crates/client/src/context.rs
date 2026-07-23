@@ -7,6 +7,7 @@ use crate::error::{AeronError, Result};
 
 pub const AERON_DIR_PROP_NAME: &str = "AERON_DIR";
 pub const DEFAULT_DRIVER_TIMEOUT_MS: u64 = 10_000;
+pub const DEFAULT_INTER_SERVICE_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_CLIENT_NAME_LENGTH: usize = 100;
 pub const IPC_MEDIA: &str = "ipc";
 pub const UDP_MEDIA: &str = "udp";
@@ -24,6 +25,8 @@ pub struct CommonContext {
     aeron_directory_name: PathBuf,
     aeron_directory: Option<PathBuf>,
     enable_experimental_features: bool,
+    pre_touch_mapped_memory: bool,
+    inter_service_timeout_ms: u64,
 }
 
 impl Default for CommonContext {
@@ -40,6 +43,8 @@ impl CommonContext {
             aeron_directory_name: default_directory_name(),
             aeron_directory: None,
             enable_experimental_features: false,
+            pre_touch_mapped_memory: false,
+            inter_service_timeout_ms: DEFAULT_INTER_SERVICE_TIMEOUT_MS,
         }
     }
 
@@ -93,6 +98,24 @@ impl CommonContext {
 
     pub fn set_enable_experimental_features(&mut self, enabled: bool) -> &mut Self {
         self.enable_experimental_features = enabled;
+        self
+    }
+
+    pub fn pre_touch_mapped_memory(&self) -> bool {
+        self.pre_touch_mapped_memory
+    }
+
+    pub fn set_pre_touch_mapped_memory(&mut self, enabled: bool) -> &mut Self {
+        self.pre_touch_mapped_memory = enabled;
+        self
+    }
+
+    pub fn inter_service_timeout_ms(&self) -> u64 {
+        self.inter_service_timeout_ms
+    }
+
+    pub fn set_inter_service_timeout_ms(&mut self, timeout_ms: u64) -> &mut Self {
+        self.inter_service_timeout_ms = timeout_ms;
         self
     }
 }

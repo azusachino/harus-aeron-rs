@@ -16,7 +16,7 @@ The Aeron client turns channel/stream configuration into driver commands and exp
 
 ## 4. Client lifecycle
 
-`CommonContext` owns shared directory and timeout configuration. `AeronContext` adds client naming and conductor-agent configuration. `ClientConductor` tracks registrations and forwards lifecycle operations through `DriverProxy`. Conclude configuration once, close resources idempotently, and preserve registration ids until the driver has acknowledged removal.
+`CommonContext` owns shared directory and timeout configuration. `AeronContext` adds client naming and conductor-agent configuration. `ClientConductor` forwards lifecycle operations through `DriverProxy` and resolves asynchronous driver responses into ready resources; the response state machine is covered in [Chapter 4](04-client-conductor.md). Conclude configuration once, close resources idempotently, and preserve registration ids until the driver has acknowledged removal.
 
 ## 5. Errors and authorization
 

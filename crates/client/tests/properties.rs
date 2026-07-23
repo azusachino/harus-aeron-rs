@@ -1,6 +1,7 @@
 //! Property-based tests for Aeron client logbuffer and protocol primitives.
 
 use aeron_client::command::{PublicationMessageFlyweight, SubscriptionMessageFlyweight};
+use aeron_client::driver_events::PublicationBuffersReadyFlyweight;
 use aeron_client::logbuffer::{
     FRAME_ALIGNMENT, HEADER_LENGTH, TermGapScanner, TermReader, TermScanner, align,
 };
@@ -147,5 +148,31 @@ proptest! {
         prop_assert_eq!(command.stream_id(), stream_id);
         prop_assert_eq!(command.channel(), channel);
         prop_assert_eq!(command.length(), bytes.len());
+    }
+
+    #[test]
+    fn prop_publication_ready_response_roundtrip(
+        correlation_id in any::<i64>(),
+        registration_id in any::<i64>(),
+        session_id in any::<i32>(),
+        stream_id in any::<i32>(),
+        log_file_name in "[a-zA-Z0-9_./-]{1,64}",
+    ) {
+        let mut bytes = vec![0u8; 128];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        let response = PublicationBuffersReadyFlyweight::wrap(buffer, 0);
+        response.set_correlation_id(correlation_id);
+        response.set_registration_id(registration_id);
+        response.set_session_id(session_id);
+        response.set_stream_id(stream_id);
+        response.set_publication_limit_counter_id(17);
+        response.set_channel_status_counter_id(18);
+        response.set_log_file_name(&log_file_name);
+
+        prop_assert_eq!(response.correlation_id(), correlation_id);
+        prop_assert_eq!(response.registration_id(), registration_id);
+        prop_assert_eq!(response.session_id(), session_id);
+        prop_assert_eq!(response.stream_id(), stream_id);
+        prop_assert_eq!(response.log_file_name().unwrap(), log_file_name);
     }
 }

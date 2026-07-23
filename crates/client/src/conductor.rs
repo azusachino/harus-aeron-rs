@@ -5,10 +5,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::AtomicI64};
+use std::time::{Duration, Instant};
 
-use agrona::{AtomicBuffer, BroadcastReceiver};
+use agrona::AtomicBuffer;
 
-use crate::driver_events::{self, DriverEvent};
+use crate::driver_events::{DriverEvent, DriverEventsAdapter};
 use crate::driver_proxy::DriverProxy;
 use crate::error::{AeronError, Result};
 use crate::image::Image;
@@ -19,6 +20,7 @@ use crate::subscription::Subscription;
 
 struct PendingPublication {
     channel: String,
+    exclusive: bool,
 }
 
 struct PendingSubscription {
@@ -26,10 +28,17 @@ struct PendingSubscription {
     stream_id: i32,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RegistrationState {
+    Pending,
+    Ready,
+    Closed,
+}
+
 /// Coordinates the asynchronous command and response lifecycle of an Aeron client.
 pub struct ClientConductor<'a> {
     driver_proxy: DriverProxy<'a>,
-    event_receiver: Option<BroadcastReceiver<'a>>,
+    event_adapter: Option<DriverEventsAdapter<'a>>,
     pending_publications: HashMap<i64, PendingPublication>,
     pending_subscriptions: HashMap<i64, PendingSubscription>,
     publications: HashMap<i64, ConcurrentPublication>,
@@ -38,6 +47,13 @@ pub struct ClientConductor<'a> {
     log_buffers: HashMap<String, LogBuffers>,
     is_closed: bool,
     timed_out: bool,
+    registration_states: HashMap<i64, RegistrationState>,
+    pending_since: HashMap<i64, Instant>,
+    driver_timeout: Duration,
+    last_keepalive: Instant,
+    pre_touch_mapped_memory: bool,
+    control_protocol_version: i32,
+    next_session_id: Option<i32>,
 }
 
 impl<'a> ClientConductor<'a> {
@@ -46,7 +62,7 @@ impl<'a> ClientConductor<'a> {
     pub fn new(driver_proxy: DriverProxy<'a>) -> Self {
         Self {
             driver_proxy,
-            event_receiver: None,
+            event_adapter: None,
             pending_publications: HashMap::new(),
             pending_subscriptions: HashMap::new(),
             publications: HashMap::new(),
@@ -55,6 +71,13 @@ impl<'a> ClientConductor<'a> {
             log_buffers: HashMap::new(),
             is_closed: false,
             timed_out: false,
+            registration_states: HashMap::new(),
+            pending_since: HashMap::new(),
+            driver_timeout: Duration::from_millis(crate::context::DEFAULT_DRIVER_TIMEOUT_MS),
+            last_keepalive: Instant::now(),
+            pre_touch_mapped_memory: false,
+            control_protocol_version: crate::driver_events::CONTROL_PROTOCOL_SEMANTIC_VERSION,
+            next_session_id: None,
         }
     }
 
@@ -64,8 +87,30 @@ impl<'a> ClientConductor<'a> {
         to_client_buffer: AtomicBuffer<'a>,
     ) -> Result<Self> {
         let mut conductor = Self::new(driver_proxy);
-        conductor.event_receiver = Some(BroadcastReceiver::new(to_client_buffer)?);
+        conductor.event_adapter = Some(DriverEventsAdapter::new(to_client_buffer)?);
         Ok(conductor)
+    }
+
+    pub fn set_driver_timeout(&mut self, timeout: Duration) {
+        self.driver_timeout = timeout;
+    }
+    pub fn set_pre_touch_mapped_memory(&mut self, enabled: bool) {
+        self.pre_touch_mapped_memory = enabled;
+    }
+    pub fn pre_touch_mapped_memory(&self) -> bool {
+        self.pre_touch_mapped_memory
+    }
+    pub fn set_control_protocol_version(&mut self, version: i32) {
+        self.control_protocol_version = version;
+    }
+    pub fn control_protocol_version(&self) -> i32 {
+        self.control_protocol_version
+    }
+    pub fn next_session_id(&self) -> Option<i32> {
+        self.next_session_id
+    }
+    pub fn registration_state(&self, correlation_id: i64) -> Option<RegistrationState> {
+        self.registration_states.get(&correlation_id).copied()
     }
 
     pub fn driver_proxy(&self) -> &DriverProxy<'a> {
@@ -82,6 +127,9 @@ impl<'a> ClientConductor<'a> {
 
     /// Register a shared counter value buffer entry referenced by a driver response.
     pub fn register_counter(&mut self, counter_id: i32, value: Arc<AtomicI64>) {
+        if counter_id == crate::counters::SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION {
+            self.control_protocol_version = value.load(std::sync::atomic::Ordering::Acquire) as i32;
+        }
         self.counter_values.insert(counter_id, value);
     }
 
@@ -94,21 +142,8 @@ impl<'a> ClientConductor<'a> {
     /// Drain all currently available driver events.
     pub fn service(&mut self) -> Result<usize> {
         let mut events = Vec::new();
-        if let Some(receiver) = &mut self.event_receiver {
-            loop {
-                let mut decoded = None;
-                let received = receiver.receive_next(|message_type, buffer, offset, length| {
-                    decoded = Some(driver_events::decode(message_type, buffer, offset, length));
-                })?;
-                if !received {
-                    break;
-                }
-                events.push(decoded.ok_or_else(|| {
-                    AeronError::IllegalState(
-                        "driver event receiver did not provide a message".into(),
-                    )
-                })??);
-            }
+        if let Some(adapter) = &mut self.event_adapter {
+            events = adapter.receive()?;
         }
 
         let count = events.len();
@@ -118,9 +153,40 @@ impl<'a> ClientConductor<'a> {
         Ok(count)
     }
 
+    /// Run one conductor duty cycle: consume responses, send keepalive, and enforce the
+    /// inter-service response deadline for pending registrations.
+    pub fn do_work(&mut self) -> Result<usize> {
+        self.do_work_at(Instant::now())
+    }
+
+    pub fn do_work_at(&mut self, now: Instant) -> Result<usize> {
+        let work = self.service()?;
+        if now.duration_since(self.last_keepalive) >= self.driver_timeout / 3 {
+            self.driver_proxy.client_keepalive()?;
+            self.last_keepalive = now;
+        }
+        if let Some((correlation_id, _started)) = self
+            .pending_since
+            .iter()
+            .find(|(_, started)| now.duration_since(**started) > self.driver_timeout)
+        {
+            let correlation_id = *correlation_id;
+            self.pending_publications.remove(&correlation_id);
+            self.pending_subscriptions.remove(&correlation_id);
+            self.pending_since.remove(&correlation_id);
+            self.registration_states
+                .insert(correlation_id, RegistrationState::Closed);
+            return Err(AeronError::DriverTimeout(
+                self.driver_timeout.as_millis() as u64
+            ));
+        }
+        Ok(work)
+    }
+
     pub fn on_event(&mut self, event: DriverEvent) -> Result<()> {
         match event {
             DriverEvent::PublicationReady {
+                exclusive,
                 correlation_id,
                 registration_id,
                 session_id,
@@ -128,7 +194,7 @@ impl<'a> ClientConductor<'a> {
                 publication_limit_counter_id,
                 channel_status_counter_id,
                 log_file_name,
-            } => self.on_new_publication(
+            } => self.on_new_publication_with_mode(
                 correlation_id,
                 registration_id,
                 session_id,
@@ -136,6 +202,7 @@ impl<'a> ClientConductor<'a> {
                 publication_limit_counter_id,
                 channel_status_counter_id,
                 &log_file_name,
+                exclusive,
             ),
             DriverEvent::SubscriptionReady {
                 correlation_id,
@@ -162,13 +229,29 @@ impl<'a> ClientConductor<'a> {
                 correlation_id,
                 subscription_registration_id,
             } => self.on_unavailable_image(correlation_id, subscription_registration_id),
-            DriverEvent::OperationSucceeded { .. } => Ok(()),
+            DriverEvent::OperationSucceeded { correlation_id } => {
+                self.pending_since.remove(&correlation_id);
+                Ok(())
+            }
             DriverEvent::Error {
                 correlation_id,
                 code,
                 message,
             } => self.on_error(correlation_id, code, message),
             DriverEvent::ClientTimeout { client_id } => self.on_client_timeout(client_id),
+            DriverEvent::NextAvailableSessionId {
+                correlation_id,
+                session_id,
+            } => {
+                self.next_session_id = Some(session_id);
+                self.pending_since.remove(&correlation_id);
+                Ok(())
+            }
+            DriverEvent::CounterReady { correlation_id, .. }
+            | DriverEvent::CounterUnavailable { correlation_id, .. } => {
+                self.pending_since.remove(&correlation_id);
+                Ok(())
+            }
         }
     }
 
@@ -179,8 +262,30 @@ impl<'a> ClientConductor<'a> {
             correlation_id,
             PendingPublication {
                 channel: channel.into(),
+                exclusive: false,
             },
         );
+        self.registration_states
+            .insert(correlation_id, RegistrationState::Pending);
+        self.pending_since.insert(correlation_id, Instant::now());
+        Ok(correlation_id)
+    }
+
+    pub fn add_exclusive_publication(&mut self, channel: &str, stream_id: i32) -> Result<i64> {
+        self.ensure_open()?;
+        let correlation_id = self
+            .driver_proxy
+            .add_exclusive_publication(channel, stream_id)?;
+        self.pending_publications.insert(
+            correlation_id,
+            PendingPublication {
+                channel: channel.into(),
+                exclusive: true,
+            },
+        );
+        self.registration_states
+            .insert(correlation_id, RegistrationState::Pending);
+        self.pending_since.insert(correlation_id, Instant::now());
         Ok(correlation_id)
     }
 
@@ -194,6 +299,21 @@ impl<'a> ClientConductor<'a> {
                 stream_id,
             },
         );
+        self.registration_states
+            .insert(correlation_id, RegistrationState::Pending);
+        self.pending_since.insert(correlation_id, Instant::now());
+        Ok(correlation_id)
+    }
+
+    pub fn get_next_available_session_id(&mut self, stream_id: i32) -> Result<i64> {
+        self.ensure_open()?;
+        if self.control_protocol_version < crate::driver_events::CONTROL_PROTOCOL_SEMANTIC_VERSION {
+            return Err(AeronError::IllegalState(
+                "driver does not support next session id".into(),
+            ));
+        }
+        let correlation_id = self.driver_proxy.get_next_available_session_id(stream_id)?;
+        self.pending_since.insert(correlation_id, Instant::now());
         Ok(correlation_id)
     }
 
@@ -208,6 +328,30 @@ impl<'a> ClientConductor<'a> {
         _channel_status_counter_id: i32,
         log_file_name: &str,
     ) -> Result<()> {
+        self.on_new_publication_with_mode(
+            correlation_id,
+            registration_id,
+            session_id,
+            stream_id,
+            publication_limit_counter_id,
+            _channel_status_counter_id,
+            log_file_name,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_new_publication_with_mode(
+        &mut self,
+        correlation_id: i64,
+        registration_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        publication_limit_counter_id: i32,
+        _channel_status_counter_id: i32,
+        log_file_name: &str,
+        exclusive: bool,
+    ) -> Result<()> {
         let pending = self
             .pending_publications
             .remove(&correlation_id)
@@ -216,6 +360,16 @@ impl<'a> ClientConductor<'a> {
                     "unknown publication correlation {correlation_id}"
                 ))
             })?;
+        if pending.exclusive != exclusive {
+            return Err(AeronError::IllegalState(format!(
+                "publication mode mismatch for correlation {correlation_id}"
+            )));
+        }
+        if exclusive && correlation_id != registration_id {
+            return Err(AeronError::IllegalState(format!(
+                "exclusive publication correlation {correlation_id} != registration {registration_id}"
+            )));
+        }
         let buffers = self.load_log_buffers(log_file_name)?;
         let initial_term_id = initial_term_id(&buffers.meta_data_buffer());
         let publication_limit = self
@@ -238,6 +392,9 @@ impl<'a> ClientConductor<'a> {
             buffers,
         );
         self.publications.insert(registration_id, publication);
+        self.registration_states
+            .insert(correlation_id, RegistrationState::Ready);
+        self.pending_since.remove(&correlation_id);
         Ok(())
     }
 
@@ -258,6 +415,9 @@ impl<'a> ClientConductor<'a> {
             Subscription::new(correlation_id, pending.stream_id, pending.channel);
         subscription.set_channel_status_counter_id(channel_status_counter_id);
         self.subscriptions.insert(correlation_id, subscription);
+        self.registration_states
+            .insert(correlation_id, RegistrationState::Ready);
+        self.pending_since.remove(&correlation_id);
         Ok(())
     }
 
@@ -325,6 +485,9 @@ impl<'a> ClientConductor<'a> {
     pub fn on_error(&mut self, correlation_id: i64, code: i32, message: String) -> Result<()> {
         self.pending_publications.remove(&correlation_id);
         self.pending_subscriptions.remove(&correlation_id);
+        self.pending_since.remove(&correlation_id);
+        self.registration_states
+            .insert(correlation_id, RegistrationState::Closed);
         if let Some(mut subscription) = self.subscriptions.remove(&correlation_id) {
             subscription.close();
         }
@@ -369,15 +532,29 @@ impl<'a> ClientConductor<'a> {
 
     pub fn remove_publication(&mut self, registration_id: i64) -> Result<bool> {
         self.ensure_open()?;
+        if self.subscriptions.contains_key(&registration_id)
+            || self.pending_subscriptions.contains_key(&registration_id)
+        {
+            return Err(AeronError::WrongResourceType {
+                registration_id,
+                expected: "publication",
+                actual: "subscription",
+            });
+        }
         if let Some(mut publication) = self.publications.remove(&registration_id) {
             publication.close();
             self.driver_proxy
                 .remove_publication(registration_id, false)?;
+            self.registration_states
+                .insert(registration_id, RegistrationState::Closed);
             return Ok(true);
         }
         if self.pending_publications.remove(&registration_id).is_some() {
             self.driver_proxy
                 .remove_publication(registration_id, false)?;
+            self.pending_since.remove(&registration_id);
+            self.registration_states
+                .insert(registration_id, RegistrationState::Closed);
             return Ok(true);
         }
         Ok(false)
@@ -385,9 +562,20 @@ impl<'a> ClientConductor<'a> {
 
     pub fn remove_subscription(&mut self, registration_id: i64) -> Result<bool> {
         self.ensure_open()?;
+        if self.publications.contains_key(&registration_id)
+            || self.pending_publications.contains_key(&registration_id)
+        {
+            return Err(AeronError::WrongResourceType {
+                registration_id,
+                expected: "subscription",
+                actual: "publication",
+            });
+        }
         if let Some(mut subscription) = self.subscriptions.remove(&registration_id) {
             subscription.close();
             self.driver_proxy.remove_subscription(registration_id)?;
+            self.registration_states
+                .insert(registration_id, RegistrationState::Closed);
             return Ok(true);
         }
         if self
@@ -396,6 +584,9 @@ impl<'a> ClientConductor<'a> {
             .is_some()
         {
             self.driver_proxy.remove_subscription(registration_id)?;
+            self.pending_since.remove(&registration_id);
+            self.registration_states
+                .insert(registration_id, RegistrationState::Closed);
             return Ok(true);
         }
         Ok(false)
@@ -433,6 +624,10 @@ impl<'a> ClientConductor<'a> {
             self.driver_proxy.remove_subscription(registration_id)?;
         }
         self.close_resources();
+        for registration_id in self.registration_states.keys().copied().collect::<Vec<_>>() {
+            self.registration_states
+                .insert(registration_id, RegistrationState::Closed);
+        }
         self.driver_proxy.client_close()?;
         self.is_closed = true;
         Ok(())
@@ -449,14 +644,20 @@ impl<'a> ClientConductor<'a> {
         self.subscriptions.clear();
         self.pending_publications.clear();
         self.pending_subscriptions.clear();
+        self.pending_since.clear();
     }
 
     fn load_log_buffers(&self, name: &str) -> Result<LogBuffers> {
-        self.log_buffers
+        let buffers = self
+            .log_buffers
             .get(name)
             .cloned()
             .map(Ok)
-            .unwrap_or_else(|| LogBuffers::from_file(name))
+            .unwrap_or_else(|| LogBuffers::from_file(name))?;
+        if self.pre_touch_mapped_memory {
+            buffers.pre_touch();
+        }
+        Ok(buffers)
     }
 
     fn ensure_open(&self) -> Result<()> {
@@ -535,9 +736,17 @@ mod tests {
         conductor.register_counter(6, subscriber_position);
 
         let publication_correlation = conductor.add_publication("aeron:ipc", 7).unwrap();
+        assert_eq!(
+            conductor.registration_state(publication_correlation),
+            Some(RegistrationState::Pending)
+        );
         conductor
             .on_new_publication(publication_correlation, 100, 33, 7, 5, 9, "pub.log")
             .unwrap();
+        assert_eq!(
+            conductor.registration_state(publication_correlation),
+            Some(RegistrationState::Ready)
+        );
         assert_eq!(conductor.publication(100).unwrap().session_id(), 33);
         assert_eq!(conductor.publication(100).unwrap().initial_term_id(), 11);
 
@@ -577,6 +786,10 @@ mod tests {
                 .image_count(),
             0
         );
+        assert_eq!(
+            conductor.registration_state(subscription_correlation),
+            Some(RegistrationState::Ready)
+        );
     }
 
     #[test]
@@ -597,5 +810,41 @@ mod tests {
         assert!(conductor.timed_out());
         assert!(conductor.is_closed());
         assert_eq!(conductor.publication_count(), 0);
+    }
+
+    #[test]
+    fn supports_exclusive_publication_and_wrong_resource_errors() {
+        let mut bytes = vec![0u8; TRAILER_LENGTH + 4096];
+        let (mut conductor, reader) = conductor(&mut bytes);
+        let subscription = conductor.add_subscription("aeron:ipc", 7).unwrap();
+        let publication = conductor.add_exclusive_publication("aeron:ipc", 8).unwrap();
+        assert!(matches!(
+            conductor.remove_publication(subscription),
+            Err(AeronError::WrongResourceType { .. })
+        ));
+        assert!(matches!(
+            conductor.remove_subscription(publication),
+            Err(AeronError::WrongResourceType { .. })
+        ));
+        let mut types = Vec::new();
+        reader.read(|message_type, _, _, _| types.push(message_type));
+        assert!(types.contains(&crate::driver_proxy::ADD_EXCLUSIVE_PUBLICATION));
+    }
+
+    #[test]
+    fn do_work_sends_keepalive_and_times_out_pending_registration() {
+        let mut bytes = vec![0u8; TRAILER_LENGTH + 4096];
+        let (mut conductor, reader) = conductor(&mut bytes);
+        conductor.set_driver_timeout(Duration::from_millis(10));
+        conductor.add_subscription("aeron:ipc", 7).unwrap();
+        let now = Instant::now() + Duration::from_millis(20);
+        assert!(matches!(
+            conductor.do_work_at(now),
+            Err(AeronError::DriverTimeout(10))
+        ));
+        let mut types = Vec::new();
+        reader.read(|message_type, _, _, _| types.push(message_type));
+        assert!(types.contains(&crate::driver_proxy::CLIENT_KEEPALIVE));
+        assert_eq!(conductor.subscription_count(), 0);
     }
 }

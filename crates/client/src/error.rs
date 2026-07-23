@@ -17,6 +17,16 @@ pub enum AeronError {
     #[error("media driver timed out client {0}")]
     ClientTimeout(i64),
 
+    #[error("media driver did not respond within {0} ms")]
+    DriverTimeout(u64),
+
+    #[error("registration {registration_id} is a {actual}, not a {expected}")]
+    WrongResourceType {
+        registration_id: i64,
+        expected: &'static str,
+        actual: &'static str,
+    },
+
     #[error("{0}")]
     IllegalState(String),
 
