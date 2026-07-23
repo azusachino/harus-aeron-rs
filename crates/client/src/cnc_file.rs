@@ -19,6 +19,13 @@
 //! by [`agrona::ring_buffer::mpsc::ManyToOneRingBuffer`] and
 //! [`agrona::BroadcastTransmitter`]/[`agrona::BroadcastReceiver`]. Because the file is mapped
 //! `MAP_SHARED`, the driver and clients see each other's writes across processes.
+//!
+//! Parity note vs `vendor/aeron` `CncFileDescriptor` (release/1.50.x): the metadata field
+//! offsets, `META_DATA_LENGTH` (CACHE_LINE * 2 = 128), and `CNC_VERSION` (SemanticVersion
+//! 0.2.0 = 512) match upstream. Upstream additionally lays out counters-metadata,
+//! counters-values, and error-log buffers after the to-clients region; those are **not yet
+//! allocated here** (recorded lengths are 0). This subset is sufficient for the command/event
+//! plane but is not yet byte-compatible with a real Aeron client mapping the same file.
 
 use crate::error::{AeronError, Result};
 use agrona::AtomicBuffer;
@@ -30,9 +37,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current CnC file format version negotiated between driver and clients.
-pub const CNC_VERSION: i32 = 16;
+///
+/// Matches upstream `CncFileDescriptor.CNC_VERSION = SemanticVersion.compose(0, 2, 0)`
+/// = `(0 << 16) | (2 << 8) | 0` = 512.
+pub const CNC_VERSION: i32 = 512;
 /// Conventional CnC file name inside the Aeron directory.
 pub const CNC_FILE: &str = "cnc.dat";
+
+/// Default file page size recorded in the CnC metadata.
+pub const DEFAULT_FILE_PAGE_SIZE: i32 = 4096;
 
 const CACHE_LINE_LENGTH: usize = 64;
 
@@ -45,6 +58,7 @@ const ERROR_LOG_LENGTH_OFFSET: usize = 20;
 const CLIENT_LIVENESS_TIMEOUT_OFFSET: usize = 24;
 const START_TIMESTAMP_OFFSET: usize = 32;
 const PID_OFFSET: usize = 40;
+const FILE_PAGE_SIZE_OFFSET: usize = 48;
 
 const fn align(value: usize, alignment: usize) -> usize {
     (value + (alignment - 1)) & !(alignment - 1)
@@ -129,6 +143,7 @@ impl CncFile {
         meta.put_i64(CLIENT_LIVENESS_TIMEOUT_OFFSET, client_liveness_timeout_ns);
         meta.put_i64(START_TIMESTAMP_OFFSET, now_ms());
         meta.put_i64(PID_OFFSET, std::process::id() as i64);
+        meta.put_i32(FILE_PAGE_SIZE_OFFSET, DEFAULT_FILE_PAGE_SIZE);
         // Publish version last so readers that see CNC_VERSION also see the fields above.
         meta.put_i32_ordered(CNC_VERSION_OFFSET, CNC_VERSION);
 
