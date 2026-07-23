@@ -37,6 +37,7 @@ pub const UNTETHERED_LINGER_TIMEOUT_DEFAULT_NS: i64 = -1; // Aeron.NULL_VALUE
 
 pub const MAX_RESEND_PROP_NAME: &str = "aeron.max.resend";
 pub const MAX_RESEND_DEFAULT: i32 = 16;
+pub const MAX_RESEND_MAX: i32 = 256;
 
 /// Driver configuration settings, populated from environment variables or defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]

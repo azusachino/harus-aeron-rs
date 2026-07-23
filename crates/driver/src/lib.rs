@@ -7,4 +7,6 @@
 //! implemented.
 
 pub mod configuration;
+pub mod error;
 pub mod media;
+pub mod publication_params;
