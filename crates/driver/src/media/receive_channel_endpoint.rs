@@ -4,6 +4,12 @@
 
 use std::net::SocketAddr;
 
+use aeron_client::protocol::{
+    CURRENT_VERSION, HDR_TYPE_NAK, HDR_TYPE_SM, NAK_HEADER_LENGTH, NakFlyweight,
+    STATUS_MESSAGE_HEADER_LENGTH, StatusMessageFlyweight,
+};
+use agrona::AtomicBuffer;
+
 use crate::error::Result;
 use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
@@ -53,30 +59,59 @@ impl ReceiveChannelEndpoint {
         // Setup message handling
     }
 
+    /// Build and send a real Status Message flow-control frame to `target`.
     pub fn send_status_message(
         &self,
-        _session_id: i32,
-        _stream_id: i32,
-        _term_id: i32,
-        _term_offset: i32,
-        _window_length: i32,
+        session_id: i32,
+        stream_id: i32,
+        term_id: i32,
+        term_offset: i32,
+        window_length: i32,
         target: SocketAddr,
     ) -> Result<usize> {
-        let sm_buf = [0u8; 32];
-        self.transport.send_to(&sm_buf, target)
+        let mut buf = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        {
+            let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut buf));
+            sm.header()
+                .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+                .set_version(CURRENT_VERSION)
+                .set_flags(0)
+                .set_header_type(HDR_TYPE_SM);
+            sm.set_session_id(session_id)
+                .set_stream_id(stream_id)
+                .set_consumption_term_id(term_id)
+                .set_consumption_term_offset(term_offset)
+                .set_receiver_window_length(window_length)
+                .set_receiver_id(0);
+        }
+        self.transport.send_to(&buf, target)
     }
 
+    /// Build and send a real NAK loss-notification frame to `target`.
     pub fn send_nak(
         &self,
-        _session_id: i32,
-        _stream_id: i32,
-        _term_id: i32,
-        _term_offset: i32,
-        _length: i32,
+        session_id: i32,
+        stream_id: i32,
+        term_id: i32,
+        term_offset: i32,
+        length: i32,
         target: SocketAddr,
     ) -> Result<usize> {
-        let nak_buf = [0u8; 28];
-        self.transport.send_to(&nak_buf, target)
+        let mut buf = [0u8; NAK_HEADER_LENGTH];
+        {
+            let nak = NakFlyweight::new(AtomicBuffer::new(&mut buf));
+            nak.header()
+                .set_frame_length(NAK_HEADER_LENGTH as i32)
+                .set_version(CURRENT_VERSION)
+                .set_flags(0)
+                .set_header_type(HDR_TYPE_NAK);
+            nak.set_session_id(session_id)
+                .set_stream_id(stream_id)
+                .set_term_id(term_id)
+                .set_term_offset(term_offset)
+                .set_length(length);
+        }
+        self.transport.send_to(&buf, target)
     }
 }
 
