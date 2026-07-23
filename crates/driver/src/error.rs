@@ -14,4 +14,10 @@ pub enum DriverError {
     IllegalArgument(String),
 }
 
+impl From<aeron_client::error::AeronError> for DriverError {
+    fn from(err: aeron_client::error::AeronError) -> Self {
+        DriverError::IllegalState(err.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, DriverError>;

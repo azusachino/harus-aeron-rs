@@ -2,6 +2,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use aeron_client::cnc_file::{CncFile, DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH};
+use aeron_client::driver_proxy::DriverProxy;
 use aeron_driver::conductor::DriverConductor;
 use aeron_driver::configuration::Configuration;
 use aeron_driver::media::control_mode::ControlMode;
@@ -13,7 +15,33 @@ use aeron_driver::media::wildcard_port_manager::WildcardPortManager;
 use aeron_driver::publication_params::{
     parse_duration, parse_size, producer_window_length, validate_mtu_length,
 };
+use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 use proptest::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CNC_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Build a conductor bound to a fresh, uniquely-named CnC file plus a client proxy over its
+/// to-driver buffer.
+fn fresh_conductor() -> (DriverConductor, DriverProxy<'static>, std::path::PathBuf) {
+    let seq = CNC_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "aeron-driver-prop-{}-{}.dat",
+        std::process::id(),
+        seq
+    ));
+    let _ = std::fs::remove_file(&path);
+    let cnc = CncFile::create_new(
+        &path,
+        DEFAULT_TO_DRIVER_LENGTH,
+        DEFAULT_TO_CLIENTS_LENGTH,
+        10_000_000_000,
+    )
+    .unwrap();
+    let proxy = DriverProxy::new(ManyToOneRingBuffer::new(cnc.to_driver_buffer()).unwrap(), 1);
+    let conductor = DriverConductor::new(Configuration::default(), cnc).unwrap();
+    (conductor, proxy, path)
+}
 
 proptest! {
     // 1. parse_size roundtrip for numeric values with k/m/g suffixes
@@ -165,20 +193,26 @@ proptest! {
         prop_assert_eq!(read_val, msg_val);
     }
 
-    // 10. DriverConductor registration IDs are strictly increasing
+    // 10. DriverConductor allocates strictly-increasing, contiguous registration ids
     #[test]
     fn prop_conductor_registration_ids(
         count in 1i32..100i32,
     ) {
-        let mut conductor = DriverConductor::new(Configuration::default());
-        let mut last_id = 0i64;
+        let (mut conductor, proxy, path) = fresh_conductor();
 
         for i in 0..count {
-            let reg_id = conductor.on_add_publication(i, "aeron:ipc").unwrap();
-            prop_assert!(reg_id > last_id);
-            last_id = reg_id;
+            proxy.add_publication("aeron:ipc", i).unwrap();
         }
+        conductor.do_work(1_000).unwrap();
+
         prop_assert_eq!(conductor.publications().len(), count as usize);
+        let mut keys: Vec<i64> = conductor.publications().keys().copied().collect();
+        keys.sort_unstable();
+        for (idx, key) in keys.iter().enumerate() {
+            prop_assert_eq!(*key, idx as i64 + 1);
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 
     // 11. DriverConductor add and remove cleans up state completely
@@ -186,18 +220,21 @@ proptest! {
     fn prop_conductor_add_remove_cleanup(
         count in 1i32..50i32,
     ) {
-        let mut conductor = DriverConductor::new(Configuration::default());
-        let mut ids = Vec::new();
+        let (mut conductor, proxy, path) = fresh_conductor();
 
         for i in 0..count {
-            let id = conductor.on_add_subscription(i, "aeron:ipc").unwrap();
-            ids.push(id);
+            proxy.add_subscription("aeron:ipc", i).unwrap();
         }
+        conductor.do_work(1_000).unwrap();
         prop_assert_eq!(conductor.subscriptions().len(), count as usize);
 
+        let ids: Vec<i64> = conductor.subscriptions().keys().copied().collect();
         for id in ids {
-            conductor.on_remove_subscription(id).unwrap();
+            proxy.remove_subscription(id).unwrap();
         }
+        conductor.do_work(2_000).unwrap();
         prop_assert_eq!(conductor.subscriptions().len(), 0);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

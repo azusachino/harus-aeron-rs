@@ -1,64 +1,59 @@
-//! Integration system tests for MediaDriver pub/sub roundtrip messaging over IPC and UDP channels.
+//! Integration tests: a client maps the driver's CnC file and drives real ADD/REMOVE
+//! commands through the to-driver ring buffer; the conductor registers them and replies on
+//! the to-clients broadcast.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
+use aeron_client::driver_events::{ON_OPERATION_SUCCESS, OperationSucceededFlyweight};
+use aeron_client::driver_proxy::DriverProxy;
 use aeron_driver::configuration::Configuration;
 use aeron_driver::driver::MediaDriver;
-use aeron_driver::media::send_channel_endpoint::SendChannelEndpoint;
-use aeron_driver::media::udp_channel::UdpChannel;
-use aeron_driver::media::udp_channel_transport::UdpChannelTransport;
+use agrona::BroadcastReceiver;
+use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 
-#[test]
-fn should_spin_up_driver_and_register_ipc_pub_sub() {
-    let config = Configuration::default();
-    let mut driver = MediaDriver::launch(config).expect("failed to launch MediaDriver");
-
-    let pub_id = driver
-        .conductor_mut()
-        .on_add_publication(1001, "aeron:ipc")
-        .expect("failed to add publication");
-
-    let sub_id = driver
-        .conductor_mut()
-        .on_add_subscription(1001, "aeron:ipc")
-        .expect("failed to add subscription");
-
-    assert_eq!(driver.conductor().publications().len(), 1);
-    assert_eq!(driver.conductor().subscriptions().len(), 1);
-
-    let work = driver.do_work().expect("failed driver duty cycle work");
-    assert_eq!(work, 0);
-
-    driver
-        .conductor_mut()
-        .on_remove_publication(pub_id)
-        .unwrap();
-    driver
-        .conductor_mut()
-        .on_remove_subscription(sub_id)
-        .unwrap();
-
-    assert_eq!(driver.conductor().publications().len(), 0);
-    assert_eq!(driver.conductor().subscriptions().len(), 0);
+fn client_proxy(driver: &MediaDriver, client_id: i64) -> DriverProxy<'static> {
+    let ring = ManyToOneRingBuffer::new(driver.cnc().to_driver_buffer()).unwrap();
+    DriverProxy::new(ring, client_id)
 }
 
 #[test]
-fn should_spin_up_driver_and_register_udp_endpoints() {
-    let config = Configuration::default();
-    let mut driver = MediaDriver::launch(config).expect("failed to launch MediaDriver");
+fn client_registers_ipc_pub_and_sub_through_the_cnc() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
 
-    let channel_str = "aeron:udp?endpoint=localhost:45678";
-    let channel = UdpChannel::parse(channel_str).expect("failed to parse UdpChannel");
-    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    proxy.add_publication("aeron:ipc", 1001).unwrap();
+    proxy.add_subscription("aeron:ipc", 1001).unwrap();
 
-    let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0)
-        .expect("failed to bind UdpChannelTransport");
+    let work = driver.do_work().expect("duty cycle");
+    assert_eq!(work, 2);
+    assert_eq!(driver.conductor().publications().len(), 1);
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+}
 
-    let send_endpoint = SendChannelEndpoint::new(channel, transport);
-    driver.sender_mut().add_send_channel_endpoint(send_endpoint);
+#[test]
+fn removing_a_publication_acks_with_operation_success() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
 
-    assert_eq!(driver.sender().send_channel_endpoints().len(), 1);
+    proxy.add_publication("aeron:ipc", 1001).unwrap();
+    driver.do_work().unwrap();
+    let registration_id = *driver.conductor().publications().keys().next().unwrap();
 
-    let work = driver.do_work().expect("failed driver duty cycle work");
-    assert_eq!(work, 0);
+    // Subscribe to driver events before issuing the remove.
+    let mut events = BroadcastReceiver::new(driver.cnc().to_clients_buffer()).unwrap();
+    let remove_correlation = proxy.remove_publication(registration_id, false).unwrap();
+    driver.do_work().unwrap();
+
+    assert_eq!(driver.conductor().publications().len(), 0);
+
+    let mut seen_type = 0i32;
+    let mut seen_correlation = 0i64;
+    let got = events
+        .receive_next(|msg_type, buf, offset, _len| {
+            seen_type = msg_type;
+            seen_correlation = OperationSucceededFlyweight::wrap(*buf, offset).correlation_id();
+        })
+        .unwrap();
+
+    assert!(got);
+    assert_eq!(seen_type, ON_OPERATION_SUCCESS);
+    assert_eq!(seen_correlation, remove_correlation);
 }
