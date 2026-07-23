@@ -11,6 +11,7 @@ rust-version.workspace = true
 agrona.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+memmap2.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
