@@ -6,6 +6,7 @@
 pub mod control_mode;
 pub mod interface_search_address;
 pub mod named_interface;
+pub mod receive_channel_endpoint;
 pub mod send_channel_endpoint;
 pub mod socket_address_parser;
 pub mod transport_poller;
