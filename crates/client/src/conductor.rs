@@ -76,7 +76,10 @@ impl<'a> ClientConductor<'a> {
             driver_timeout: Duration::from_millis(crate::context::DEFAULT_DRIVER_TIMEOUT_MS),
             last_keepalive: Instant::now(),
             pre_touch_mapped_memory: false,
-            control_protocol_version: crate::driver_events::CONTROL_PROTOCOL_SEMANTIC_VERSION,
+            // Mirrors upstream ClientConductor's default of 0 until a real system counter
+            // confirms the driver's actual control-protocol version; get_next_available_session_id
+            // relies on this staying unsupported (< CONTROL_PROTOCOL_SEMANTIC_VERSION) by default.
+            control_protocol_version: 0,
             next_session_id: None,
         }
     }
@@ -541,13 +544,27 @@ impl<'a> ClientConductor<'a> {
                 actual: "subscription",
             });
         }
-        if let Some(mut publication) = self.publications.remove(&registration_id) {
-            publication.close();
-            self.driver_proxy
-                .remove_publication(registration_id, false)?;
-            self.registration_states
-                .insert(registration_id, RegistrationState::Closed);
-            return Ok(true);
+        // `publications` is keyed by the driver-assigned registration_id, which can differ
+        // from the original correlation_id add_publication() returned to the caller (e.g. a
+        // shared/duplicate publication resolves to another client's existing registration_id).
+        // Fall back to matching on original_registration_id, mirroring on_error's lookup, so
+        // callers can still remove a publication using the id they were originally given.
+        let actual_key = if self.publications.contains_key(&registration_id) {
+            Some(registration_id)
+        } else {
+            self.publications
+                .iter()
+                .find(|(_, publication)| publication.original_registration_id() == registration_id)
+                .map(|(key, _)| *key)
+        };
+        if let Some(actual_key) = actual_key {
+            if let Some(mut publication) = self.publications.remove(&actual_key) {
+                publication.close();
+                self.driver_proxy.remove_publication(actual_key, false)?;
+                self.registration_states
+                    .insert(registration_id, RegistrationState::Closed);
+                return Ok(true);
+            }
         }
         if self.pending_publications.remove(&registration_id).is_some() {
             self.driver_proxy
@@ -846,5 +863,61 @@ mod tests {
         reader.read(|message_type, _, _, _| types.push(message_type));
         assert!(types.contains(&crate::driver_proxy::CLIENT_KEEPALIVE));
         assert_eq!(conductor.subscription_count(), 0);
+    }
+
+    #[test]
+    fn control_protocol_version_defaults_to_zero_and_gates_next_session_id() {
+        let mut bytes = vec![0u8; TRAILER_LENGTH + 4096];
+        let (mut conductor, _reader) = conductor(&mut bytes);
+
+        // Matches upstream: controlProtocolVersion defaults to 0 until a real system counter
+        // confirms the driver's version, so feature-gated commands must be rejected by default.
+        assert_eq!(conductor.control_protocol_version(), 0);
+        assert!(conductor.get_next_available_session_id(7).is_err());
+
+        conductor.register_counter(
+            crate::counters::SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION,
+            Arc::new(AtomicI64::new(
+                crate::driver_events::CONTROL_PROTOCOL_SEMANTIC_VERSION as i64,
+            )),
+        );
+        assert_eq!(
+            conductor.control_protocol_version(),
+            crate::driver_events::CONTROL_PROTOCOL_SEMANTIC_VERSION
+        );
+        assert!(conductor.get_next_available_session_id(7).is_ok());
+    }
+
+    #[test]
+    fn remove_publication_falls_back_to_original_registration_id() {
+        // Simulates a shared/duplicate publication, where the driver-assigned registration_id
+        // can differ from the correlation_id add_publication() returned to the caller. Removal
+        // must still work when the caller only knows the original correlation_id.
+        let mut bytes = vec![0u8; TRAILER_LENGTH + 4096];
+        let (mut conductor, reader) = conductor(&mut bytes);
+        conductor.register_log_buffers("shared.log", log_buffers());
+        conductor.register_counter(5, Arc::new(AtomicI64::new(4096)));
+
+        let correlation_id = conductor.add_publication("aeron:ipc", 7).unwrap();
+        let driver_registration_id = correlation_id + 1000;
+        conductor
+            .on_new_publication(
+                correlation_id,
+                driver_registration_id,
+                33,
+                7,
+                5,
+                9,
+                "shared.log",
+            )
+            .unwrap();
+
+        assert!(conductor.publication(driver_registration_id).is_some());
+        assert!(conductor.remove_publication(correlation_id).unwrap());
+        assert!(conductor.publication(driver_registration_id).is_none());
+
+        let mut types = Vec::new();
+        reader.read(|message_type, _, _, _| types.push(message_type));
+        assert!(types.contains(&crate::driver_proxy::REMOVE_PUBLICATION));
     }
 }
