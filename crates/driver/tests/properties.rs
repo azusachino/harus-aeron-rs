@@ -1,7 +1,9 @@
-//! Property-based tests for aeron-driver configuration, publication parameters, and media transport parsing.
+//! Property-based tests for aeron-driver configuration, publication parameters, media transport parsing, and conductor allocations.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use aeron_driver::conductor::DriverConductor;
+use aeron_driver::configuration::Configuration;
 use aeron_driver::media::control_mode::ControlMode;
 use aeron_driver::media::named_interface::NamedInterface;
 use aeron_driver::media::transport_poller::DataTransportPoller;
@@ -161,5 +163,21 @@ proptest! {
         prop_assert_eq!(bytes, 4);
         prop_assert_eq!(read_bytes, 4);
         prop_assert_eq!(read_val, msg_val);
+    }
+
+    // 10. DriverConductor registration IDs are strictly increasing
+    #[test]
+    fn prop_conductor_registration_ids(
+        count in 1i32..100i32,
+    ) {
+        let mut conductor = DriverConductor::new(Configuration::default());
+        let mut last_id = 0i64;
+
+        for i in 0..count {
+            let reg_id = conductor.on_add_publication(i, "aeron:ipc").unwrap();
+            prop_assert!(reg_id > last_id);
+            last_id = reg_id;
+        }
+        prop_assert_eq!(conductor.publications().len(), count as usize);
     }
 }
