@@ -2,7 +2,8 @@
 //!
 //! Reference implementation: `crates/cluster`. Course chapter: `docs/tutorial/`.
 
-#[allow(dead_code)]
-fn todo_stub() {
-    todo!("implement cluster")
-}
+pub mod cluster_node;
+pub mod codecs;
+pub mod consensus_module;
+pub mod state_machine;
+

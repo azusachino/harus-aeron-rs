@@ -28,6 +28,7 @@ version = "0.0.1"
 dependencies = [
  "aeron-archive",
  "aeron-client",
+ "proptest",
  "thiserror",
  "tokio",
 ]
