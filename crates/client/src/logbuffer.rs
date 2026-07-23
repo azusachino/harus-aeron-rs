@@ -25,9 +25,14 @@ pub const TERM_MAX_LENGTH: i32 = 1024 * 1024 * 1024;
 pub const PAGE_MIN_SIZE: i32 = 4 * 1024;
 pub const PAGE_MAX_SIZE: i32 = 1024 * 1024 * 1024;
 
-pub const LOG_MTU_LENGTH_OFFSET: usize = 272;
-pub const LOG_TERM_LENGTH_OFFSET: usize = 276;
-pub const LOG_PAGE_SIZE_OFFSET: usize = 280;
+// Log metadata field offsets follow vendor LogBufferDescriptor, whose counters are padded to
+// PADDING_SIZE = CACHE_LINE_LENGTH * 2 = 128 (not 64). Fields past the first padded region sit
+// at: end_of_stream_position@256, is_connected@264, correlation_id@512, initial_term_id@520,
+// default_frame_header_length@524, mtu@528, term_length@532, page_size@536,
+// default_frame_header@640.
+pub const LOG_MTU_LENGTH_OFFSET: usize = 528;
+pub const LOG_TERM_LENGTH_OFFSET: usize = 532;
+pub const LOG_PAGE_SIZE_OFFSET: usize = 536;
 
 /// Maximum length allowed for a message, mirroring `FrameDescriptor.MAX_MESSAGE_LENGTH`.
 pub const MAX_MESSAGE_LENGTH: i32 = 16 * 1024 * 1024;
@@ -138,7 +143,7 @@ pub fn compute_position(
     (term_count << position_bits_to_shift) + (term_offset as i64)
 }
 
-pub const LOG_IS_CONNECTED_OFFSET: usize = 136;
+pub const LOG_IS_CONNECTED_OFFSET: usize = 264;
 
 pub fn is_connected(metadata_buffer: &AtomicBuffer) -> bool {
     metadata_buffer.get_i32_volatile(LOG_IS_CONNECTED_OFFSET) == 1
@@ -736,7 +741,7 @@ impl TermReader {
 }
 
 /// Offset at which default frame headers begin in the metadata buffer.
-pub const LOG_DEFAULT_FRAME_HEADER_OFFSET: usize = 320;
+pub const LOG_DEFAULT_FRAME_HEADER_OFFSET: usize = 640;
 
 /// Store/apply the default header template to a term buffer at `term_offset`.
 pub fn apply_default_header(
@@ -856,10 +861,11 @@ impl TermGapFiller {
 
 /// Offset at which initial term ID is stored in metadata buffer.
 ///
-/// Mirrors upstream `LogBufferDescriptor.LOG_INITIAL_TERM_ID_OFFSET` (`PADDING_SIZE * 4 +
-/// SIZE_OF_LONG` = 264). Must NOT collide with `TERM_TAIL_COUNTERS_OFFSET`'s 24-byte span
-/// (partition 2's raw tail sits at byte offset 16) or with `LOG_ACTIVE_TERM_COUNT_OFFSET` (24).
-pub const LOG_INITIAL_TERM_ID_OFFSET: usize = 264;
+/// Mirrors upstream `LogBufferDescriptor.LOG_INITIAL_TERM_ID_OFFSET`
+/// (`PADDING_SIZE * 4 + SIZE_OF_LONG` with `PADDING_SIZE = CACHE_LINE_LENGTH * 2 = 128`,
+/// i.e. `512 + 8 = 520`). Sits well past `TERM_TAIL_COUNTERS_OFFSET`'s 24-byte span and
+/// `LOG_ACTIVE_TERM_COUNT_OFFSET` (24).
+pub const LOG_INITIAL_TERM_ID_OFFSET: usize = 520;
 
 /// Calculate the number of position bits to shift for a given term length.
 ///
