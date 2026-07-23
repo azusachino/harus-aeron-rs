@@ -109,11 +109,20 @@ mod tests {
         poller.register(t2);
 
         let mut received = Vec::new();
-        let bytes = poller
-            .poll_transports(|data, _src| {
-                received.extend_from_slice(data);
-            })
-            .unwrap();
+        let mut bytes = 0;
+
+        for _ in 0..100 {
+            let b = poller
+                .poll_transports(|data, _src| {
+                    received.extend_from_slice(data);
+                })
+                .unwrap();
+            bytes += b;
+            if bytes >= 11 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         assert_eq!(bytes, 11);
         assert_eq!(received, b"hello aeron");

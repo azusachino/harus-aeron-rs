@@ -2,8 +2,11 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use aeron_driver::media::control_mode::ControlMode;
 use aeron_driver::media::named_interface::NamedInterface;
-use aeron_driver::media::udp_channel::canonicalise;
+use aeron_driver::media::transport_poller::DataTransportPoller;
+use aeron_driver::media::udp_channel::{UdpChannel, canonicalise};
+use aeron_driver::media::udp_channel_transport::UdpChannelTransport;
 use aeron_driver::media::wildcard_port_manager::WildcardPortManager;
 use aeron_driver::publication_params::{
     parse_duration, parse_size, producer_window_length, validate_mtu_length,
@@ -102,5 +105,61 @@ proptest! {
         let (p_low, p_high) = WildcardPortManager::parse_port_range(&formatted).unwrap();
         prop_assert_eq!(p_low, low);
         prop_assert_eq!(p_high, high);
+    }
+
+    // 8. ControlMode parsing property
+    #[test]
+    fn prop_control_mode_parse(
+        mode_str in prop_oneof!["dynamic", "manual", "response", "invalid_mode"]
+    ) {
+        let parsed = ControlMode::parse(&mode_str);
+        match mode_str.as_str() {
+            "dynamic" => prop_assert_eq!(parsed, Some(ControlMode::Dynamic)),
+            "manual" => prop_assert_eq!(parsed, Some(ControlMode::Manual)),
+            "response" => prop_assert_eq!(parsed, Some(ControlMode::Response)),
+            _ => prop_assert_eq!(parsed, None),
+        }
+    }
+
+    // 9. UdpChannelTransport datagram delivery property
+    #[test]
+    fn prop_udp_transport_datagram_delivery(
+        msg_val in 1u32..10000u32,
+    ) {
+        let channel1 = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let channel2 = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+        let t1 = UdpChannelTransport::bind(channel1, bind_addr, None, 0, 0).unwrap();
+        let t2 = UdpChannelTransport::bind(channel2, bind_addr, None, 0, 0).unwrap();
+        let t2_addr = t2.local_addr().unwrap();
+
+        let payload = msg_val.to_le_bytes();
+        t1.send_to(&payload, t2_addr).unwrap();
+
+        let mut poller = DataTransportPoller::new();
+        poller.register(t2);
+
+        let mut read_bytes = 0;
+        let mut read_val = 0u32;
+        let mut bytes = 0;
+
+        for _ in 0..100 {
+            let b = poller.poll_transports(|data, _src| {
+                read_bytes += data.len();
+                if data.len() == 4 {
+                    read_val = u32::from_le_bytes(data.try_into().unwrap());
+                }
+            }).unwrap();
+            bytes += b;
+            if bytes >= 4 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        prop_assert_eq!(bytes, 4);
+        prop_assert_eq!(read_bytes, 4);
+        prop_assert_eq!(read_val, msg_val);
     }
 }
