@@ -7,18 +7,24 @@ pub mod spsc;
 pub use mpsc::ManyToOneRingBuffer;
 pub use spsc::OneToOneRingBuffer;
 
+/// Cache line length assumed for false-sharing padding, matching upstream agrona.
+pub const CACHE_LINE_LENGTH: usize = 64;
+/// Each trailer counter occupies two cache lines so producer- and consumer-written
+/// counters never share a cache line (mirrors vendor `RingBufferDescriptor` / C `aeron_rb.h`).
+const COUNTER_PADDING: usize = CACHE_LINE_LENGTH * 2;
+
 /// Offset of the tail position counter in the trailer.
 pub const TAIL_POSITION_OFFSET: usize = 0;
 /// Offset of the cached head position counter in the trailer.
-pub const HEAD_CACHE_POSITION_OFFSET: usize = 8;
+pub const HEAD_CACHE_POSITION_OFFSET: usize = COUNTER_PADDING;
 /// Offset of the head position counter in the trailer.
-pub const HEAD_POSITION_OFFSET: usize = 16;
+pub const HEAD_POSITION_OFFSET: usize = COUNTER_PADDING * 2;
 /// Offset of the correlation counter in the trailer.
-pub const CORRELATION_COUNTER_OFFSET: usize = 24;
+pub const CORRELATION_COUNTER_OFFSET: usize = COUNTER_PADDING * 3;
 /// Offset of the consumer heartbeat timestamp counter in the trailer.
-pub const CONSUMER_HEARTBEAT_OFFSET: usize = 32;
-/// Total length of the trailer at the end of the ring buffer.
-pub const TRAILER_LENGTH: usize = 1024;
+pub const CONSUMER_HEARTBEAT_OFFSET: usize = COUNTER_PADDING * 4;
+/// Total length of the trailer at the end of the ring buffer (5 cache-line-padded counters).
+pub const TRAILER_LENGTH: usize = COUNTER_PADDING * 5;
 
 /// Length of the record header (4 bytes length + 4 bytes type ID).
 pub const HEADER_LENGTH: usize = 8;

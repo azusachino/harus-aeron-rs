@@ -29,7 +29,8 @@
 
 use crate::error::{AeronError, Result};
 use agrona::AtomicBuffer;
-use agrona::ring_buffer::TRAILER_LENGTH;
+use agrona::broadcast::TRAILER_LENGTH as BROADCAST_TRAILER_LENGTH;
+use agrona::ring_buffer::TRAILER_LENGTH as RING_TRAILER_LENGTH;
 use memmap2::MmapMut;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -68,10 +69,10 @@ const fn align(value: usize, alignment: usize) -> usize {
 /// ring/broadcast buffers start cache-line aligned.
 pub const META_DATA_LENGTH: usize = align(48, CACHE_LINE_LENGTH * 2);
 
-/// Default to-driver buffer length (1 MiB of data plus the ring trailer).
-pub const DEFAULT_TO_DRIVER_LENGTH: usize = (1 << 20) + TRAILER_LENGTH;
+/// Default to-driver buffer length (1 MiB of data plus the ring-buffer trailer).
+pub const DEFAULT_TO_DRIVER_LENGTH: usize = (1 << 20) + RING_TRAILER_LENGTH;
 /// Default to-clients buffer length (1 MiB of data plus the broadcast trailer).
-pub const DEFAULT_TO_CLIENTS_LENGTH: usize = (1 << 20) + TRAILER_LENGTH;
+pub const DEFAULT_TO_CLIENTS_LENGTH: usize = (1 << 20) + BROADCAST_TRAILER_LENGTH;
 
 enum CncStorage {
     Mmap(MmapMut),
