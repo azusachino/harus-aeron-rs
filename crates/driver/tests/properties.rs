@@ -180,4 +180,24 @@ proptest! {
         }
         prop_assert_eq!(conductor.publications().len(), count as usize);
     }
+
+    // 11. DriverConductor add and remove cleans up state completely
+    #[test]
+    fn prop_conductor_add_remove_cleanup(
+        count in 1i32..50i32,
+    ) {
+        let mut conductor = DriverConductor::new(Configuration::default());
+        let mut ids = Vec::new();
+
+        for i in 0..count {
+            let id = conductor.on_add_subscription(i, "aeron:ipc").unwrap();
+            ids.push(id);
+        }
+        prop_assert_eq!(conductor.subscriptions().len(), count as usize);
+
+        for id in ids {
+            conductor.on_remove_subscription(id).unwrap();
+        }
+        prop_assert_eq!(conductor.subscriptions().len(), 0);
+    }
 }
