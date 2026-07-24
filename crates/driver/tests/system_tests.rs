@@ -274,3 +274,72 @@ fn network_publication_sender_transmits_setup_and_data_frames() {
     }
     assert_eq!(retransmitted.as_deref(), Some(&b"hello-udp"[..]));
 }
+
+#[test]
+fn udp_publication_to_subscription_roundtrip_through_two_drivers() {
+    const STREAM_ID: i32 = 3003;
+
+    let endpoint_socket = UdpSocket::bind("127.0.0.1:0").expect("reserve endpoint");
+    let endpoint_port = endpoint_socket.local_addr().unwrap().port();
+    drop(endpoint_socket);
+    let channel = format!("aeron:udp?endpoint=127.0.0.1:{endpoint_port}");
+
+    let mut publisher_driver = MediaDriver::launch(small_udp_config()).expect("publisher launch");
+    let mut subscriber_driver = MediaDriver::launch(small_udp_config()).expect("subscriber launch");
+    let mut subscriber = client_conductor(&subscriber_driver, 2);
+    let sub_reg = subscriber.add_subscription(&channel, STREAM_ID).unwrap();
+
+    // Bind the receiving endpoint before the publication sends its first SETUP.
+    subscriber_driver.do_work().expect("register subscription");
+    subscriber.do_work().expect("resolve subscription");
+
+    let mut publisher = client_conductor(&publisher_driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    publisher_driver
+        .do_work()
+        .expect("register publication and send setup");
+    for (id, counter) in publisher_driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("resolve publication");
+
+    // The subscriber receives SETUP, creates its image log, and emits the initial SM.
+    subscriber_driver.do_work().expect("receive setup");
+    for (id, counter) in subscriber_driver.conductor().counters() {
+        subscriber.register_counter(*id, counter.clone());
+    }
+    subscriber.do_work().expect("resolve available image");
+
+    let mut payload = *b"hello-udp-roundtrip";
+    let payload_len = payload.len();
+    let src = AtomicBuffer::new(&mut payload);
+    let publication = publisher.publication(pub_reg).expect("publication ready");
+    assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+
+    let mut received = None;
+    for _ in 0..100 {
+        publisher_driver.do_work().expect("publisher duty cycle");
+        subscriber_driver.do_work().expect("subscriber duty cycle");
+        for (id, counter) in subscriber_driver.conductor().counters() {
+            subscriber.register_counter(*id, counter.clone());
+        }
+        subscriber.do_work().expect("subscriber events");
+        if let Some(subscription) = subscriber.subscription_mut(sub_reg) {
+            let mut fragment = Vec::new();
+            if subscription.poll(
+                |buffer, offset, length, _header| {
+                    fragment.resize(length, 0);
+                    buffer.get_bytes(offset, &mut fragment);
+                },
+                10,
+            ) > 0
+            {
+                received = Some(fragment);
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    assert_eq!(received.as_deref(), Some(&b"hello-udp-roundtrip"[..]));
+}
