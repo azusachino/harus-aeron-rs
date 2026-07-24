@@ -6,26 +6,43 @@
 //! response events on the to-clients broadcast buffer.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use agrona::AtomicBuffer;
 use agrona::BroadcastTransmitter;
 use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 
-use aeron_client::cnc_file::CncFile;
+use aeron_client::cnc_file::{CncFile, DEFAULT_FILE_PAGE_SIZE};
 use aeron_client::command::{
     PublicationMessageFlyweight, RemoveMessageFlyweight, SubscriptionMessageFlyweight,
 };
 use aeron_client::driver_events::{
-    ON_OPERATION_SUCCESS, ON_SUBSCRIPTION_READY, OperationSucceededFlyweight,
-    SubscriptionReadyFlyweight,
+    ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE, ON_EXCLUSIVE_PUBLICATION_READY,
+    ON_OPERATION_SUCCESS, ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, OperationSucceededFlyweight,
+    PublicationBuffersReadyFlyweight, SubscriptionReadyFlyweight,
 };
 use aeron_client::driver_proxy::{
     ADD_EXCLUSIVE_PUBLICATION, ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE, CLIENT_KEEPALIVE,
     REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION,
 };
+use aeron_client::log_buffers::LogBuffers;
+use aeron_client::logbuffer::{set_initial_term_id, set_mtu_length};
 
 use crate::configuration::Configuration;
 use crate::error::{DriverError, Result};
+
+/// Source identity reported for IPC images — matches upstream's `aeron:ipc` channel identity.
+const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
+
+/// Returns `true` for an IPC channel (`aeron:ipc`, optionally with parameters).
+fn is_ipc_channel(channel: &str) -> bool {
+    channel == "aeron:ipc" || channel.starts_with("aeron:ipc?")
+}
+
+/// Round up to the next 4-byte boundary (variable-length command fields are SBE-aligned).
+fn align4(value: usize) -> usize {
+    (value + 3) & !3
+}
 
 #[derive(Debug, Clone)]
 pub struct PublicationEntry {
@@ -35,6 +52,13 @@ pub struct PublicationEntry {
     pub stream_id: i32,
     pub channel: String,
     pub is_exclusive: bool,
+    pub is_ipc: bool,
+    pub session_id: i32,
+    /// Counter id of the publication limit position (driver-assigned).
+    pub publication_limit_counter_id: i32,
+    /// Absolute path of the shared log file backing this publication; `None` until a log
+    /// buffer is allocated (network publications get theirs in the Sender data-path task).
+    pub log_file_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,17 +106,24 @@ pub struct DriverConductor {
     to_driver: ManyToOneRingBuffer<'static>,
     to_clients: BroadcastTransmitter<'static>,
     configuration: Configuration,
+    /// Directory that holds this driver's `publications/` and `images/` log files.
+    aeron_dir: PathBuf,
     client_liveness_timeout_ns: i64,
     next_registration_id: i64,
+    next_session_id: i32,
+    next_counter_id: i32,
     publications: HashMap<i64, PublicationEntry>,
     subscriptions: HashMap<i64, SubscriptionEntry>,
+    /// Registration id -> shared log buffer handle, kept mapped for the publication's life so
+    /// that matching IPC images can hand subscribers the very same log (zero-copy IPC).
+    log_buffers: HashMap<i64, LogBuffers>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
 }
 
 impl DriverConductor {
-    /// Construct a conductor bound to a mapped CnC file.
-    pub fn new(configuration: Configuration, cnc: CncFile) -> Result<Self> {
+    /// Construct a conductor bound to a mapped CnC file, storing its log files under `aeron_dir`.
+    pub fn new(configuration: Configuration, cnc: CncFile, aeron_dir: PathBuf) -> Result<Self> {
         let to_driver = ManyToOneRingBuffer::new(cnc.to_driver_buffer())
             .map_err(|e| DriverError::IllegalState(format!("to-driver ring buffer: {e}")))?;
         let to_clients = BroadcastTransmitter::new(cnc.to_clients_buffer())
@@ -104,10 +135,14 @@ impl DriverConductor {
             to_driver,
             to_clients,
             configuration,
+            aeron_dir,
             client_liveness_timeout_ns,
             next_registration_id: 1,
+            next_session_id: 1,
+            next_counter_id: 1,
             publications: HashMap::new(),
             subscriptions: HashMap::new(),
+            log_buffers: HashMap::new(),
             clients: HashMap::new(),
         })
     }
@@ -142,21 +177,7 @@ impl DriverConductor {
                 exclusive,
             } => {
                 self.touch_client(client_id, now_ns);
-                let registration_id = self.next_id();
-                self.publications.insert(
-                    registration_id,
-                    PublicationEntry {
-                        registration_id,
-                        correlation_id,
-                        client_id,
-                        stream_id,
-                        channel,
-                        is_exclusive: exclusive,
-                    },
-                );
-                // PUBLICATION_READY (with the shared log file) is emitted once the log buffer
-                // is allocated — see the IPC/network publication tasks.
-                Ok(())
+                self.on_add_publication(client_id, correlation_id, stream_id, channel, exclusive)
             }
             Command::AddSubscription {
                 client_id,
@@ -165,23 +186,31 @@ impl DriverConductor {
                 channel,
             } => {
                 self.touch_client(client_id, now_ns);
-                let registration_id = self.next_id();
+                // The subscription's registration id is the client's correlation id — that is
+                // the id the client keys its subscription by and the driver echoes back in
+                // AVAILABLE_IMAGE (upstream SubscriptionLink semantics).
+                let registration_id = correlation_id;
                 self.subscriptions.insert(
                     registration_id,
                     SubscriptionEntry {
                         registration_id,
                         client_id,
                         stream_id,
-                        channel,
+                        channel: channel.clone(),
                     },
                 );
-                self.on_subscription_ready(correlation_id)
+                self.on_subscription_ready(correlation_id)?;
+                if is_ipc_channel(&channel) {
+                    self.link_ipc_subscription(registration_id, stream_id)?;
+                }
+                Ok(())
             }
             Command::RemovePublication {
                 correlation_id,
                 registration_id,
             } => {
                 self.publications.remove(&registration_id);
+                self.log_buffers.remove(&registration_id);
                 self.on_operation_success(correlation_id)
             }
             Command::RemoveSubscription {
@@ -208,13 +237,160 @@ impl DriverConductor {
         id
     }
 
+    fn next_session_id(&mut self) -> i32 {
+        let id = self.next_session_id;
+        self.next_session_id += 1;
+        id
+    }
+
+    fn next_counter_id(&mut self) -> i32 {
+        let id = self.next_counter_id;
+        self.next_counter_id += 1;
+        id
+    }
+
+    /// Register a publication and, for IPC, allocate its shared log buffer, notify the client
+    /// with PUBLICATION_READY, then connect any subscription already waiting on the stream.
+    fn on_add_publication(
+        &mut self,
+        client_id: i64,
+        correlation_id: i64,
+        stream_id: i32,
+        channel: String,
+        exclusive: bool,
+    ) -> Result<()> {
+        // The publication's registration id is the client's correlation id (single-publisher
+        // path); the client keys its publication by the registration id echoed back here.
+        let registration_id = correlation_id;
+        let is_ipc = is_ipc_channel(&channel);
+        let session_id = self.next_session_id();
+        let publication_limit_counter_id = self.next_counter_id();
+
+        let log_file_name = if is_ipc {
+            let (name, buffers) = self.allocate_ipc_log_buffers(registration_id)?;
+            self.log_buffers.insert(registration_id, buffers);
+            Some(name)
+        } else {
+            None
+        };
+
+        self.publications.insert(
+            registration_id,
+            PublicationEntry {
+                registration_id,
+                correlation_id,
+                client_id,
+                stream_id,
+                channel,
+                is_exclusive: exclusive,
+                is_ipc,
+                session_id,
+                publication_limit_counter_id,
+                log_file_name: log_file_name.clone(),
+            },
+        );
+
+        if let Some(log_file_name) = log_file_name {
+            self.on_publication_ready(
+                correlation_id,
+                registration_id,
+                session_id,
+                stream_id,
+                publication_limit_counter_id,
+                &log_file_name,
+                exclusive,
+            )?;
+            self.link_ipc_publication(registration_id, stream_id, session_id, &log_file_name)?;
+        }
+        Ok(())
+    }
+
+    /// Create and map a fresh IPC log file under `aeron_dir/publications/`, initialising its
+    /// metadata so publishers and subscribers see a valid, shared log.
+    fn allocate_ipc_log_buffers(&self, registration_id: i64) -> Result<(String, LogBuffers)> {
+        let dir = self.aeron_dir.join("publications");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| DriverError::IllegalState(format!("create publications dir: {e}")))?;
+        let path = dir.join(format!("{registration_id}.logbuffer"));
+
+        let term_length = self.configuration.ipc_term_buffer_length as i32;
+        let buffers = LogBuffers::map_new(&path, term_length, DEFAULT_FILE_PAGE_SIZE)
+            .map_err(|e| DriverError::IllegalState(format!("map IPC log buffer: {e}")))?;
+
+        // Fresh logs start at initial term id 0; record the negotiated IPC MTU so appenders
+        // frame consistently with what the client will read.
+        let meta = buffers.meta_data_buffer();
+        set_initial_term_id(&meta, 0);
+        set_mtu_length(&meta, self.configuration.ipc_mtu_length as i32);
+
+        let name = path.to_string_lossy().into_owned();
+        Ok((name, buffers))
+    }
+
+    /// Connect a newly added IPC subscription to every matching existing IPC publication.
+    fn link_ipc_subscription(
+        &mut self,
+        subscription_registration_id: i64,
+        stream_id: i32,
+    ) -> Result<()> {
+        let matches: Vec<(i32, String)> = self
+            .publications
+            .values()
+            .filter(|p| p.is_ipc && p.stream_id == stream_id)
+            .filter_map(|p| p.log_file_name.clone().map(|name| (p.session_id, name)))
+            .collect();
+        for (session_id, log_file_name) in matches {
+            self.on_available_image(
+                session_id,
+                stream_id,
+                subscription_registration_id,
+                &log_file_name,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Connect a newly added IPC publication to every matching existing IPC subscription.
+    fn link_ipc_publication(
+        &mut self,
+        _registration_id: i64,
+        stream_id: i32,
+        session_id: i32,
+        log_file_name: &str,
+    ) -> Result<()> {
+        let subscribers: Vec<i64> = self
+            .subscriptions
+            .values()
+            .filter(|s| is_ipc_channel(&s.channel) && s.stream_id == stream_id)
+            .map(|s| s.registration_id)
+            .collect();
+        for subscription_registration_id in subscribers {
+            self.on_available_image(
+                session_id,
+                stream_id,
+                subscription_registration_id,
+                log_file_name,
+            )?;
+        }
+        Ok(())
+    }
+
     fn touch_client(&mut self, client_id: i64, now_ns: i64) {
         self.clients.insert(client_id, now_ns);
     }
 
     fn remove_client(&mut self, client_id: i64) {
         self.clients.remove(&client_id);
-        self.publications.retain(|_, p| p.client_id != client_id);
+        let removed: Vec<i64> = self
+            .publications
+            .values()
+            .filter(|p| p.client_id == client_id)
+            .map(|p| p.registration_id)
+            .collect();
+        for registration_id in removed {
+            self.publications.remove(&registration_id);
+            self.log_buffers.remove(&registration_id);
+        }
         self.subscriptions.retain(|_, s| s.client_id != client_id);
     }
 
@@ -233,6 +409,63 @@ impl DriverConductor {
             self.remove_client(*client_id);
         }
         expired.len()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_publication_ready(
+        &mut self,
+        correlation_id: i64,
+        registration_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        publication_limit_counter_id: i32,
+        log_file_name: &str,
+        exclusive: bool,
+    ) -> Result<()> {
+        // 32-byte fixed body + length-prefixed log file name.
+        let mut scratch = vec![0u8; 32 + 4 + log_file_name.len()];
+        let len = scratch.len();
+        let buf = AtomicBuffer::new(&mut scratch);
+        let fw = PublicationBuffersReadyFlyweight::wrap(buf, 0);
+        fw.set_correlation_id(correlation_id);
+        fw.set_registration_id(registration_id);
+        fw.set_session_id(session_id);
+        fw.set_stream_id(stream_id);
+        fw.set_publication_limit_counter_id(publication_limit_counter_id);
+        fw.set_channel_status_counter_id(-1);
+        fw.set_log_file_name(log_file_name);
+        let msg_type = if exclusive {
+            ON_EXCLUSIVE_PUBLICATION_READY
+        } else {
+            ON_PUBLICATION_READY
+        };
+        self.transmit(msg_type, &buf, len)
+    }
+
+    fn on_available_image(
+        &mut self,
+        session_id: i32,
+        stream_id: i32,
+        subscription_registration_id: i64,
+        log_file_name: &str,
+    ) -> Result<()> {
+        let correlation_id = self.next_id();
+        let subscriber_position_id = self.next_counter_id();
+        // 28-byte fixed body + length-prefixed log file name + length-prefixed source identity.
+        let name_field = 4 + align4(log_file_name.len());
+        let source_field = 4 + IPC_SOURCE_IDENTITY.len();
+        let mut scratch = vec![0u8; 28 + name_field + source_field];
+        let len = scratch.len();
+        let buf = AtomicBuffer::new(&mut scratch);
+        let fw = ImageBuffersReadyFlyweight::wrap(buf, 0);
+        fw.set_correlation_id(correlation_id);
+        fw.set_session_id(session_id);
+        fw.set_stream_id(stream_id);
+        fw.set_subscription_registration_id(subscription_registration_id);
+        fw.set_subscriber_position_id(subscriber_position_id);
+        fw.set_log_file_name(log_file_name);
+        fw.set_source_identity(IPC_SOURCE_IDENTITY);
+        self.transmit(ON_AVAILABLE_IMAGE, &buf, len)
     }
 
     fn on_subscription_ready(&self, correlation_id: i64) -> Result<()> {
@@ -344,6 +577,33 @@ mod tests {
     const CLIENT_ID: i64 = 42;
     const LIVENESS_TIMEOUT_NS: i64 = 10_000_000_000;
 
+    /// A tiny IPC term length keeps test log files fast to map (64 KiB terms, not 64 MiB).
+    fn small_config() -> Configuration {
+        Configuration {
+            ipc_term_buffer_length: aeron_client::logbuffer::TERM_MIN_LENGTH as usize,
+            ..Configuration::default()
+        }
+    }
+
+    /// A per-test scratch directory for the driver's log files, removed on drop.
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(tag: &str) -> TempDir {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-conductor-dir-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        TempDir(path)
+    }
+
     fn temp_cnc(tag: &str) -> (CncFile, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!(
             "aeron-conductor-{}-{}-{:?}.dat",
@@ -370,7 +630,9 @@ mod tests {
     #[test]
     fn registers_publication_and_subscription_from_commands() {
         let (cnc, path) = temp_cnc("register");
-        let mut conductor = DriverConductor::new(Configuration::default(), cnc.clone()).unwrap();
+        let dir = temp_dir("register");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
 
         let client = proxy(&cnc);
         client.add_publication("aeron:ipc", 1001).unwrap();
@@ -394,7 +656,9 @@ mod tests {
     #[test]
     fn publishes_subscription_ready_event_to_clients() {
         let (cnc, path) = temp_cnc("subready");
-        let mut conductor = DriverConductor::new(Configuration::default(), cnc.clone()).unwrap();
+        let dir = temp_dir("subready");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
 
         // Client subscribes to events first (broadcast delivers only after listening).
         let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
@@ -423,7 +687,9 @@ mod tests {
     #[test]
     fn remove_publishes_operation_success_and_drops_registration() {
         let (cnc, path) = temp_cnc("remove");
-        let mut conductor = DriverConductor::new(Configuration::default(), cnc.clone()).unwrap();
+        let dir = temp_dir("remove");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
 
         let client = proxy(&cnc);
         let sub_correlation = client.add_subscription("aeron:ipc", 7).unwrap();
@@ -456,7 +722,9 @@ mod tests {
     #[test]
     fn sweeps_clients_that_stop_sending_keepalives() {
         let (cnc, path) = temp_cnc("liveness");
-        let mut conductor = DriverConductor::new(Configuration::default(), cnc.clone()).unwrap();
+        let dir = temp_dir("liveness");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
 
         let client = proxy(&cnc);
         client.add_publication("aeron:ipc", 1001).unwrap();
@@ -473,6 +741,94 @@ mod tests {
             0,
             "timed-out client's resources removed"
         );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ipc_publication_allocates_shared_log_and_emits_publication_ready() {
+        let (cnc, path) = temp_cnc("ipcpub");
+        let dir = temp_dir("ipcpub");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+        let correlation_id = client.add_publication("aeron:ipc", 1001).unwrap();
+        conductor.do_work(1_000).unwrap();
+
+        // The publication carries a real, mappable log file.
+        let entry = conductor.publications().values().next().unwrap().clone();
+        assert!(entry.is_ipc);
+        let log_file_name = entry.log_file_name.clone().expect("ipc log allocated");
+        let mapped = LogBuffers::map_existing(&log_file_name).expect("shared log mappable");
+        assert_eq!(mapped.term_length(), small_config().ipc_term_buffer_length);
+
+        // And PUBLICATION_READY is delivered to the client with the same log file name.
+        let mut seen_type = 0i32;
+        let mut seen_name = String::new();
+        let mut seen_session = 0i32;
+        let got = events
+            .receive_next(|msg_type, buf, offset, _len| {
+                seen_type = msg_type;
+                let fw = PublicationBuffersReadyFlyweight::wrap(*buf, offset);
+                seen_session = fw.session_id();
+                seen_name = fw.log_file_name().unwrap();
+            })
+            .unwrap();
+        assert!(got);
+        assert_eq!(seen_type, ON_PUBLICATION_READY);
+        assert_eq!(seen_name, log_file_name);
+        assert_eq!(seen_session, entry.session_id);
+        assert_eq!(correlation_id, entry.correlation_id);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ipc_publication_and_subscription_connect_with_available_image() {
+        let (cnc, path) = temp_cnc("ipcimage");
+        let dir = temp_dir("ipcimage");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+        // Subscription first, publication second — the image links on the later add.
+        let sub_correlation = client.add_subscription("aeron:ipc", 7).unwrap();
+        client.add_publication("aeron:ipc", 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+
+        let pub_log = conductor
+            .publications()
+            .values()
+            .next()
+            .unwrap()
+            .log_file_name
+            .clone()
+            .unwrap();
+
+        // Drain events, capturing the AVAILABLE_IMAGE.
+        let mut image_name = None;
+        let mut image_sub_reg = 0i64;
+        let mut image_source = String::new();
+        while events
+            .receive_next(|msg_type, buf, offset, _len| {
+                if msg_type == ON_AVAILABLE_IMAGE {
+                    let fw = ImageBuffersReadyFlyweight::wrap(*buf, offset);
+                    image_name = Some(fw.log_file_name().unwrap());
+                    image_sub_reg = fw.subscription_registration_id();
+                    image_source = fw.source_identity().unwrap();
+                }
+            })
+            .unwrap()
+        {}
+
+        assert_eq!(image_name.as_deref(), Some(pub_log.as_str()));
+        assert_eq!(image_sub_reg, sub_correlation);
+        assert_eq!(image_source, "aeron:ipc");
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);

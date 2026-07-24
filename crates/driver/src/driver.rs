@@ -23,6 +23,7 @@ static DRIVER_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct MediaDriver {
     configuration: Configuration,
+    aeron_dir: PathBuf,
     cnc_path: PathBuf,
     conductor: DriverConductor,
     sender: Sender,
@@ -38,11 +39,12 @@ impl MediaDriver {
     /// lifecycle task.
     pub fn launch(configuration: Configuration) -> Result<Self> {
         let instance = DRIVER_INSTANCE.fetch_add(1, Ordering::Relaxed);
-        let cnc_path = std::env::temp_dir().join(format!(
-            "aeron-driver-{}-{}-cnc.dat",
-            std::process::id(),
-            instance
-        ));
+        let aeron_dir =
+            std::env::temp_dir().join(format!("aeron-driver-{}-{}", std::process::id(), instance));
+        std::fs::create_dir_all(&aeron_dir).map_err(|e| {
+            crate::error::DriverError::IllegalState(format!("create aeron dir: {e}"))
+        })?;
+        let cnc_path = aeron_dir.join(aeron_client::cnc_file::CNC_FILE);
 
         let cnc = CncFile::create_new(
             &cnc_path,
@@ -51,12 +53,13 @@ impl MediaDriver {
             CLIENT_LIVENESS_TIMEOUT_NS,
         )?;
 
-        let conductor = DriverConductor::new(configuration.clone(), cnc)?;
+        let conductor = DriverConductor::new(configuration.clone(), cnc, aeron_dir.clone())?;
         let sender = Sender::new();
         let receiver = Receiver::new();
 
         Ok(Self {
             configuration,
+            aeron_dir,
             cnc_path,
             conductor,
             sender,
@@ -81,6 +84,11 @@ impl MediaDriver {
 
     pub fn cnc_path(&self) -> &std::path::Path {
         &self.cnc_path
+    }
+
+    /// Directory holding this driver's CnC file and per-publication log files.
+    pub fn aeron_dir(&self) -> &std::path::Path {
+        &self.aeron_dir
     }
 
     pub fn configuration(&self) -> &Configuration {
@@ -114,7 +122,7 @@ impl MediaDriver {
 
 impl Drop for MediaDriver {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.cnc_path);
+        let _ = std::fs::remove_dir_all(&self.aeron_dir);
     }
 }
 

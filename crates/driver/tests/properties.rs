@@ -25,12 +25,11 @@ static CNC_SEQ: AtomicU64 = AtomicU64::new(0);
 /// to-driver buffer.
 fn fresh_conductor() -> (DriverConductor, DriverProxy<'static>, std::path::PathBuf) {
     let seq = CNC_SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "aeron-driver-prop-{}-{}.dat",
-        std::process::id(),
-        seq
-    ));
-    let _ = std::fs::remove_file(&path);
+    let dir =
+        std::env::temp_dir().join(format!("aeron-driver-prop-{}-{}", std::process::id(), seq));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cnc.dat");
     let cnc = CncFile::create_new(
         &path,
         DEFAULT_TO_DRIVER_LENGTH,
@@ -39,8 +38,13 @@ fn fresh_conductor() -> (DriverConductor, DriverProxy<'static>, std::path::PathB
     )
     .unwrap();
     let proxy = DriverProxy::new(ManyToOneRingBuffer::new(cnc.to_driver_buffer()).unwrap(), 1);
-    let conductor = DriverConductor::new(Configuration::default(), cnc).unwrap();
-    (conductor, proxy, path)
+    // Tiny IPC term length keeps each allocated log file cheap to map in property runs.
+    let config = Configuration {
+        ipc_term_buffer_length: aeron_client::logbuffer::TERM_MIN_LENGTH as usize,
+        ..Configuration::default()
+    };
+    let conductor = DriverConductor::new(config, cnc, dir.clone()).unwrap();
+    (conductor, proxy, dir)
 }
 
 proptest! {
@@ -212,7 +216,7 @@ proptest! {
             prop_assert_eq!(*key, idx as i64 + 1);
         }
 
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     // 11. DriverConductor add and remove cleans up state completely
@@ -235,6 +239,6 @@ proptest! {
         conductor.do_work(2_000).unwrap();
         prop_assert_eq!(conductor.subscriptions().len(), 0);
 
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&path);
     }
 }
