@@ -32,6 +32,12 @@ pub struct LossRange {
     pub length: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageLink {
+    subscription_registration_id: i64,
+    correlation_id: i64,
+}
+
 /// Reassembles a single session's data frames into a shared image log.
 pub struct PublicationImage {
     session_id: i32,
@@ -42,8 +48,7 @@ pub struct PublicationImage {
     log_buffers: LogBuffers,
     log_file_name: String,
     source_addr: SocketAddr,
-    subscription_registration_id: i64,
-    correlation_id: i64,
+    image_links: Vec<ImageLink>,
     hwm_position: i64,
     rebuild_position: i64,
     pending_loss: Option<LossRange>,
@@ -73,8 +78,10 @@ impl PublicationImage {
             log_buffers,
             log_file_name,
             source_addr,
-            subscription_registration_id,
-            correlation_id,
+            image_links: vec![ImageLink {
+                subscription_registration_id,
+                correlation_id,
+            }],
             hwm_position: 0,
             rebuild_position: 0,
             pending_loss: None,
@@ -100,11 +107,49 @@ impl PublicationImage {
     }
 
     pub fn subscription_registration_id(&self) -> i64 {
-        self.subscription_registration_id
+        self.image_links
+            .first()
+            .map_or(0, |link| link.subscription_registration_id)
     }
 
     pub fn correlation_id(&self) -> i64 {
-        self.correlation_id
+        self.image_links
+            .first()
+            .map_or(0, |link| link.correlation_id)
+    }
+
+    pub fn image_links(&self) -> impl Iterator<Item = (i64, i64)> + '_ {
+        self.image_links
+            .iter()
+            .map(|link| (link.subscription_registration_id, link.correlation_id))
+    }
+
+    pub fn has_subscription(&self, subscription_registration_id: i64) -> bool {
+        self.image_links
+            .iter()
+            .any(|link| link.subscription_registration_id == subscription_registration_id)
+    }
+
+    pub fn add_subscription_link(
+        &mut self,
+        subscription_registration_id: i64,
+        correlation_id: i64,
+    ) {
+        if !self.has_subscription(subscription_registration_id) {
+            self.image_links.push(ImageLink {
+                subscription_registration_id,
+                correlation_id,
+            });
+        }
+    }
+
+    pub fn remove_subscription_link(&mut self, subscription_registration_id: i64) {
+        self.image_links
+            .retain(|link| link.subscription_registration_id != subscription_registration_id);
+    }
+
+    pub fn has_no_subscriptions(&self) -> bool {
+        self.image_links.is_empty()
     }
 
     pub fn touch(&mut self, now_ns: i64) {
@@ -297,6 +342,11 @@ mod tests {
             11,
             12,
         );
+        assert_eq!(image.image_links().collect::<Vec<_>>(), vec![(11, 12)]);
+        image.add_subscription_link(13, 14);
+        assert!(image.has_subscription(13));
+        image.remove_subscription_link(13);
+        assert!(!image.has_subscription(13));
 
         let mut second = data_frame(1, 64, 0x22);
         let second_buffer = AtomicBuffer::new(&mut second);

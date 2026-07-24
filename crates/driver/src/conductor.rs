@@ -271,6 +271,7 @@ impl DriverConductor {
                     self.link_ipc_subscription(registration_id, stream_id)?;
                 } else if is_udp_channel(&channel) {
                     self.add_receive_endpoint(&channel)?;
+                    self.link_network_subscription(registration_id, stream_id)?;
                 }
                 Ok(())
             }
@@ -510,17 +511,54 @@ impl DriverConductor {
         let stream_id = setup.stream_id();
         let image_key = (session_id, stream_id, source);
         if self.images.contains_key(&image_key) {
+            let Some(log_file_name) = self
+                .images
+                .get(&image_key)
+                .map(|image| image.log_file_name().to_owned())
+            else {
+                return Ok(());
+            };
+            let subscribers: Vec<i64> = self
+                .subscriptions
+                .values()
+                .filter(|s| is_udp_channel(&s.channel) && s.stream_id == stream_id)
+                .map(|s| s.registration_id)
+                .collect();
+            let mut new_links = Vec::new();
+            for subscription_registration_id in subscribers {
+                let already_linked = self
+                    .images
+                    .get(&image_key)
+                    .is_some_and(|image| image.has_subscription(subscription_registration_id));
+                if !already_linked {
+                    let correlation_id = self.on_available_image(
+                        session_id,
+                        stream_id,
+                        subscription_registration_id,
+                        &log_file_name,
+                        UDP_SOURCE_IDENTITY,
+                    )?;
+                    new_links.push((subscription_registration_id, correlation_id));
+                }
+            }
+            if let Some(image) = self.images.get_mut(&image_key) {
+                for (subscription_registration_id, correlation_id) in new_links {
+                    image.add_subscription_link(subscription_registration_id, correlation_id);
+                }
+                image.touch(now_ns);
+            }
             return Ok(());
         }
 
-        let subscriber: Option<i64> = self
+        let subscribers: Vec<i64> = self
             .subscriptions
             .values()
-            .find(|s| is_udp_channel(&s.channel) && s.stream_id == stream_id)
-            .map(|s| s.registration_id);
-        let Some(subscription_registration_id) = subscriber else {
+            .filter(|s| is_udp_channel(&s.channel) && s.stream_id == stream_id)
+            .map(|s| s.registration_id)
+            .collect();
+        if subscribers.is_empty() {
             return Ok(());
-        };
+        }
 
         let initial_term_id = setup.initial_term_id();
         let term_length = setup.term_length();
@@ -533,6 +571,10 @@ impl DriverConductor {
             mtu_length,
         )?;
 
+        let mut links = subscribers.into_iter();
+        let Some(subscription_registration_id) = links.next() else {
+            return Ok(());
+        };
         let correlation_id = self.on_available_image(
             session_id,
             stream_id,
@@ -545,13 +587,23 @@ impl DriverConductor {
             stream_id,
             initial_term_id,
             buffers,
-            log_file_name,
+            log_file_name.clone(),
             source,
             subscription_registration_id,
             correlation_id,
         );
         image.touch(now_ns);
         image.activate();
+        for subscription_registration_id in links {
+            let correlation_id = self.on_available_image(
+                session_id,
+                stream_id,
+                subscription_registration_id,
+                &log_file_name,
+                UDP_SOURCE_IDENTITY,
+            )?;
+            image.add_subscription_link(subscription_registration_id, correlation_id);
+        }
         self.images.insert(image_key, image);
         Ok(())
     }
@@ -684,6 +736,41 @@ impl DriverConductor {
         Ok(())
     }
 
+    /// Link a newly registered UDP subscription to images already active for its stream.
+    ///
+    /// Aeron performs this link from the conductor; waiting for another SETUP packet would
+    /// leave a late subscriber disconnected until the publisher's periodic announcement.
+    fn link_network_subscription(
+        &mut self,
+        subscription_registration_id: i64,
+        stream_id: i32,
+    ) -> Result<()> {
+        let images: Vec<((i32, i32, SocketAddr), String)> = self
+            .images
+            .iter()
+            .filter(|(_, image)| {
+                image.stream_id() == stream_id
+                    && !image.has_subscription(subscription_registration_id)
+            })
+            .map(|(key, image)| (*key, image.log_file_name().to_owned()))
+            .collect();
+
+        for (key, log_file_name) in images {
+            let (session_id, _, _) = key;
+            let correlation_id = self.on_available_image(
+                session_id,
+                stream_id,
+                subscription_registration_id,
+                &log_file_name,
+                UDP_SOURCE_IDENTITY,
+            )?;
+            if let Some(image) = self.images.get_mut(&key) {
+                image.add_subscription_link(subscription_registration_id, correlation_id);
+            }
+        }
+        Ok(())
+    }
+
     /// Connect a newly added IPC publication to every matching existing IPC subscription.
     fn link_ipc_publication(
         &mut self,
@@ -768,18 +855,24 @@ impl DriverConductor {
         let keys: Vec<(i32, i32, SocketAddr)> = self
             .images
             .iter()
-            .filter(|(_, image)| {
-                image.subscription_registration_id() == subscription_registration_id
-            })
+            .filter(|(_, image)| image.has_subscription(subscription_registration_id))
             .map(|(key, _)| *key)
             .collect();
 
         for key in keys {
-            if let Some(mut image) = self.images.remove(&key) {
-                image.deactivate();
-                let log_file_name = image.log_file_name().to_owned();
-                drop(image);
-                let _ = std::fs::remove_file(log_file_name);
+            let remove_image = if let Some(image) = self.images.get_mut(&key) {
+                image.remove_subscription_link(subscription_registration_id);
+                image.has_no_subscriptions()
+            } else {
+                false
+            };
+            if remove_image {
+                if let Some(mut image) = self.images.remove(&key) {
+                    image.deactivate();
+                    let log_file_name = image.log_file_name().to_owned();
+                    drop(image);
+                    let _ = std::fs::remove_file(log_file_name);
+                }
             }
         }
     }
@@ -813,10 +906,10 @@ impl DriverConductor {
         for key in expired {
             if let Some(mut image) = self.images.remove(&key) {
                 image.deactivate();
-                self.on_unavailable_image(
-                    image.correlation_id(),
-                    image.subscription_registration_id(),
-                )?;
+                let links: Vec<_> = image.image_links().collect();
+                for (subscription_registration_id, correlation_id) in links {
+                    self.on_unavailable_image(correlation_id, subscription_registration_id)?;
+                }
                 work += 1;
             }
         }
@@ -1215,6 +1308,92 @@ mod tests {
             vec![registration_id]
         );
         assert!(conductor.publications().is_empty());
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn links_late_udp_subscription_to_existing_image() {
+        let (cnc, path) = temp_cnc("udp-image-fanout");
+        let dir = temp_dir("udp-image-fanout");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+        let channel = "aeron:udp?endpoint=127.0.0.1:0";
+        let first_subscription = client.add_subscription(channel, 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+        let _ = conductor.take_new_receive_endpoints();
+
+        let source = SocketAddr::from(([127, 0, 0, 1], 9004));
+        let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_SETUP);
+        setup
+            .set_session_id(7)
+            .set_stream_id(7)
+            .set_initial_term_id(0)
+            .set_active_term_id(0)
+            .set_term_offset(0)
+            .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+        conductor
+            .on_received_frame(&setup_bytes, source, 2_000)
+            .unwrap();
+        let mut initial_available = 0;
+        while events
+            .receive_next(|msg_type, _, _, _| {
+                if msg_type == ON_AVAILABLE_IMAGE {
+                    initial_available += 1;
+                }
+            })
+            .unwrap()
+        {}
+        assert_eq!(initial_available, 1);
+
+        let second_subscription = client.add_subscription(channel, 7).unwrap();
+        conductor.do_work(3_000).unwrap();
+        let _ = conductor.take_new_receive_endpoints();
+
+        let mut late_available = 0;
+        while events
+            .receive_next(|msg_type, _, _, _| {
+                if msg_type == ON_AVAILABLE_IMAGE {
+                    late_available += 1;
+                }
+            })
+            .unwrap()
+        {}
+        assert_eq!(late_available, 1);
+        assert_eq!(conductor.images.len(), 1);
+        assert_eq!(
+            conductor
+                .images
+                .values()
+                .next()
+                .map(|image| image.image_links().count()),
+            Some(2)
+        );
+
+        client.remove_subscription(second_subscription).unwrap();
+        conductor.do_work(5_000).unwrap();
+        assert_eq!(
+            conductor
+                .images
+                .values()
+                .next()
+                .map(|image| image.image_links().count()),
+            Some(1)
+        );
+        client.remove_subscription(first_subscription).unwrap();
+        conductor.do_work(6_000).unwrap();
+        assert!(conductor.images.is_empty());
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
