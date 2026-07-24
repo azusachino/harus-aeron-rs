@@ -68,6 +68,8 @@ const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
 const UDP_SOURCE_IDENTITY: &str = "aeron:udp";
 
 const IMAGE_LIVENESS_TIMEOUT_NS: i64 = 10_000_000_000;
+/// Matches `Configuration.PENDING_SETUPS_TIMEOUT_NS` in vendored Aeron.
+const PENDING_SETUPS_TIMEOUT_NS: i64 = 1_000_000_000;
 
 type NetworkImageKey = (String, i32, i32, SocketAddr);
 type NetworkSessionKey = NetworkImageKey;
@@ -217,7 +219,7 @@ pub struct DriverConductor {
     /// DataPacketDispatcher-equivalent state for network sessions without an active image.
     session_states: HashMap<NetworkSessionKey, (NetworkSessionState, i64)>,
     /// DATA-before-SETUP sessions for which the one-shot setup-eliciting SM was sent.
-    setup_elicited: HashSet<NetworkSessionKey>,
+    setup_elicited: HashMap<NetworkSessionKey, i64>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
 }
@@ -267,7 +269,7 @@ impl DriverConductor {
             removed_network_publications: Vec::new(),
             images: HashMap::new(),
             session_states: HashMap::new(),
-            setup_elicited: HashSet::new(),
+            setup_elicited: HashMap::new(),
             clients: HashMap::new(),
         })
     }
@@ -1030,12 +1032,25 @@ impl DriverConductor {
         session_id: i32,
         stream_id: i32,
         source: SocketAddr,
+        now_ns: i64,
     ) -> bool {
         let key = (channel.to_owned(), session_id, stream_id, source);
-        self.session_states
+        if !self
+            .session_states
             .get(&key)
             .is_some_and(|(state, _)| *state == NetworkSessionState::PendingSetupFrame)
-            && self.setup_elicited.insert(key)
+        {
+            return false;
+        }
+
+        let should_send = self
+            .setup_elicited
+            .get(&key)
+            .is_none_or(|sent_at| now_ns.saturating_sub(*sent_at) >= PENDING_SETUPS_TIMEOUT_NS);
+        if should_send {
+            self.setup_elicited.insert(key, now_ns);
+        }
+        should_send
     }
 
     /// Adding interest clears the upstream NO_INTEREST marker for the matching stream.
@@ -1820,6 +1835,9 @@ mod tests {
                 .get(&(channel.to_owned(), 7, 7, source)),
             Some(&(NetworkSessionState::PendingSetupFrame, 2_000))
         );
+        assert!(conductor.take_setup_elicitation(channel, 7, 7, source, 2_000));
+        assert!(!conductor.take_setup_elicitation(channel, 7, 7, source, 2_000 + 999_999_999,));
+        assert!(conductor.take_setup_elicitation(channel, 7, 7, source, 2_000 + 1_000_000_000,));
 
         let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
         let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));

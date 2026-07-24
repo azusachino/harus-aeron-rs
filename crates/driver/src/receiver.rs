@@ -20,7 +20,9 @@ pub struct Receiver {
     /// Frames drained off the wire this cycle, handed to the conductor with their source.
     received_frames: Vec<ReceivedFrame>,
     /// Next contiguous term position and flow-control context for each source/session/stream.
-    expected_positions: HashMap<(i32, i32, SocketAddr), ExpectedPosition>,
+    /// Endpoint identity is part of the receive dispatcher key. Two channels may reuse the
+    /// same session, stream, and source address without sharing sequence state.
+    expected_positions: HashMap<(usize, i32, i32, SocketAddr), ExpectedPosition>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -150,7 +152,12 @@ impl Receiver {
                 );
                 let window = (setup.term_length() / 2).max(setup.mtu_length());
                 self.expected_positions
-                    .entry((setup.session_id(), setup.stream_id(), source))
+                    .entry((
+                        endpoint_index,
+                        setup.session_id(),
+                        setup.stream_id(),
+                        source,
+                    ))
                     .or_insert(ExpectedPosition {
                         term_id: setup.active_term_id(),
                         term_offset: setup.term_offset(),
@@ -167,7 +174,12 @@ impl Receiver {
                 )?;
                 Ok(self
                     .expected_positions
-                    .get(&(setup.session_id(), setup.stream_id(), source))
+                    .get(&(
+                        endpoint_index,
+                        setup.session_id(),
+                        setup.stream_id(),
+                        source,
+                    ))
                     .map(|expected| ReceiverStatus {
                         term_id: expected.term_id,
                         term_offset: expected.term_offset,
@@ -227,7 +239,7 @@ impl Receiver {
                 source,
             );
 
-            let key = (data.session_id(), data.stream_id(), source);
+            let key = (endpoint_index, data.session_id(), data.stream_id(), source);
             let expected = self
                 .expected_positions
                 .entry(key)
@@ -280,7 +292,7 @@ impl Receiver {
         }
         Ok(status_key.and_then(|(session_id, stream_id)| {
             self.expected_positions
-                .get(&(session_id, stream_id, source))
+                .get(&(endpoint_index, session_id, stream_id, source))
                 .filter(|expected| expected.receiver_window_length > 0)
                 .map(|expected| ReceiverStatus {
                     term_id: expected.term_id,

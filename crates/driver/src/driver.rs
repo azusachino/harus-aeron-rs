@@ -107,6 +107,7 @@ impl MediaDriver {
                 frame.session_id,
                 frame.stream_id,
                 frame.source,
+                now_ns,
             ) {
                 self.receiver.send_setup_eliciting_status(
                     frame.endpoint_index,
