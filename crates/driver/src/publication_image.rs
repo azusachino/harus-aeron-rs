@@ -327,16 +327,32 @@ impl PublicationImage {
 
     /// Drive loss timing for the current rebuild gap and return a NAK when one is due.
     ///
-    /// Mirrors `PublicationImage.trackRebuild`/`processPendingLoss`: the gap found while rebuilding
-    /// (`pending_loss`) is fed to the image's [`LossDetector`], which holds the first NAK for a
-    /// feedback delay and re-issues it on a retry cadence until the gap is repaired.
+    /// Mirrors `PublicationImage.trackRebuild`: the image's [`LossDetector`] scans the rebuilt term
+    /// buffer between the rebuild and HWM positions, holding the first NAK for a feedback delay and
+    /// re-issuing it on a retry cadence until the gap is repaired.
     pub fn track_rebuild(&mut self, now_ns: i64) -> Option<Gap> {
-        let gap = self.pending_loss.map(|loss| Gap {
-            term_id: loss.term_id,
-            term_offset: loss.term_offset as i32,
-            length: loss.length as i32,
-        });
-        self.loss_detector.scan(gap, now_ns)
+        let mask = (self.term_length - 1) as i32;
+        let index = index_by_position(self.rebuild_position, self.position_bits_to_shift);
+        let term_buffers = self.log_buffers.duplicate_term_buffers();
+        let term_buffer = term_buffers.get(index)?;
+        let mut fired = None;
+        self.loss_detector.scan(
+            term_buffer,
+            self.rebuild_position,
+            self.hwm_position,
+            now_ns,
+            mask,
+            self.position_bits_to_shift as i32,
+            self.initial_term_id,
+            &mut |term_id, term_offset, length| {
+                fired = Some(Gap {
+                    term_id,
+                    term_offset,
+                    length,
+                });
+            },
+        );
+        fired
     }
 
     /// Whether the publication advertised end-of-stream on a received DATA frame.
