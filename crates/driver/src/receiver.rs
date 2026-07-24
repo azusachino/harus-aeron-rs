@@ -2,6 +2,16 @@
 //!
 //! Mirrors `io.aeron.driver.Receiver.java`.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
+
+use aeron_client::logbuffer::{FRAME_ALIGNMENT, align};
+use aeron_client::protocol::{
+    DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP, HeaderFlyweight,
+    SetupFlyweight,
+};
+use agrona::AtomicBuffer;
+
 use crate::error::Result;
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 
@@ -9,6 +19,8 @@ pub struct Receiver {
     receive_channel_endpoints: Vec<ReceiveChannelEndpoint>,
     /// Frames drained off the wire this cycle, handed to the conductor for image reassembly.
     received_frames: Vec<Vec<u8>>,
+    /// Next contiguous term position expected for each received session/stream.
+    expected_positions: HashMap<(i32, i32), (i32, i32)>,
 }
 
 impl Default for Receiver {
@@ -22,6 +34,7 @@ impl Receiver {
         Self {
             receive_channel_endpoints: Vec::new(),
             received_frames: Vec::new(),
+            expected_positions: HashMap::new(),
         }
     }
 
@@ -34,14 +47,88 @@ impl Receiver {
         // images and reassembled term data.
         let mut buffer = [0u8; 2048];
         let mut count = 0;
-        for endpoint in &self.receive_channel_endpoints {
-            let transport = endpoint.transport();
-            while let Ok((len, _src)) = transport.recv_from(&mut buffer) {
+        for endpoint_index in 0..self.receive_channel_endpoints.len() {
+            while let Ok((len, src)) = self.receive_channel_endpoints[endpoint_index]
+                .transport()
+                .recv_from(&mut buffer)
+            {
+                let frame = buffer[..len].to_vec();
+                self.handle_frame(endpoint_index, &frame, src)?;
                 self.received_frames.push(buffer[..len].to_vec());
                 count += 1;
             }
         }
         Ok(count)
+    }
+
+    fn handle_frame(
+        &mut self,
+        endpoint_index: usize,
+        bytes: &[u8],
+        source: SocketAddr,
+    ) -> Result<()> {
+        if bytes.len() < DATA_HEADER_LENGTH {
+            return Ok(());
+        }
+
+        let mut owned = bytes.to_vec();
+        let buffer = AtomicBuffer::new(&mut owned);
+        let header = HeaderFlyweight::new(buffer);
+        match header.header_type() {
+            HDR_TYPE_SETUP => {
+                let setup = SetupFlyweight::new(buffer);
+                self.expected_positions.insert(
+                    (setup.session_id(), setup.stream_id()),
+                    (setup.active_term_id(), setup.term_offset()),
+                );
+                let window = (setup.term_length() / 2).max(setup.mtu_length());
+                self.receive_channel_endpoints[endpoint_index].send_status_message(
+                    setup.session_id(),
+                    setup.stream_id(),
+                    setup.active_term_id(),
+                    setup.term_offset(),
+                    window,
+                    source,
+                )?;
+            }
+            HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
+                let data = DataHeaderFlyweight::new(buffer);
+                let frame_length = data.frame_length();
+                if frame_length <= 0 {
+                    return Ok(());
+                }
+                let key = (data.session_id(), data.stream_id());
+                let expected = self
+                    .expected_positions
+                    .entry(key)
+                    .or_insert((data.term_id(), data.term_offset()));
+                let expected_term = expected.0;
+                let expected_offset = expected.1;
+                if data.term_id() > expected_term
+                    || (data.term_id() == expected_term && data.term_offset() > expected_offset)
+                {
+                    let missing = if data.term_id() == expected_term {
+                        data.term_offset() - expected_offset
+                    } else {
+                        data.term_offset().max(0)
+                    };
+                    if missing > 0 {
+                        self.receive_channel_endpoints[endpoint_index].send_nak(
+                            data.session_id(),
+                            data.stream_id(),
+                            expected_term,
+                            expected_offset,
+                            missing,
+                            source,
+                        )?;
+                    }
+                } else if data.term_id() == expected_term && data.term_offset() == expected_offset {
+                    expected.1 = expected_offset + align(frame_length, FRAME_ALIGNMENT);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Take the frames received since the last call for conductor dispatch.

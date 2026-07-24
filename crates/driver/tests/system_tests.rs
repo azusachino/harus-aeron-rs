@@ -9,7 +9,11 @@ use aeron_client::conductor::ClientConductor;
 use aeron_client::driver_events::{ON_OPERATION_SUCCESS, OperationSucceededFlyweight};
 use aeron_client::driver_proxy::DriverProxy;
 use aeron_client::logbuffer::TERM_MIN_LENGTH;
-use aeron_client::protocol::{DATA_HEADER_LENGTH, HDR_TYPE_DATA, HDR_TYPE_SETUP, HeaderFlyweight};
+use aeron_client::protocol::{
+    DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP, HeaderFlyweight,
+    NAK_HEADER_LENGTH, NakFlyweight, STATUS_MESSAGE_HEADER_LENGTH, SetupFlyweight,
+    StatusMessageFlyweight,
+};
 use aeron_driver::configuration::Configuration;
 use aeron_driver::driver::MediaDriver;
 use agrona::AtomicBuffer;
@@ -176,9 +180,14 @@ fn network_publication_sender_transmits_setup_and_data_frames() {
     // The receiver socket sees a SETUP announcement followed by the DATA frame.
     let mut saw_setup = false;
     let mut data_payload: Option<Vec<u8>> = None;
+    let mut sender_address = None;
+    let mut data_frame_length = 0;
+    let mut data_session_id = 0;
+    let mut data_term_id = 0;
+    let mut data_term_offset = 0;
     let mut buf = [0u8; 2048];
     for _ in 0..4 {
-        let n = match receiver.recv(&mut buf) {
+        let (n, source) = match receiver.recv_from(&mut buf) {
             Ok(n) => n,
             Err(_) => break,
         };
@@ -187,13 +196,81 @@ fn network_publication_sender_transmits_setup_and_data_frames() {
         let frame_length = header.frame_length() as usize;
         if frame_type == HDR_TYPE_SETUP {
             saw_setup = true;
+            let setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+            let mut status_bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+            let status = StatusMessageFlyweight::new(AtomicBuffer::new(&mut status_bytes));
+            status
+                .header()
+                .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+                .set_version(aeron_client::protocol::CURRENT_VERSION)
+                .set_flags(0)
+                .set_header_type(aeron_client::protocol::HDR_TYPE_SM);
+            status
+                .set_session_id(setup.session_id())
+                .set_stream_id(setup.stream_id())
+                .set_consumption_term_id(setup.initial_term_id())
+                .set_consumption_term_offset(0)
+                .set_receiver_window_length(TERM_MIN_LENGTH)
+                .set_receiver_id(0);
+            receiver.send_to(&status_bytes, source).unwrap();
+            for _ in 0..20 {
+                driver.do_work().expect("process status and flush data");
+                if driver.sender().network_publications()[0].receiver_limit() > 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
         } else if frame_type == HDR_TYPE_DATA && frame_length > DATA_HEADER_LENGTH {
             // Slice by the frame's own length, not the MTU-padded datagram size.
             data_payload = Some(buf[DATA_HEADER_LENGTH..frame_length].to_vec());
+            sender_address = Some(source);
+            data_frame_length = frame_length;
+            let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+            data_session_id = data.session_id();
+            data_term_id = data.term_id();
+            data_term_offset = data.term_offset();
             break;
         }
     }
 
     assert!(saw_setup, "sender announced the stream with a SETUP frame");
     assert_eq!(data_payload.as_deref(), Some(&b"hello-udp"[..]));
+
+    // Request the frame again and prove the sender retransmits from the mapped term log.
+    let mut nak_bytes = [0u8; NAK_HEADER_LENGTH];
+    let nak = NakFlyweight::new(AtomicBuffer::new(&mut nak_bytes));
+    nak.header()
+        .set_frame_length(NAK_HEADER_LENGTH as i32)
+        .set_version(aeron_client::protocol::CURRENT_VERSION)
+        .set_flags(0)
+        .set_header_type(aeron_client::protocol::HDR_TYPE_NAK);
+    nak.set_session_id(data_session_id)
+        .set_stream_id(STREAM_ID)
+        .set_term_id(data_term_id)
+        .set_term_offset(data_term_offset)
+        .set_length(data_frame_length as i32);
+    receiver
+        .send_to(&nak_bytes, sender_address.expect("data source"))
+        .unwrap();
+    for _ in 0..20 {
+        driver.do_work().expect("process NAK and retransmit");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let mut retransmitted = None;
+    for _ in 0..4 {
+        let n = match receiver.recv(&mut buf) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        let (frame_type, frame_length) = {
+            let header = HeaderFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+            (header.header_type(), header.frame_length() as usize)
+        };
+        if frame_type == HDR_TYPE_DATA && frame_length > DATA_HEADER_LENGTH {
+            retransmitted = Some(buf[DATA_HEADER_LENGTH..frame_length].to_vec());
+            break;
+        }
+    }
+    assert_eq!(retransmitted.as_deref(), Some(&b"hello-udp"[..]));
 }

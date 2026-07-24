@@ -4,14 +4,39 @@
 
 use std::net::SocketAddr;
 
+use aeron_client::protocol::{
+    HDR_TYPE_NAK, HDR_TYPE_SM, HeaderFlyweight, NakFlyweight, StatusMessageFlyweight,
+};
+use agrona::AtomicBuffer;
+
 use crate::error::Result;
 use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
+
+#[derive(Debug, Clone, Copy)]
+pub struct StatusMessage {
+    pub session_id: i32,
+    pub stream_id: i32,
+    pub term_id: i32,
+    pub term_offset: i32,
+    pub receiver_window_length: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NakMessage {
+    pub session_id: i32,
+    pub stream_id: i32,
+    pub term_id: i32,
+    pub term_offset: i32,
+    pub length: i32,
+}
 
 #[derive(Debug)]
 pub struct SendChannelEndpoint {
     udp_channel: UdpChannel,
     transport: UdpChannelTransport,
+    status_messages: Vec<StatusMessage>,
+    nak_messages: Vec<NakMessage>,
 }
 
 impl SendChannelEndpoint {
@@ -19,6 +44,8 @@ impl SendChannelEndpoint {
         Self {
             udp_channel,
             transport,
+            status_messages: Vec::new(),
+            nak_messages: Vec::new(),
         }
     }
 
@@ -34,26 +61,85 @@ impl SendChannelEndpoint {
         &self.transport
     }
 
+    /// Poll control frames arriving on the publication's UDP socket.
+    pub fn poll_control(&mut self) -> Result<usize> {
+        let mut buffer = [0u8; 256];
+        let mut work = 0;
+        while let Ok((length, _src)) = self.transport.recv_from(&mut buffer) {
+            if length < 8 {
+                continue;
+            }
+            let frame = AtomicBuffer::new(&mut buffer[..length]);
+            let header = HeaderFlyweight::new(frame);
+            match header.header_type() {
+                HDR_TYPE_SM if length >= aeron_client::protocol::STATUS_MESSAGE_HEADER_LENGTH => {
+                    let sm = StatusMessageFlyweight::new(frame);
+                    self.on_status_message(
+                        sm.session_id(),
+                        sm.stream_id(),
+                        sm.consumption_term_id(),
+                        sm.consumption_term_offset(),
+                        sm.receiver_window_length(),
+                    );
+                    work += 1;
+                }
+                HDR_TYPE_NAK if length >= aeron_client::protocol::NAK_HEADER_LENGTH => {
+                    let nak = NakFlyweight::new(frame);
+                    self.on_nak_message(
+                        nak.session_id(),
+                        nak.stream_id(),
+                        nak.term_id(),
+                        nak.term_offset(),
+                        nak.length(),
+                    );
+                    work += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok(work)
+    }
+
+    pub fn take_status_messages(&mut self) -> Vec<StatusMessage> {
+        std::mem::take(&mut self.status_messages)
+    }
+
+    pub fn take_nak_messages(&mut self) -> Vec<NakMessage> {
+        std::mem::take(&mut self.nak_messages)
+    }
+
     pub fn on_status_message(
         &mut self,
-        _session_id: i32,
-        _stream_id: i32,
-        _term_id: i32,
-        _term_offset: i32,
-        _receiver_window_length: i32,
+        session_id: i32,
+        stream_id: i32,
+        term_id: i32,
+        term_offset: i32,
+        receiver_window_length: i32,
     ) {
-        // Status message processing callback
+        self.status_messages.push(StatusMessage {
+            session_id,
+            stream_id,
+            term_id,
+            term_offset,
+            receiver_window_length,
+        });
     }
 
     pub fn on_nak_message(
         &mut self,
-        _session_id: i32,
-        _stream_id: i32,
-        _term_id: i32,
-        _term_offset: i32,
-        _length: i32,
+        session_id: i32,
+        stream_id: i32,
+        term_id: i32,
+        term_offset: i32,
+        length: i32,
     ) {
-        // NAK message processing callback
+        self.nak_messages.push(NakMessage {
+            session_id,
+            stream_id,
+            term_id,
+            term_offset,
+            length,
+        });
     }
 }
 

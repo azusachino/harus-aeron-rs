@@ -9,7 +9,9 @@ use std::net::SocketAddr;
 use agrona::AtomicBuffer;
 
 use aeron_client::log_buffers::LogBuffers;
-use aeron_client::logbuffer::{TermScanner, index_by_position, position_bits_to_shift};
+use aeron_client::logbuffer::{
+    TermScanner, compute_position, index_by_position, position_bits_to_shift,
+};
 use aeron_client::protocol::{
     CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP,
     SETUP_HEADER_LENGTH, SetupFlyweight,
@@ -37,6 +39,8 @@ pub struct NetworkPublication {
     sender_position: i64,
     setup_sent: bool,
     last_send_ns: i64,
+    receiver_limit: i64,
+    status_received: bool,
 }
 
 impl NetworkPublication {
@@ -66,6 +70,8 @@ impl NetworkPublication {
             sender_position: 0,
             setup_sent: false,
             last_send_ns: i64::MIN,
+            receiver_limit: 0,
+            status_received: false,
         }
     }
 
@@ -75,6 +81,36 @@ impl NetworkPublication {
 
     pub fn sender_position(&self) -> i64 {
         self.sender_position
+    }
+
+    pub fn receiver_limit(&self) -> i64 {
+        self.receiver_limit
+    }
+
+    /// Drain SM/NAK control frames and apply them to this publication.
+    pub fn poll_control(&mut self) -> Result<usize> {
+        let mut work = self.endpoint.poll_control()?;
+        for status in self.endpoint.take_status_messages() {
+            if status.session_id == self.session_id && status.stream_id == self.stream_id {
+                let consumption_position = compute_position(
+                    status.term_id,
+                    status.term_offset,
+                    self.position_bits_to_shift as i32,
+                    self.initial_term_id,
+                );
+                self.receiver_limit = consumption_position
+                    .saturating_add(status.receiver_window_length.max(0) as i64);
+                self.status_received = true;
+                work += 1;
+            }
+        }
+        for nak in self.endpoint.take_nak_messages() {
+            if nak.session_id == self.session_id && nak.stream_id == self.stream_id {
+                work +=
+                    self.retransmit(nak.term_id, nak.term_offset, nak.length.max(0) as usize)?;
+            }
+        }
+        Ok(work)
     }
 
     /// One send duty cycle: (re)announce with SETUP, flush any new data, else heartbeat.
@@ -87,6 +123,7 @@ impl NetworkPublication {
         {
             self.send_setup()?;
             self.setup_sent = true;
+            self.last_send_ns = now_ns;
             work += 1;
         }
 
@@ -95,6 +132,9 @@ impl NetworkPublication {
     }
 
     fn send_data(&mut self, now_ns: i64) -> Result<usize> {
+        if !self.status_received || self.sender_position >= self.receiver_limit {
+            return Ok(0);
+        }
         let index = index_by_position(self.sender_position, self.position_bits_to_shift);
         let term_buffers = self.log_buffers.duplicate_term_buffers();
         let term_buffer = term_buffers[index];
@@ -105,7 +145,7 @@ impl NetworkPublication {
         let available = TermScanner::available(scan);
         let padding = TermScanner::padding(scan);
 
-        if available > 0 {
+        if available > 0 && self.sender_position + available as i64 <= self.receiver_limit {
             let mut bytes = vec![0u8; available as usize];
             term_buffer.get_bytes(term_offset, &mut bytes);
             self.endpoint.send_data(&bytes, self.destination)?;
@@ -121,6 +161,36 @@ impl NetworkPublication {
             return Ok(1);
         }
         Ok(0)
+    }
+
+    fn retransmit(&self, term_id: i32, term_offset: i32, length: usize) -> Result<usize> {
+        if length == 0 || term_offset < 0 {
+            return Ok(0);
+        }
+        let term_count = term_id.wrapping_sub(self.initial_term_id);
+        if term_count < 0 || term_count as usize >= 3 {
+            return Ok(0);
+        }
+
+        let term_buffers = self.log_buffers.duplicate_term_buffers();
+        let term_buffer = term_buffers[term_count as usize];
+        let mut offset = term_offset as usize;
+        let end = offset.saturating_add(length).min(self.term_length);
+        let mut work = 0;
+        while offset < end {
+            let scan = TermScanner::scan_for_availability(&term_buffer, offset, self.mtu_length);
+            let available = TermScanner::available(scan);
+            if available <= 0 {
+                break;
+            }
+            let available = available as usize;
+            let mut bytes = vec![0u8; available];
+            term_buffer.get_bytes(offset, &mut bytes);
+            self.endpoint.send_data(&bytes, self.destination)?;
+            offset += available + TermScanner::padding(scan) as usize;
+            work += 1;
+        }
+        Ok(work)
     }
 
     fn send_setup(&self) -> Result<usize> {

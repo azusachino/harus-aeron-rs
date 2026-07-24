@@ -38,6 +38,7 @@ impl Sender {
         // Flush each network publication: SETUP announcements, new data frames, heartbeats.
         let mut work = 0;
         for publication in &mut self.network_publications {
+            work += publication.poll_control()?;
             work += publication.do_work(now_ns)?;
         }
         Ok(work)
