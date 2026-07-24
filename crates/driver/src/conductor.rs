@@ -235,6 +235,10 @@ impl DriverConductor {
 
     /// One conductor duty cycle: drain and dispatch client commands, then sweep liveness.
     pub fn do_work(&mut self, now_ns: i64) -> Result<usize> {
+        // Aeron clients use this trailer timestamp to distinguish a live driver from a stale
+        // CnC directory before they publish their first command.
+        self.to_driver
+            .set_consumer_heartbeat_time(now_ns / 1_000_000);
         // Decode records into owned commands first; the ring-buffer read borrow cannot be
         // held while we mutate conductor state.
         let mut commands: Vec<Command> = Vec::new();
@@ -452,6 +456,7 @@ impl DriverConductor {
             )?;
             if is_ipc {
                 self.link_ipc_publication(
+                    registration_id,
                     stream_id,
                     session_id,
                     publication_limit_counter_id,
@@ -584,6 +589,20 @@ impl DriverConductor {
             .collect();
         if subscribers.is_empty() {
             return Ok(());
+        }
+
+        // The Java Publication exposes this metadata bit through Publication.isConnected().
+        // It is set only after a real receiver setup has reached the driver, matching the
+        // upstream NetworkPublication connection transition.
+        let publication_registration_id = self
+            .publications
+            .values()
+            .find(|p| !p.is_ipc && p.session_id == session_id && p.stream_id == stream_id)
+            .map(|publication| publication.registration_id);
+        if let Some(registration_id) = publication_registration_id {
+            if let Some(buffers) = self.log_buffers.get(&registration_id) {
+                aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
+            }
         }
 
         let initial_term_id = setup.initial_term_id();
@@ -736,21 +755,35 @@ impl DriverConductor {
         subscription_registration_id: i64,
         stream_id: i32,
     ) -> Result<()> {
-        let matches: Vec<(i32, i32, String)> = self
+        let matches: Vec<(i64, i32, i32, String)> = self
             .publications
             .values()
             .filter(|p| p.is_ipc && p.stream_id == stream_id)
             .filter_map(|p| {
-                p.log_file_name
-                    .clone()
-                    .map(|name| (p.session_id, p.publication_limit_counter_id, name))
+                p.log_file_name.clone().map(|name| {
+                    (
+                        p.registration_id,
+                        p.session_id,
+                        p.publication_limit_counter_id,
+                        name,
+                    )
+                })
             })
             .collect();
-        for (session_id, publication_limit_counter_id, log_file_name) in matches {
+        for (
+            publication_registration_id,
+            session_id,
+            publication_limit_counter_id,
+            log_file_name,
+        ) in matches
+        {
             self.open_publication_window(
                 publication_limit_counter_id,
                 self.configuration.ipc_term_buffer_length,
             )?;
+            if let Some(buffers) = self.log_buffers.get(&publication_registration_id) {
+                aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
+            }
             self.on_available_image(
                 session_id,
                 stream_id,
@@ -800,6 +833,7 @@ impl DriverConductor {
     /// Connect a newly added IPC publication to every matching existing IPC subscription.
     fn link_ipc_publication(
         &mut self,
+        publication_registration_id: i64,
         stream_id: i32,
         session_id: i32,
         publication_limit_counter_id: i32,
@@ -816,6 +850,9 @@ impl DriverConductor {
                 publication_limit_counter_id,
                 self.configuration.ipc_term_buffer_length,
             )?;
+            if let Some(buffers) = self.log_buffers.get(&publication_registration_id) {
+                aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
+            }
             self.on_available_image(
                 session_id,
                 stream_id,

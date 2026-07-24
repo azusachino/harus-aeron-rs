@@ -14,17 +14,29 @@ pub const CACHE_LINE_LENGTH: usize = 64;
 const COUNTER_PADDING: usize = CACHE_LINE_LENGTH * 2;
 
 /// Offset of the tail position counter in the trailer.
-pub const TAIL_POSITION_OFFSET: usize = 0;
+///
+/// The first cache-line pair is reserved before the counters by Agrona.
+pub const TAIL_POSITION_OFFSET: usize = COUNTER_PADDING;
 /// Offset of the cached head position counter in the trailer.
-pub const HEAD_CACHE_POSITION_OFFSET: usize = COUNTER_PADDING;
+pub const HEAD_CACHE_POSITION_OFFSET: usize = COUNTER_PADDING * 2;
 /// Offset of the head position counter in the trailer.
-pub const HEAD_POSITION_OFFSET: usize = COUNTER_PADDING * 2;
+pub const HEAD_POSITION_OFFSET: usize = COUNTER_PADDING * 3;
 /// Offset of the correlation counter in the trailer.
-pub const CORRELATION_COUNTER_OFFSET: usize = COUNTER_PADDING * 3;
+pub const CORRELATION_COUNTER_OFFSET: usize = COUNTER_PADDING * 4;
 /// Offset of the consumer heartbeat timestamp counter in the trailer.
-pub const CONSUMER_HEARTBEAT_OFFSET: usize = COUNTER_PADDING * 4;
-/// Total length of the trailer at the end of the ring buffer (5 cache-line-padded counters).
-pub const TRAILER_LENGTH: usize = COUNTER_PADDING * 5;
+pub const CONSUMER_HEARTBEAT_OFFSET: usize = COUNTER_PADDING * 5;
+/// Total length of the trailer at the end of the ring buffer.
+///
+/// Agrona reserves one additional cache-line pair before and after the five counters. The extra
+/// padding is part of the shared-buffer geometry, so omitting it makes a CnC ring buffer
+/// unreadable by the Java client even though the Rust producer/consumer can still wrap it.
+///
+/// Reference: Agrona 2.4.0 (`vendor/aeron/gradle/libs.versions.toml`), source file
+/// `org/agrona/concurrent/ringbuffer/RingBufferDescriptor.java`:
+/// <https://raw.githubusercontent.com/aeron-io/agrona/2.4.0/agrona/src/main/java/org/agrona/concurrent/ringbuffer/RingBufferDescriptor.java>.
+/// Its static layout is tail=128, head-cache=256, head=384, correlation=512,
+/// heartbeat=640, trailer=768.
+pub const TRAILER_LENGTH: usize = COUNTER_PADDING * 6;
 
 /// Length of the record header (4 bytes length + 4 bytes type ID).
 pub const HEADER_LENGTH: usize = 8;

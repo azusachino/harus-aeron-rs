@@ -14,9 +14,9 @@ This document tracks interop smoke verification between `harus-aeron-rs` (Rust M
 | :--- | :--- | :--- | :--- |
 | **Driver Startup** | Local IPC | **PASS** | Rust MediaDriver process launches cleanly |
 | **CnC metadata mapping** | `cnc.dat` | **PASS** | Aeron Java `CncFileDescriptor` and `CountersReader` map Rust output |
-| **Publication Reg** | `aeron:udp` | **UNVERIFIED** | Rust-side registration is tested; Java client mixing is not yet proven |
-| **Subscription Reg** | `aeron:udp` | **UNVERIFIED** | Rust-side registration is tested; Java client mixing is not yet proven |
-| **Pub/Sub Loop** | UDP Loopback | **UNVERIFIED** | Rust↔Rust UDP loopback passes; Java endpoint roundtrip remains |
+| **Publication Reg** | `aeron:ipc`, `aeron:udp` | **PASS** | Java client registration completed through the Rust CnC command path |
+| **Subscription Reg** | `aeron:ipc`, `aeron:udp` | **PASS** | Java client received Rust driver readiness/image events |
+| **Pub/Sub Loop** | IPC + UDP Loopback | **PASS** | Java publication payloads were delivered through the Rust driver to Java subscriptions |
 
 ## Execution
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER_BINARY = ROOT / "target" / "debug" / "aeron-driver"
 JAVA_SOURCE = ROOT / "deploy" / "interop" / "CncLayoutProbe.java"
+JAVA_PUBSUB_SOURCE = ROOT / "deploy" / "interop" / "JavaPubSubProbe.java"
+JAVA_UDP_SOURCE = ROOT / "deploy" / "interop" / "JavaUdpPubSubProbe.java"
 JAVA_BUILD = ROOT / "vendor" / "aeron" / "aeron-all" / "build" / "libs"
 
 
@@ -43,18 +46,29 @@ def main() -> int:
         print("interop-smoke requires java and javac", file=sys.stderr)
         return 1
 
-    print("[1/4] Building Rust MediaDriver binary...")
+    print("[1/6] Building Rust MediaDriver binary...")
     _run(["cargo", "build", "-p", "aeron-driver", "--bin", "aeron-driver"], cwd=ROOT)
 
-    print("[2/4] Resolving vendored Aeron Java jar...")
+    print("[2/6] Resolving vendored Aeron Java jar...")
     aeron_all_jar = _aeron_all_jar()
 
-    print("[3/4] Compiling Java CnC compatibility probe...")
+    print("[3/6] Compiling Java compatibility probes...")
     with tempfile.TemporaryDirectory(prefix="aeron-interop-") as temp_dir:
         classes = Path(temp_dir)
-        _run(["javac", "-cp", str(aeron_all_jar), "-d", str(classes), str(JAVA_SOURCE)])
+        _run(
+            [
+                "javac",
+                "-cp",
+                str(aeron_all_jar),
+                "-d",
+                str(classes),
+                str(JAVA_SOURCE),
+                str(JAVA_PUBSUB_SOURCE),
+                str(JAVA_UDP_SOURCE),
+            ]
+        )
 
-        print("[4/4] Mapping Rust cnc.dat with Aeron Java readers...")
+        print("[4/6] Mapping Rust cnc.dat with Aeron Java readers...")
         driver = subprocess.Popen(
             [str(DRIVER_BINARY), "--hold"],
             cwd=ROOT,
@@ -81,6 +95,34 @@ def main() -> int:
                 ],
                 cwd=ROOT,
             )
+            print("[5/6] Running Java Aeron IPC round-trip through Rust driver...")
+            _run(
+                [
+                    "java",
+                    "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+                    "-cp",
+                    f"{classes}:{aeron_all_jar}",
+                    "JavaPubSubProbe",
+                    str(Path(cnc_path).parent),
+                ],
+                cwd=ROOT,
+            )
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe_socket:
+                probe_socket.bind(("127.0.0.1", 0))
+                udp_port = str(probe_socket.getsockname()[1])
+            print("[6/6] Running Java Aeron UDP round-trip through Rust driver...")
+            _run(
+                [
+                    "java",
+                    "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+                    "-cp",
+                    f"{classes}:{aeron_all_jar}",
+                    "JavaUdpPubSubProbe",
+                    str(Path(cnc_path).parent),
+                    udp_port,
+                ],
+                cwd=ROOT,
+            )
         finally:
             if driver.stdin is not None:
                 driver.stdin.write("release\n")
@@ -91,7 +133,7 @@ def main() -> int:
                 driver.kill()
                 driver.wait()
 
-    print("Java CnC layout interop probe passed")
+    print("Java CnC, IPC, and UDP interop probes passed")
     return 0
 
 

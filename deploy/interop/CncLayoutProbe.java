@@ -1,5 +1,7 @@
 import io.aeron.CncFileDescriptor;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
+import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.io.IOException;
@@ -38,6 +40,26 @@ public final class CncLayoutProbe
             final UnsafeBuffer countersValues =
                 CncFileDescriptor.createCountersValuesBuffer(mapped, metadata);
             final CountersReader counters = new CountersReader(countersMetadata, countersValues);
+            if (RingBufferDescriptor.CONSUMER_HEARTBEAT_OFFSET != 640 ||
+                RingBufferDescriptor.TRAILER_LENGTH != 768)
+            {
+                throw new IllegalStateException(
+                    "unexpected Agrona ring layout: heartbeat=" +
+                    RingBufferDescriptor.CONSUMER_HEARTBEAT_OFFSET +
+                    ", trailer=" + RingBufferDescriptor.TRAILER_LENGTH);
+            }
+            final ManyToOneRingBuffer toDriver =
+                new ManyToOneRingBuffer(CncFileDescriptor.createToDriverBuffer(mapped, metadata));
+
+            if (toDriver.capacity() != (1 << 20))
+            {
+                throw new IllegalStateException("unexpected to-driver data capacity: " + toDriver.capacity());
+            }
+
+            if (toDriver.consumerHeartbeatTime() == 0)
+            {
+                throw new IllegalStateException("driver heartbeat is missing");
+            }
 
             if (counters.getCounterState(CONTROL_PROTOCOL_COUNTER_ID) != CountersReader.RECORD_ALLOCATED)
             {
