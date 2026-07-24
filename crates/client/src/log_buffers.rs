@@ -9,8 +9,9 @@
 
 use crate::error::{AeronError, Result};
 use crate::logbuffer::{
-    LOG_META_DATA_LENGTH, PARTITION_COUNT, check_page_size, check_term_length, page_size,
-    set_page_size, set_term_length, term_length,
+    LOG_META_DATA_LENGTH, NO_END_OF_STREAM_POSITION, PARTITION_COUNT, check_page_size,
+    check_term_length, page_size, set_end_of_stream_position, set_page_size, set_term_length,
+    term_length,
 };
 use agrona::AtomicBuffer;
 use memmap2::MmapMut;
@@ -109,6 +110,7 @@ impl LogBuffers {
         };
         set_term_length(&meta_buf, term_length);
         set_page_size(&meta_buf, page_size);
+        set_end_of_stream_position(&meta_buf, NO_END_OF_STREAM_POSITION);
 
         Self::from_storage(BufferStorage::Mmap(mmap))
     }

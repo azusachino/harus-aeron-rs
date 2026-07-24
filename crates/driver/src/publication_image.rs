@@ -8,8 +8,9 @@ use agrona::AtomicBuffer;
 
 use aeron_client::log_buffers::LogBuffers;
 use aeron_client::logbuffer::{
-    TermGapScanner, TermRebuilder, TermScanner, compute_position, index_by_position,
-    index_by_term_count, position_bits_to_shift,
+    NO_END_OF_STREAM_POSITION, TermGapScanner, TermRebuilder, TermScanner, compute_position,
+    end_of_stream_position, index_by_position, index_by_term_count, position_bits_to_shift,
+    set_end_of_stream_position,
 };
 use aeron_client::protocol::{EOS_FLAG, FLAGS_FIELD_OFFSET};
 
@@ -311,12 +312,12 @@ impl PublicationImage {
             if self.state == PublicationImageState::Init {
                 self.state = PublicationImageState::Active;
             }
-            self.advance_rebuild_position();
             if frame.get_u8(FLAGS_FIELD_OFFSET) & EOS_FLAG != 0 {
                 self.end_of_stream = true;
-                if self.rebuild_position >= self.hwm_position {
-                    self.state = PublicationImageState::Draining;
-                }
+            }
+            self.advance_rebuild_position();
+            if self.end_of_stream && self.rebuild_position >= self.hwm_position {
+                self.state = PublicationImageState::Draining;
             }
         }
     }
@@ -367,6 +368,13 @@ impl PublicationImage {
         }
 
         self.pending_loss = self.find_first_gap();
+        if self.end_of_stream
+            && self.rebuild_position >= self.hwm_position
+            && end_of_stream_position(&self.log_buffers.meta_data_buffer())
+                == NO_END_OF_STREAM_POSITION
+        {
+            set_end_of_stream_position(&self.log_buffers.meta_data_buffer(), self.rebuild_position);
+        }
     }
 
     fn find_first_gap(&self) -> Option<LossRange> {
@@ -581,6 +589,10 @@ mod tests {
 
         assert!(image.is_end_of_stream());
         assert_eq!(image.state(), PublicationImageState::Draining);
+        assert_eq!(
+            aeron_client::logbuffer::end_of_stream_position(&image.log_buffers.meta_data_buffer()),
+            image.rebuild_position()
+        );
 
         drop(image);
         let _ = std::fs::remove_file(path);

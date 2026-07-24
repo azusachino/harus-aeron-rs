@@ -143,6 +143,22 @@ pub fn compute_position(
 
 pub const LOG_IS_CONNECTED_OFFSET: usize = 136;
 
+/// Offset of the shared end-of-stream position marker.
+///
+/// Matches vendored `LogBufferDescriptor.LOG_END_OF_STREAM_POSITION_OFFSET`.
+pub const LOG_END_OF_STREAM_POSITION_OFFSET: usize = 128;
+
+/// Position used until an EOS frame has been observed and rebuilt.
+pub const NO_END_OF_STREAM_POSITION: i64 = i64::MAX;
+
+pub fn end_of_stream_position(metadata_buffer: &AtomicBuffer) -> i64 {
+    metadata_buffer.get_i64_volatile(LOG_END_OF_STREAM_POSITION_OFFSET)
+}
+
+pub fn set_end_of_stream_position(metadata_buffer: &AtomicBuffer, position: i64) {
+    metadata_buffer.put_i64_ordered(LOG_END_OF_STREAM_POSITION_OFFSET, position);
+}
+
 pub fn is_connected(metadata_buffer: &AtomicBuffer) -> bool {
     metadata_buffer.get_i32_volatile(LOG_IS_CONNECTED_OFFSET) == 1
 }
