@@ -71,14 +71,23 @@ impl MediaDriver {
     pub fn do_work(&mut self) -> Result<usize> {
         let now_ns = now_ns();
         let conductor_work = self.conductor.do_work(now_ns)?;
-        // Adopt any network publications the conductor created this cycle into the Sender.
+        // Adopt any endpoints the conductor created this cycle into the send/receive agents.
         for publication in self.conductor.take_new_network_publications() {
             self.sender.add_network_publication(publication);
         }
+        for endpoint in self.conductor.take_new_receive_endpoints() {
+            self.receiver.add_receive_channel_endpoint(endpoint);
+        }
         let sender_work = self.sender.do_work(now_ns)?;
         let receiver_work = self.receiver.do_work()?;
+        // Hand received SETUP/DATA frames to the conductor for image creation + reassembly.
+        let mut dispatch_work = 0;
+        for frame in self.receiver.take_received_frames() {
+            self.conductor.on_received_frame(&frame)?;
+            dispatch_work += 1;
+        }
 
-        Ok(conductor_work + sender_work + receiver_work)
+        Ok(conductor_work + sender_work + receiver_work + dispatch_work)
     }
 
     /// The mapped CnC file — clients connect by mapping the same path.

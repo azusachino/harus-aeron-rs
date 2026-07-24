@@ -12,6 +12,7 @@ pub mod driver;
 pub mod error;
 pub mod media;
 pub mod network_publication;
+pub mod publication_image;
 pub mod publication_params;
 pub mod receiver;
 pub mod sender;

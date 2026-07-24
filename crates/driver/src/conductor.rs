@@ -28,20 +28,29 @@ use aeron_client::driver_proxy::{
     REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION,
 };
 use aeron_client::log_buffers::LogBuffers;
-use aeron_client::logbuffer::{set_initial_term_id, set_mtu_length, store_default_frame_header};
+use aeron_client::logbuffer::{
+    FRAME_ALIGNMENT, align, set_initial_term_id, set_mtu_length, store_default_frame_header,
+};
 use aeron_client::protocol::{
-    CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA,
+    CURRENT_VERSION, DATA_HEADER_LENGTH, DATA_SESSION_ID_FIELD_OFFSET, DATA_TERM_ID_FIELD_OFFSET,
+    DATA_TERM_OFFSET_FIELD_OFFSET, DataHeaderFlyweight, FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA,
+    HDR_TYPE_SETUP, SetupFlyweight, TYPE_FIELD_OFFSET,
 };
 
 use crate::configuration::Configuration;
 use crate::error::{DriverError, Result};
+use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
 use crate::network_publication::NetworkPublication;
+use crate::publication_image::PublicationImage;
 
 /// Source identity reported for IPC images — matches upstream's `aeron:ipc` channel identity.
 const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
+
+/// Source identity reported for network images.
+const UDP_SOURCE_IDENTITY: &str = "aeron:udp";
 
 /// Returns `true` for an IPC channel (`aeron:ipc`, optionally with parameters).
 fn is_ipc_channel(channel: &str) -> bool {
@@ -137,6 +146,10 @@ pub struct DriverConductor {
     counters: HashMap<i32, Arc<AtomicI64>>,
     /// Network publications created this cycle, drained by the driver into the Sender.
     new_network_publications: Vec<NetworkPublication>,
+    /// Receive endpoints created this cycle, drained by the driver into the Receiver.
+    new_receive_endpoints: Vec<ReceiveChannelEndpoint>,
+    /// Reassembly state for network images, keyed by session id.
+    images: HashMap<i32, PublicationImage>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
 }
@@ -165,6 +178,8 @@ impl DriverConductor {
             log_buffers: HashMap::new(),
             counters: HashMap::new(),
             new_network_publications: Vec::new(),
+            new_receive_endpoints: Vec::new(),
+            images: HashMap::new(),
             clients: HashMap::new(),
         })
     }
@@ -172,6 +187,11 @@ impl DriverConductor {
     /// Drain network publications created since the last call so the Sender can adopt them.
     pub fn take_new_network_publications(&mut self) -> Vec<NetworkPublication> {
         std::mem::take(&mut self.new_network_publications)
+    }
+
+    /// Drain receive endpoints created since the last call so the Receiver can adopt them.
+    pub fn take_new_receive_endpoints(&mut self) -> Vec<ReceiveChannelEndpoint> {
+        std::mem::take(&mut self.new_receive_endpoints)
     }
 
     /// One conductor duty cycle: drain and dispatch client commands, then sweep liveness.
@@ -229,6 +249,8 @@ impl DriverConductor {
                 self.on_subscription_ready(correlation_id)?;
                 if is_ipc_channel(&channel) {
                     self.link_ipc_subscription(registration_id, stream_id)?;
+                } else if is_udp_channel(&channel) {
+                    self.add_receive_endpoint(&channel)?;
                 }
                 Ok(())
             }
@@ -331,9 +353,10 @@ impl DriverConductor {
                 buffers,
                 mtu,
             )?;
-            if let Some(limit) = self.counters.get(&publication_limit_counter_id) {
-                limit.store(self.initial_window(), Ordering::Release);
-            }
+            self.open_publication_window(
+                publication_limit_counter_id,
+                self.configuration.publication_term_buffer_length,
+            );
             Some(name)
         } else {
             None
@@ -407,6 +430,134 @@ impl DriverConductor {
         Ok(())
     }
 
+    /// Bind a receive channel endpoint for a UDP subscription and queue it for the Receiver.
+    fn add_receive_endpoint(&mut self, channel: &str) -> Result<()> {
+        let udp_channel = UdpChannel::parse(channel)
+            .map_err(|e| DriverError::IllegalState(format!("parse udp channel: {e}")))?;
+        // Bind to the endpoint address so the publisher's frames arrive here.
+        let bind = udp_channel.remote_data;
+        let transport = UdpChannelTransport::bind(udp_channel.clone(), bind, None, 0, 0)?;
+        self.new_receive_endpoints
+            .push(ReceiveChannelEndpoint::new(udp_channel, transport));
+        Ok(())
+    }
+
+    /// Dispatch one frame received off the wire: SETUP creates an image, DATA rebuilds it.
+    pub fn on_received_frame(&mut self, frame: &[u8]) -> Result<()> {
+        if frame.len() < DATA_HEADER_LENGTH {
+            return Ok(());
+        }
+        let mut bytes = frame.to_vec();
+        let buf = AtomicBuffer::new(&mut bytes);
+        let frame_type = buf.get_i16(TYPE_FIELD_OFFSET) as u16;
+        match frame_type {
+            HDR_TYPE_SETUP => self.on_setup(&buf),
+            HDR_TYPE_DATA => {
+                self.on_data(&buf, frame.len());
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// A SETUP frame: allocate the image log for a matching UDP subscription and announce it.
+    fn on_setup(&mut self, buf: &AtomicBuffer) -> Result<()> {
+        let setup = SetupFlyweight::new(*buf);
+        let session_id = setup.session_id();
+        let stream_id = setup.stream_id();
+        if self.images.contains_key(&session_id) {
+            return Ok(());
+        }
+
+        let subscriber: Option<i64> = self
+            .subscriptions
+            .values()
+            .find(|s| is_udp_channel(&s.channel) && s.stream_id == stream_id)
+            .map(|s| s.registration_id);
+        let Some(subscription_registration_id) = subscriber else {
+            return Ok(());
+        };
+
+        let initial_term_id = setup.initial_term_id();
+        let term_length = setup.term_length();
+        let mtu_length = setup.mtu_length();
+        let (log_file_name, buffers) = self.allocate_image_log_buffers(
+            session_id,
+            stream_id,
+            initial_term_id,
+            term_length,
+            mtu_length,
+        )?;
+
+        self.images.insert(
+            session_id,
+            PublicationImage::new(
+                session_id,
+                stream_id,
+                initial_term_id,
+                buffers,
+                log_file_name.clone(),
+            ),
+        );
+        self.on_available_image(
+            session_id,
+            stream_id,
+            subscription_registration_id,
+            &log_file_name,
+            UDP_SOURCE_IDENTITY,
+        )
+    }
+
+    /// A DATA frame (possibly several concatenated frames): rebuild each into its image.
+    fn on_data(&mut self, buf: &AtomicBuffer, length: usize) {
+        let session_id = buf.get_i32(DATA_SESSION_ID_FIELD_OFFSET);
+        let Some(image) = self.images.get(&session_id) else {
+            return;
+        };
+        let mut offset = 0usize;
+        while offset + DATA_HEADER_LENGTH <= length {
+            let frame_length = buf.get_i32(offset + FRAME_LENGTH_FIELD_OFFSET);
+            if frame_length <= 0 {
+                break;
+            }
+            let aligned = align(frame_length, FRAME_ALIGNMENT) as usize;
+            let term_id = buf.get_i32(offset + DATA_TERM_ID_FIELD_OFFSET);
+            let term_offset = buf.get_i32(offset + DATA_TERM_OFFSET_FIELD_OFFSET) as usize;
+
+            let mut frame_bytes = vec![0u8; aligned.min(length - offset)];
+            buf.get_bytes(offset, &mut frame_bytes);
+            let frame_length = frame_bytes.len();
+            let frame = AtomicBuffer::new(&mut frame_bytes);
+            image.on_data_frame(term_id, term_offset, &frame, frame_length);
+
+            offset += aligned;
+        }
+    }
+
+    /// Create and map a fresh image log under `aeron_dir/images/` for a received stream.
+    fn allocate_image_log_buffers(
+        &self,
+        session_id: i32,
+        stream_id: i32,
+        initial_term_id: i32,
+        term_length: i32,
+        mtu_length: i32,
+    ) -> Result<(String, LogBuffers)> {
+        let dir = self.aeron_dir.join("images");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| DriverError::IllegalState(format!("create images dir: {e}")))?;
+        let path = dir.join(format!("{session_id}-{stream_id}.logbuffer"));
+
+        let buffers = LogBuffers::map_new(&path, term_length, DEFAULT_FILE_PAGE_SIZE)
+            .map_err(|e| DriverError::IllegalState(format!("map image log buffer: {e}")))?;
+
+        let meta = buffers.meta_data_buffer();
+        set_initial_term_id(&meta, initial_term_id);
+        set_mtu_length(&meta, mtu_length);
+
+        Ok((path.to_string_lossy().into_owned(), buffers))
+    }
+
     /// Create and map a fresh IPC log file under `aeron_dir/publications/`, initialising its
     /// metadata so publishers and subscribers see a valid, shared log.
     fn allocate_log_buffers(
@@ -463,12 +614,16 @@ impl DriverConductor {
             })
             .collect();
         for (session_id, publication_limit_counter_id, log_file_name) in matches {
+            self.open_publication_window(
+                publication_limit_counter_id,
+                self.configuration.ipc_term_buffer_length,
+            );
             self.on_available_image(
                 session_id,
                 stream_id,
                 subscription_registration_id,
-                publication_limit_counter_id,
                 &log_file_name,
+                IPC_SOURCE_IDENTITY,
             )?;
         }
         Ok(())
@@ -489,20 +644,26 @@ impl DriverConductor {
             .map(|s| s.registration_id)
             .collect();
         for subscription_registration_id in subscribers {
+            self.open_publication_window(
+                publication_limit_counter_id,
+                self.configuration.ipc_term_buffer_length,
+            );
             self.on_available_image(
                 session_id,
                 stream_id,
                 subscription_registration_id,
-                publication_limit_counter_id,
                 log_file_name,
+                IPC_SOURCE_IDENTITY,
             )?;
         }
         Ok(())
     }
 
-    /// Half a term is the initial flow-control window a subscriber opens for its publication.
-    fn initial_window(&self) -> i64 {
-        (self.configuration.ipc_term_buffer_length / 2) as i64
+    /// Open a publication's flow-control window to half a term (the initial window).
+    fn open_publication_window(&self, publication_limit_counter_id: i32, term_length: usize) {
+        if let Some(limit) = self.counters.get(&publication_limit_counter_id) {
+            limit.store((term_length / 2) as i64, Ordering::Release);
+        }
     }
 
     /// Publication limit counter for the given id, shared with an in-process client.
@@ -584,21 +745,17 @@ impl DriverConductor {
         session_id: i32,
         stream_id: i32,
         subscription_registration_id: i64,
-        publication_limit_counter_id: i32,
         log_file_name: &str,
+        source_identity: &str,
     ) -> Result<()> {
         let correlation_id = self.next_id();
         let subscriber_position_id = self.next_counter_id();
-        // The subscriber owns its position counter (starts at 0); the driver opens the
-        // publication's limit to the initial window so the publisher can offer immediately.
+        // The subscriber owns its position counter (starts at 0).
         self.counters
             .insert(subscriber_position_id, Arc::new(AtomicI64::new(0)));
-        if let Some(limit) = self.counters.get(&publication_limit_counter_id) {
-            limit.store(self.initial_window(), Ordering::Release);
-        }
         // 28-byte fixed body + length-prefixed log file name + length-prefixed source identity.
         let name_field = 4 + align4(log_file_name.len());
-        let source_field = 4 + IPC_SOURCE_IDENTITY.len();
+        let source_field = 4 + source_identity.len();
         let mut scratch = vec![0u8; 28 + name_field + source_field];
         let len = scratch.len();
         let buf = AtomicBuffer::new(&mut scratch);
@@ -609,7 +766,7 @@ impl DriverConductor {
         fw.set_subscription_registration_id(subscription_registration_id);
         fw.set_subscriber_position_id(subscriber_position_id);
         fw.set_log_file_name(log_file_name);
-        fw.set_source_identity(IPC_SOURCE_IDENTITY);
+        fw.set_source_identity(source_identity);
         self.transmit(ON_AVAILABLE_IMAGE, &buf, len)
     }
 

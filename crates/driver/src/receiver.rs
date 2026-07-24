@@ -4,11 +4,11 @@
 
 use crate::error::Result;
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
-use crate::media::transport_poller::DataTransportPoller;
 
 pub struct Receiver {
-    data_transport_poller: DataTransportPoller,
     receive_channel_endpoints: Vec<ReceiveChannelEndpoint>,
+    /// Frames drained off the wire this cycle, handed to the conductor for image reassembly.
+    received_frames: Vec<Vec<u8>>,
 }
 
 impl Default for Receiver {
@@ -20,8 +20,8 @@ impl Default for Receiver {
 impl Receiver {
     pub fn new() -> Self {
         Self {
-            data_transport_poller: DataTransportPoller::new(),
             receive_channel_endpoints: Vec::new(),
+            received_frames: Vec::new(),
         }
     }
 
@@ -30,12 +30,23 @@ impl Receiver {
     }
 
     pub fn do_work(&mut self) -> Result<usize> {
-        let bytes_polled = self
-            .data_transport_poller
-            .poll_transports(|_payload, _src| {
-                // Incoming frame dispatch logic
-            })?;
-        Ok(bytes_polled)
+        // Drain every receive endpoint's socket; the conductor turns SETUP/DATA frames into
+        // images and reassembled term data.
+        let mut buffer = [0u8; 2048];
+        let mut count = 0;
+        for endpoint in &self.receive_channel_endpoints {
+            let transport = endpoint.transport();
+            while let Ok((len, _src)) = transport.recv_from(&mut buffer) {
+                self.received_frames.push(buffer[..len].to_vec());
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Take the frames received since the last call for conductor dispatch.
+    pub fn take_received_frames(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.received_frames)
     }
 
     pub fn receive_channel_endpoints(&self) -> &[ReceiveChannelEndpoint] {
