@@ -35,6 +35,10 @@ use aeron_client::protocol::{
 
 use crate::configuration::Configuration;
 use crate::error::{DriverError, Result};
+use crate::media::send_channel_endpoint::SendChannelEndpoint;
+use crate::media::udp_channel::UdpChannel;
+use crate::media::udp_channel_transport::UdpChannelTransport;
+use crate::network_publication::NetworkPublication;
 
 /// Source identity reported for IPC images — matches upstream's `aeron:ipc` channel identity.
 const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
@@ -42,6 +46,11 @@ const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
 /// Returns `true` for an IPC channel (`aeron:ipc`, optionally with parameters).
 fn is_ipc_channel(channel: &str) -> bool {
     channel == "aeron:ipc" || channel.starts_with("aeron:ipc?")
+}
+
+/// Returns `true` for a UDP (network) channel.
+fn is_udp_channel(channel: &str) -> bool {
+    channel.starts_with("aeron:udp")
 }
 
 /// Round up to the next 4-byte boundary (variable-length command fields are SBE-aligned).
@@ -126,6 +135,8 @@ pub struct DriverConductor {
     /// in for the shared CnC counters region (not yet laid out); an in-process client shares
     /// these `Arc`s via [`DriverConductor::counters`] until that region lands.
     counters: HashMap<i32, Arc<AtomicI64>>,
+    /// Network publications created this cycle, drained by the driver into the Sender.
+    new_network_publications: Vec<NetworkPublication>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
 }
@@ -153,8 +164,14 @@ impl DriverConductor {
             subscriptions: HashMap::new(),
             log_buffers: HashMap::new(),
             counters: HashMap::new(),
+            new_network_publications: Vec::new(),
             clients: HashMap::new(),
         })
+    }
+
+    /// Drain network publications created since the last call so the Sender can adopt them.
+    pub fn take_new_network_publications(&mut self) -> Vec<NetworkPublication> {
+        std::mem::take(&mut self.new_network_publications)
     }
 
     /// One conductor duty cycle: drain and dispatch client commands, then sweep liveness.
@@ -275,17 +292,48 @@ impl DriverConductor {
         // path); the client keys its publication by the registration id echoed back here.
         let registration_id = correlation_id;
         let is_ipc = is_ipc_channel(&channel);
+        let is_udp = is_udp_channel(&channel);
         let session_id = self.next_session_id();
         let publication_limit_counter_id = self.next_counter_id();
-        // Publication limit starts at 0 (no window); it opens to the flow-control window when
-        // a subscriber connects (see `on_available_image`).
+        // Publication limit starts at 0 (no window). IPC opens it when a subscriber connects;
+        // UDP opens it at creation (real Status-Message flow control lands with task-8).
         self.counters
             .insert(publication_limit_counter_id, Arc::new(AtomicI64::new(0)));
 
         let log_file_name = if is_ipc {
-            let (name, buffers) =
-                self.allocate_ipc_log_buffers(registration_id, session_id, stream_id)?;
+            let term_length = self.configuration.ipc_term_buffer_length as i32;
+            let mtu = self.configuration.ipc_mtu_length as i32;
+            let (name, buffers) = self.allocate_log_buffers(
+                registration_id,
+                session_id,
+                stream_id,
+                term_length,
+                mtu,
+            )?;
             self.log_buffers.insert(registration_id, buffers);
+            Some(name)
+        } else if is_udp {
+            let term_length = self.configuration.publication_term_buffer_length as i32;
+            let mtu = self.configuration.mtu_length as i32;
+            let (name, buffers) = self.allocate_log_buffers(
+                registration_id,
+                session_id,
+                stream_id,
+                term_length,
+                mtu,
+            )?;
+            self.log_buffers.insert(registration_id, buffers.clone());
+            self.create_network_publication(
+                registration_id,
+                session_id,
+                stream_id,
+                &channel,
+                buffers,
+                mtu,
+            )?;
+            if let Some(limit) = self.counters.get(&publication_limit_counter_id) {
+                limit.store(self.initial_window(), Ordering::Release);
+            }
             Some(name)
         } else {
             None
@@ -317,38 +365,71 @@ impl DriverConductor {
                 &log_file_name,
                 exclusive,
             )?;
-            self.link_ipc_publication(
-                stream_id,
-                session_id,
-                publication_limit_counter_id,
-                &log_file_name,
-            )?;
+            if is_ipc {
+                self.link_ipc_publication(
+                    stream_id,
+                    session_id,
+                    publication_limit_counter_id,
+                    &log_file_name,
+                )?;
+            }
         }
+        Ok(())
+    }
+
+    /// Bind a send channel endpoint for `channel` and queue a network publication over the
+    /// shared log for the Sender to transmit.
+    fn create_network_publication(
+        &mut self,
+        registration_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        channel: &str,
+        buffers: LogBuffers,
+        mtu: i32,
+    ) -> Result<()> {
+        let udp_channel = UdpChannel::parse(channel)
+            .map_err(|e| DriverError::IllegalState(format!("parse udp channel: {e}")))?;
+        let destination = udp_channel.remote_data;
+        let transport =
+            UdpChannelTransport::bind(udp_channel.clone(), udp_channel.local_data, None, 0, 0)?;
+        let endpoint = SendChannelEndpoint::new(udp_channel, transport);
+        self.new_network_publications.push(NetworkPublication::new(
+            registration_id,
+            buffers,
+            endpoint,
+            destination,
+            session_id,
+            stream_id,
+            0,
+            mtu as usize,
+        ));
         Ok(())
     }
 
     /// Create and map a fresh IPC log file under `aeron_dir/publications/`, initialising its
     /// metadata so publishers and subscribers see a valid, shared log.
-    fn allocate_ipc_log_buffers(
+    fn allocate_log_buffers(
         &self,
         registration_id: i64,
         session_id: i32,
         stream_id: i32,
+        term_length: i32,
+        mtu_length: i32,
     ) -> Result<(String, LogBuffers)> {
         let dir = self.aeron_dir.join("publications");
         std::fs::create_dir_all(&dir)
             .map_err(|e| DriverError::IllegalState(format!("create publications dir: {e}")))?;
         let path = dir.join(format!("{registration_id}.logbuffer"));
 
-        let term_length = self.configuration.ipc_term_buffer_length as i32;
         let buffers = LogBuffers::map_new(&path, term_length, DEFAULT_FILE_PAGE_SIZE)
-            .map_err(|e| DriverError::IllegalState(format!("map IPC log buffer: {e}")))?;
+            .map_err(|e| DriverError::IllegalState(format!("map log buffer: {e}")))?;
 
-        // Fresh logs start at initial term id 0; record the negotiated IPC MTU so appenders
-        // frame consistently with what the client will read.
+        // Fresh logs start at initial term id 0; record the negotiated MTU so appenders frame
+        // consistently with what the client (and the network wire) will read.
         let meta = buffers.meta_data_buffer();
         set_initial_term_id(&meta, 0);
-        set_mtu_length(&meta, self.configuration.ipc_mtu_length as i32);
+        set_mtu_length(&meta, mtu_length);
 
         // Seed the default frame header (DATA type + session/stream ids) so the publisher's
         // HeaderWriter stamps real data frames — without this every frame reads as padding.

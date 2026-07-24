@@ -4,9 +4,11 @@
 
 use crate::error::Result;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
+use crate::network_publication::NetworkPublication;
 
 pub struct Sender {
     send_channel_endpoints: Vec<SendChannelEndpoint>,
+    network_publications: Vec<NetworkPublication>,
 }
 
 impl Default for Sender {
@@ -19,6 +21,7 @@ impl Sender {
     pub fn new() -> Self {
         Self {
             send_channel_endpoints: Vec::new(),
+            network_publications: Vec::new(),
         }
     }
 
@@ -26,14 +29,26 @@ impl Sender {
         self.send_channel_endpoints.push(endpoint);
     }
 
-    pub fn do_work(&mut self) -> Result<usize> {
-        let work_count = 0;
-        // Duty cycle work: flush network publication buffers to send endpoints
-        Ok(work_count)
+    /// Take ownership of a network publication so its data path runs each duty cycle.
+    pub fn add_network_publication(&mut self, publication: NetworkPublication) {
+        self.network_publications.push(publication);
+    }
+
+    pub fn do_work(&mut self, now_ns: i64) -> Result<usize> {
+        // Flush each network publication: SETUP announcements, new data frames, heartbeats.
+        let mut work = 0;
+        for publication in &mut self.network_publications {
+            work += publication.do_work(now_ns)?;
+        }
+        Ok(work)
     }
 
     pub fn send_channel_endpoints(&self) -> &[SendChannelEndpoint] {
         &self.send_channel_endpoints
+    }
+
+    pub fn network_publications(&self) -> &[NetworkPublication] {
+        &self.network_publications
     }
 }
 
@@ -54,6 +69,6 @@ mod tests {
 
         sender.add_send_channel_endpoint(endpoint);
         assert_eq!(sender.send_channel_endpoints().len(), 1);
-        assert_eq!(sender.do_work().unwrap(), 0);
+        assert_eq!(sender.do_work(0).unwrap(), 0);
     }
 }

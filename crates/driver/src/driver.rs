@@ -71,7 +71,11 @@ impl MediaDriver {
     pub fn do_work(&mut self) -> Result<usize> {
         let now_ns = now_ns();
         let conductor_work = self.conductor.do_work(now_ns)?;
-        let sender_work = self.sender.do_work()?;
+        // Adopt any network publications the conductor created this cycle into the Sender.
+        for publication in self.conductor.take_new_network_publications() {
+            self.sender.add_network_publication(publication);
+        }
+        let sender_work = self.sender.do_work(now_ns)?;
         let receiver_work = self.receiver.do_work()?;
 
         Ok(conductor_work + sender_work + receiver_work)
