@@ -11,6 +11,7 @@ use aeron_client::logbuffer::{
     TermGapScanner, TermRebuilder, TermScanner, compute_position, index_by_position,
     index_by_term_count, position_bits_to_shift,
 };
+use aeron_client::protocol::{EOS_FLAG, FLAGS_FIELD_OFFSET};
 
 use std::net::SocketAddr;
 
@@ -57,6 +58,7 @@ pub struct PublicationImage {
     pending_loss: Option<LossRange>,
     state: PublicationImageState,
     last_packet_ns: i64,
+    end_of_stream: bool,
 }
 
 impl PublicationImage {
@@ -131,6 +133,7 @@ impl PublicationImage {
             pending_loss: None,
             state: PublicationImageState::Init,
             last_packet_ns: 0,
+            end_of_stream: false,
         }
     }
 
@@ -226,6 +229,14 @@ impl PublicationImage {
         self.pending_loss
     }
 
+    /// Whether the publication advertised end-of-stream on a received DATA frame.
+    ///
+    /// Reference: upstream `PublicationImage.isEndOfStream()` and
+    /// `DataHeaderFlyweight.EOS_FLAG` in vendored Aeron.
+    pub fn is_end_of_stream(&self) -> bool {
+        self.end_of_stream
+    }
+
     /// Apply the position advertised by the receiver's latest Status Message.
     ///
     /// Upstream `PublicationImage.sendPendingStatusMessage` resets the overrun threshold to half
@@ -301,6 +312,12 @@ impl PublicationImage {
                 self.state = PublicationImageState::Active;
             }
             self.advance_rebuild_position();
+            if frame.get_u8(FLAGS_FIELD_OFFSET) & EOS_FLAG != 0 {
+                self.end_of_stream = true;
+                if self.rebuild_position >= self.hwm_position {
+                    self.state = PublicationImageState::Draining;
+                }
+            }
         }
     }
 
@@ -534,6 +551,36 @@ mod tests {
 
         image.on_heartbeat(1, 0, 30);
         assert_eq!(term_buffer.get_i32(0), 40);
+
+        drop(image);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn enters_draining_when_an_eos_frame_is_rebuilt() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-publication-image-eos-test-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000);
+        let mut image = PublicationImage::new(
+            7,
+            9,
+            1,
+            buffers,
+            path.to_string_lossy().into_owned(),
+            source,
+            11,
+            12,
+        );
+
+        let mut frame = data_frame(1, 0, 0x22);
+        frame[FLAGS_FIELD_OFFSET] = EOS_FLAG;
+        image.on_data_frame(1, 0, &AtomicBuffer::new(&mut frame), 40, 10);
+
+        assert!(image.is_end_of_stream());
+        assert_eq!(image.state(), PublicationImageState::Draining);
 
         drop(image);
         let _ = std::fs::remove_file(path);
