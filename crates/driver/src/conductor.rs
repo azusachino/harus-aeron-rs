@@ -45,6 +45,9 @@ use aeron_client::protocol::{
 
 use crate::configuration::Configuration;
 use crate::error::{DriverError, Result};
+use crate::flow_control::{
+    MULTICAST_RRWM_DEFAULT, UNICAST_RRWM_DEFAULT, retransmit_receiver_window_multiple,
+};
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::udp_channel::UdpChannel;
@@ -482,6 +485,13 @@ impl DriverConductor {
     ) -> Result<()> {
         let udp_channel = UdpChannel::parse(channel)
             .map_err(|e| DriverError::IllegalState(format!("parse udp channel: {e}")))?;
+        let rrwm_default = if udp_channel.is_multicast {
+            MULTICAST_RRWM_DEFAULT
+        } else {
+            UNICAST_RRWM_DEFAULT
+        };
+        let retransmit_receiver_window_multiple =
+            retransmit_receiver_window_multiple(&udp_channel, rrwm_default)?;
         let destination = udp_channel.remote_data;
         let transport =
             UdpChannelTransport::bind(udp_channel.clone(), udp_channel.local_data, None, 0, 0)?;
@@ -496,6 +506,7 @@ impl DriverConductor {
             0,
             mtu as usize,
             publication_limit,
+            retransmit_receiver_window_multiple,
         ));
         Ok(())
     }

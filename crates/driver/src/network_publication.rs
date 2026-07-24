@@ -20,6 +20,7 @@ use aeron_client::protocol::{
 };
 
 use crate::error::Result;
+use crate::flow_control::calculate_retransmission_length;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 
 /// Interval between SETUP re-sends and idle heartbeats (100 ms), matching upstream defaults.
@@ -44,6 +45,7 @@ pub struct NetworkPublication {
     receiver_limit: i64,
     status_received: bool,
     publication_limit: Arc<AtomicI64>,
+    retransmit_receiver_window_multiple: i32,
 }
 
 impl NetworkPublication {
@@ -58,6 +60,7 @@ impl NetworkPublication {
         initial_term_id: i32,
         mtu_length: usize,
         publication_limit: Arc<AtomicI64>,
+        retransmit_receiver_window_multiple: i32,
     ) -> Self {
         let term_length = log_buffers.term_length();
         Self {
@@ -77,6 +80,7 @@ impl NetworkPublication {
             receiver_limit: 0,
             status_received: false,
             publication_limit,
+            retransmit_receiver_window_multiple,
         }
     }
 
@@ -186,6 +190,13 @@ impl NetworkPublication {
         let term_buffers = self.log_buffers.duplicate_term_buffers();
         let term_buffer = term_buffers[term_count as usize];
         let mut offset = term_offset as usize;
+        let length = calculate_retransmission_length(
+            length.min(i32::MAX as usize) as i32,
+            self.term_length.min(i32::MAX as usize) as i32,
+            term_offset,
+            self.retransmit_receiver_window_multiple,
+        )
+        .max(0) as usize;
         let end = offset.saturating_add(length).min(self.term_length);
         let mut work = 0;
         while offset < end {
