@@ -19,6 +19,8 @@ DRIVER_BINARY = ROOT / "target" / "debug" / "aeron-driver"
 JAVA_SOURCE = ROOT / "deploy" / "interop" / "CncLayoutProbe.java"
 JAVA_PUBSUB_SOURCE = ROOT / "deploy" / "interop" / "JavaPubSubProbe.java"
 JAVA_UDP_SOURCE = ROOT / "deploy" / "interop" / "JavaUdpPubSubProbe.java"
+# The source of truth for layout and protocol behavior is vendor/aeron source. The
+# assembled JAR is used here only as the Java runtime classpath for the interop probes.
 JAVA_BUILD = ROOT / "vendor" / "aeron" / "aeron-all" / "build" / "libs"
 
 
@@ -49,7 +51,7 @@ def main() -> int:
     print("[1/6] Building Rust MediaDriver binary...")
     _run(["cargo", "build", "-p", "aeron-driver", "--bin", "aeron-driver"], cwd=ROOT)
 
-    print("[2/6] Resolving vendored Aeron Java jar...")
+    print("[2/6] Resolving vendored Aeron Java runtime jar (source is vendor/aeron)...")
     aeron_all_jar = _aeron_all_jar()
 
     print("[3/6] Compiling Java compatibility probes...")

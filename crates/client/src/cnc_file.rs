@@ -27,7 +27,8 @@
 //! `MAP_SHARED`, the driver and clients see each other's writes across processes.
 //!
 //! The metadata field offsets, region ordering, `META_DATA_LENGTH` (CACHE_LINE * 2 = 128), and
-//! `CNC_VERSION` (SemanticVersion 0.2.0 = 512) match upstream `1.50.x`.
+//! `CNC_VERSION` (SemanticVersion 0.2.0 = 512) match the checked-in upstream source:
+//! `vendor/aeron/aeron-client/src/main/java/io/aeron/CncFileDescriptor.java`.
 
 use crate::error::{AeronError, Result};
 use agrona::AtomicBuffer;
@@ -41,8 +42,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current CnC file format version negotiated between driver and clients.
 ///
-/// Matches upstream `CncFileDescriptor.CNC_VERSION = SemanticVersion.compose(0, 2, 0)`
-/// = `(0 << 16) | (2 << 8) | 0` = 512.
+/// Matches `vendor/aeron/aeron-client/src/main/java/io/aeron/CncFileDescriptor.java`:
+/// `CNC_VERSION = SemanticVersion.compose(0, 2, 0)` = `(0 << 16) | (2 << 8) | 0` = 512.
 pub const CNC_VERSION: i32 = 512;
 /// Conventional CnC file name inside the Aeron directory.
 pub const CNC_FILE: &str = "cnc.dat";

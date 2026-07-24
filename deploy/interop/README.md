@@ -14,6 +14,12 @@ Probe sources:
 - `JavaPubSubProbe.java` — Java IPC client round-trip through Rust MediaDriver
 - `JavaUdpPubSubProbe.java` — Java UDP client round-trip through Rust MediaDriver
 
+The built `aeron-all` JAR is only a Java runtime/compile dependency for these probes. It is
+not used as the authority for offsets or protocol behavior. Those references are checked-in
+under `vendor/aeron/aeron-client/src/main/java/` (for example, `CncFileDescriptor.java` and
+`LogBufferDescriptor.java`) and the pinned Agrona source reference in
+`crates/agrona/src/ring_buffer/mod.rs`.
+
 This proves Java-client ↔ Rust-driver mixing for these IPC and UDP paths. It does not prove the
 full upstream driver test suite, Rust-client ↔ Java-driver mixing, archive/cluster parity, or
 all multicast and advanced channel modes.

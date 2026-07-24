@@ -207,6 +207,9 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
+    // Cases cross-checked against:
+    // vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/media/SocketAddressParserTest.java
+
     const LOOKUP_RESOLVER_NAME: &str = "StreamX";
     const LOOKUP_RESOLVER_HOSTNAME: &str = "192.168.1.20";
     const LOOKUP_RESOLVER_PORT: u16 = 55;
@@ -301,6 +304,19 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_on_invalid_ipv6_scope() {
+        assert!(
+            SocketAddressParser::parse(
+                "[FC07::789:1:0:0:3%^]:111",
+                "endpoint",
+                false,
+                &DefaultNameResolver,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn should_parse_ipv6() {
         let addr1 =
             SocketAddressParser::parse("[::1]:54321", "endpoint", false, &DefaultNameResolver)
@@ -340,6 +356,17 @@ mod tests {
             &TestLookupResolver,
         )
         .unwrap();
+        assert_eq!(
+            addr,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)), 55)
+        );
+    }
+
+    #[test]
+    fn should_parse_and_pass_through_lookup_for_unknown_name() {
+        let addr =
+            SocketAddressParser::parse("192.168.1.20:55", "endpoint", false, &TestLookupResolver)
+                .unwrap();
         assert_eq!(
             addr,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)), 55)
