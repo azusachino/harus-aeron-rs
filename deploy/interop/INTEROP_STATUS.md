@@ -13,14 +13,15 @@ This document tracks interop smoke verification between `harus-aeron-rs` (Rust M
 | Target Scenario | Transport | Status | Notes |
 | :--- | :--- | :--- | :--- |
 | **Driver Startup** | Local IPC | **PASS** | Rust MediaDriver process launches cleanly |
-| **Publication Reg** | `aeron:udp` | **PASS** | Channel URI parsing and endpoint binding match Java upstream |
-| **Subscription Reg** | `aeron:udp` | **PASS** | Multicast/Unicast endpoint demuxing green |
-| **Pub/Sub Loop** | UDP Loopback | **PASS** | Datagram frame transmission verified |
+| **CnC metadata mapping** | `cnc.dat` | **PASS** | Aeron Java `CncFileDescriptor` and `CountersReader` map Rust output |
+| **Publication Reg** | `aeron:udp` | **UNVERIFIED** | Rust-side registration is tested; Java client mixing is not yet proven |
+| **Subscription Reg** | `aeron:udp` | **UNVERIFIED** | Rust-side registration is tested; Java client mixing is not yet proven |
+| **Pub/Sub Loop** | UDP Loopback | **UNVERIFIED** | Rust↔Rust UDP loopback passes; Java endpoint roundtrip remains |
 
 ## Execution
 
 Run the interop smoke harness:
 
 ```bash
-uv run scripts/interop_smoke.py
+make interop-smoke
 ```

@@ -83,8 +83,8 @@ miri:  ## Run Miri UB checks on crates with unsafe code (requires: rustup +night
 test-parity:  ## Report Rust test-file parity against vendor/aeron's upstream test suite
 	uv run scripts/upstream_tests.py
 
-interop-smoke:  ## Run the Java<->Rust interop smoke test (not yet implemented)
-	@echo "interop-smoke not yet implemented — see deploy/interop/"
+interop-smoke:  ## Run the Java<->Rust CnC layout interop smoke test
+	uv run scripts/interop_smoke.py
 
 interop:  ## Run the full interop suite (not yet implemented)
 	@echo "interop not yet implemented — see deploy/interop/"

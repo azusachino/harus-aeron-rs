@@ -88,6 +88,8 @@ pub const COUNTER_METADATA_LENGTH: usize = 512;
 pub const COUNTER_VALUE_LENGTH: usize = 128;
 pub const COUNTER_TYPE_ID_OFFSET: usize = 4;
 pub const COUNTER_REGISTRATION_ID_OFFSET: usize = 8;
+pub const COUNTER_OWNER_ID_OFFSET: usize = 16;
+pub const COUNTER_REFERENCE_ID_OFFSET: usize = 24;
 pub const COUNTER_KEY_OFFSET: usize = 16;
 pub const COUNTER_LABEL_OFFSET: usize = 128;
 pub const COUNTER_LABEL_MAX_LENGTH: usize = 380;
@@ -341,7 +343,7 @@ impl CncFile {
         let metadata_offset = counter_id.saturating_mul(COUNTER_METADATA_LENGTH);
         let value_offset = counter_id.saturating_mul(COUNTER_VALUE_LENGTH);
         if metadata_offset + COUNTER_METADATA_LENGTH > self.0.counters_metadata_length
-            || value_offset + 8 > self.0.counters_values_length
+            || value_offset + COUNTER_REFERENCE_ID_OFFSET + 8 > self.0.counters_values_length
         {
             return Err(AeronError::IllegalState(format!(
                 "counter id {counter_id} does not fit CnC counter regions"
@@ -358,10 +360,6 @@ impl CncFile {
 
         let metadata = self.counters_metadata_buffer();
         metadata.put_i32(metadata_offset + COUNTER_TYPE_ID_OFFSET, type_id);
-        metadata.put_i64(
-            metadata_offset + COUNTER_REGISTRATION_ID_OFFSET,
-            registration_id,
-        );
         metadata.put_i32(
             metadata_offset + COUNTER_LABEL_OFFSET,
             label_bytes.len() as i32,
@@ -369,6 +367,13 @@ impl CncFile {
         metadata.put_bytes(metadata_offset + COUNTER_LABEL_OFFSET + 4, label_bytes);
         self.counters_values_buffer()
             .put_i64_ordered(value_offset, value);
+        let values = self.counters_values_buffer();
+        values.put_i64(
+            value_offset + COUNTER_REGISTRATION_ID_OFFSET,
+            registration_id,
+        );
+        values.put_i64(value_offset + COUNTER_OWNER_ID_OFFSET, 0);
+        values.put_i64(value_offset + COUNTER_REFERENCE_ID_OFFSET, 0);
         // Publish the state last, matching CountersManager's allocation visibility contract.
         metadata.put_i32_ordered(metadata_offset, COUNTER_RECORD_ALLOCATED);
         Ok(())
