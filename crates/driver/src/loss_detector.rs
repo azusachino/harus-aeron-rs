@@ -53,7 +53,8 @@ impl StaticDelayGenerator {
         )
     }
 
-    fn generate_delay_ns(&self) -> i64 {
+    /// The initial delay before the first feedback (NAK / retransmit).
+    pub fn generate_delay_ns(&self) -> i64 {
         self.delay_ns
     }
 
