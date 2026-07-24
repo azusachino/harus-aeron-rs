@@ -143,7 +143,18 @@ impl Receiver {
             let mut frame_bytes = frame.to_vec();
             let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut frame_bytes));
             let frame_length = data.frame_length();
-            if frame_length <= 0 {
+            if frame_length < 0 {
+                break;
+            }
+            if frame_length == 0 {
+                self.receive_channel_endpoints[endpoint_index].on_data_packet(
+                    data.session_id(),
+                    data.stream_id(),
+                    data.term_id(),
+                    data.term_offset(),
+                    &[],
+                    source,
+                );
                 break;
             }
             if (frame_length as usize) < DATA_HEADER_LENGTH {

@@ -163,6 +163,25 @@ impl PublicationImage {
         }
     }
 
+    /// Record a heartbeat's position without writing over an existing frame in the image log.
+    pub fn on_heartbeat(&mut self, term_id: i32, term_offset: usize, now_ns: i64) {
+        if term_id < self.initial_term_id || term_offset > self.term_length {
+            return;
+        }
+        let position = compute_position(
+            term_id,
+            term_offset as i32,
+            self.position_bits_to_shift as i32,
+            self.initial_term_id,
+        );
+        self.hwm_position = self.hwm_position.max(position);
+        self.last_packet_ns = now_ns;
+        if self.state == PublicationImageState::Init {
+            self.state = PublicationImageState::Active;
+        }
+        self.advance_rebuild_position();
+    }
+
     fn advance_rebuild_position(&mut self) {
         let term_buffers = self.log_buffers.duplicate_term_buffers();
         while self.rebuild_position < self.hwm_position {
@@ -281,6 +300,11 @@ mod tests {
         assert_eq!(image.hwm_position(), 128);
         assert_eq!(image.source_addr(), source);
         assert!(image.is_connected(20, 1));
+
+        image.on_heartbeat(1, 256, 30);
+        assert_eq!(image.hwm_position(), 256);
+        let term_buffer = image.log_buffers.duplicate_term_buffers()[0];
+        assert_eq!(term_buffer.get_i32(64), 40);
 
         drop(image);
         let _ = std::fs::remove_file(path);

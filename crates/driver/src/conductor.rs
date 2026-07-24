@@ -537,7 +537,13 @@ impl DriverConductor {
         let mut offset = 0usize;
         while offset + DATA_HEADER_LENGTH <= length {
             let frame_length = buf.get_i32(offset + FRAME_LENGTH_FIELD_OFFSET);
-            if frame_length <= 0 {
+            if frame_length == 0 {
+                let term_id = buf.get_i32(offset + DATA_TERM_ID_FIELD_OFFSET);
+                let term_offset = buf.get_i32(offset + DATA_TERM_OFFSET_FIELD_OFFSET);
+                image.on_heartbeat(term_id, term_offset.max(0) as usize, now_ns);
+                break;
+            }
+            if frame_length < 0 {
                 break;
             }
             let aligned = align(frame_length, FRAME_ALIGNMENT) as usize;
