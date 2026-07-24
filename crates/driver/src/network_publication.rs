@@ -5,6 +5,8 @@
 //! the active term and transmits SETUP + DATA + heartbeat frames over the channel endpoint.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use agrona::AtomicBuffer;
 
@@ -41,6 +43,7 @@ pub struct NetworkPublication {
     last_send_ns: i64,
     receiver_limit: i64,
     status_received: bool,
+    publication_limit: Arc<AtomicI64>,
 }
 
 impl NetworkPublication {
@@ -54,6 +57,7 @@ impl NetworkPublication {
         stream_id: i32,
         initial_term_id: i32,
         mtu_length: usize,
+        publication_limit: Arc<AtomicI64>,
     ) -> Self {
         let term_length = log_buffers.term_length();
         Self {
@@ -72,6 +76,7 @@ impl NetworkPublication {
             last_send_ns: i64::MIN,
             receiver_limit: 0,
             status_received: false,
+            publication_limit,
         }
     }
 
@@ -98,8 +103,14 @@ impl NetworkPublication {
                     self.position_bits_to_shift as i32,
                     self.initial_term_id,
                 );
-                self.receiver_limit = consumption_position
+                let new_receiver_limit = consumption_position
                     .saturating_add(status.receiver_window_length.max(0) as i64);
+                // SETUP is periodically re-sent and can elicit an older offset-0 SM after a
+                // newer data-progress SM. A reliable publication must not move its send limit
+                // backwards because of that stale control frame.
+                self.receiver_limit = self.receiver_limit.max(new_receiver_limit);
+                self.publication_limit
+                    .store(self.receiver_limit, Ordering::Release);
                 self.status_received = true;
                 work += 1;
             }

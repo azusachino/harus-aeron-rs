@@ -353,6 +353,14 @@ impl DriverConductor {
                 &channel,
                 buffers,
                 mtu,
+                self.counters
+                    .get(&publication_limit_counter_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        DriverError::IllegalState(format!(
+                            "missing publication limit counter {publication_limit_counter_id}"
+                        ))
+                    })?,
             )?;
             self.open_publication_window(
                 publication_limit_counter_id,
@@ -403,6 +411,7 @@ impl DriverConductor {
 
     /// Bind a send channel endpoint for `channel` and queue a network publication over the
     /// shared log for the Sender to transmit.
+    #[allow(clippy::too_many_arguments)]
     fn create_network_publication(
         &mut self,
         registration_id: i64,
@@ -411,6 +420,7 @@ impl DriverConductor {
         channel: &str,
         buffers: LogBuffers,
         mtu: i32,
+        publication_limit: Arc<AtomicI64>,
     ) -> Result<()> {
         let udp_channel = UdpChannel::parse(channel)
             .map_err(|e| DriverError::IllegalState(format!("parse udp channel: {e}")))?;
@@ -427,6 +437,7 @@ impl DriverConductor {
             stream_id,
             0,
             mtu as usize,
+            publication_limit,
         ));
         Ok(())
     }

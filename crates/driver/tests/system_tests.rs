@@ -345,6 +345,78 @@ fn udp_publication_to_subscription_roundtrip_through_two_drivers() {
 }
 
 #[test]
+fn udp_receiver_status_advances_beyond_initial_window() {
+    const STREAM_ID: i32 = 3004;
+    const MESSAGE_COUNT: usize = 40;
+    const PAYLOAD_LENGTH: usize = 1024;
+
+    let endpoint_socket = UdpSocket::bind("127.0.0.1:0").expect("reserve endpoint");
+    let endpoint_port = endpoint_socket.local_addr().unwrap().port();
+    drop(endpoint_socket);
+    let channel = format!("aeron:udp?endpoint=127.0.0.1:{endpoint_port}");
+
+    let mut publisher_driver = MediaDriver::launch(small_udp_config()).expect("publisher launch");
+    let mut subscriber_driver = MediaDriver::launch(small_udp_config()).expect("subscriber launch");
+    let mut subscriber = client_conductor(&subscriber_driver, 2);
+    let sub_reg = subscriber.add_subscription(&channel, STREAM_ID).unwrap();
+    subscriber_driver
+        .do_work()
+        .expect("bind subscriber endpoint");
+    subscriber.do_work().expect("resolve subscription");
+
+    let mut publisher = client_conductor(&publisher_driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    publisher_driver.do_work().expect("send setup");
+    for (id, counter) in publisher_driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("resolve publication");
+    subscriber_driver.do_work().expect("create image");
+    for (id, counter) in subscriber_driver.conductor().counters() {
+        subscriber.register_counter(*id, counter.clone());
+    }
+    subscriber.do_work().expect("resolve image");
+
+    let mut offered = 0usize;
+    let mut received = 0usize;
+    for _ in 0..500 {
+        if offered < MESSAGE_COUNT {
+            let mut payload = vec![offered as u8; PAYLOAD_LENGTH];
+            let position = publisher
+                .publication(pub_reg)
+                .expect("publication ready")
+                .offer(&AtomicBuffer::new(&mut payload), 0, PAYLOAD_LENGTH)
+                .unwrap();
+            if position > 0 {
+                offered += 1;
+            }
+        }
+        publisher_driver.do_work().expect("publish data");
+        subscriber_driver
+            .do_work()
+            .expect("receive data and advance SM");
+        for (id, counter) in subscriber_driver.conductor().counters() {
+            subscriber.register_counter(*id, counter.clone());
+        }
+        subscriber.do_work().expect("service subscriber events");
+        if let Some(subscription) = subscriber.subscription_mut(sub_reg) {
+            received += subscription.poll(|_, _, _, _| {}, MESSAGE_COUNT);
+        }
+        if received == MESSAGE_COUNT && offered == MESSAGE_COUNT {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        received,
+        MESSAGE_COUNT,
+        "offered={offered}, sender_position={}, receiver_limit={}",
+        publisher_driver.sender().network_publications()[0].sender_position(),
+        publisher_driver.sender().network_publications()[0].receiver_limit()
+    );
+}
+
+#[test]
 fn udp_receiver_gap_generates_nak_and_sender_retransmits() {
     const STREAM_ID: i32 = 4004;
     const FIRST_PAYLOAD: &[u8] = &[0x11; 800];

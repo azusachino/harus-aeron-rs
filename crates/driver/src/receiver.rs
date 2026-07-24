@@ -19,8 +19,15 @@ pub struct Receiver {
     receive_channel_endpoints: Vec<ReceiveChannelEndpoint>,
     /// Frames drained off the wire this cycle, handed to the conductor with their source.
     received_frames: Vec<ReceivedFrame>,
-    /// Next contiguous term position expected for each received session/stream.
-    expected_positions: HashMap<(i32, i32), (i32, i32)>,
+    /// Next contiguous term position and flow-control context for each source/session/stream.
+    expected_positions: HashMap<(i32, i32, SocketAddr), ExpectedPosition>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExpectedPosition {
+    term_id: i32,
+    term_offset: i32,
+    receiver_window_length: i32,
 }
 
 /// A received datagram together with the endpoint and source that delivered it.
@@ -99,11 +106,14 @@ impl Receiver {
                     setup.term_offset(),
                     source,
                 );
-                self.expected_positions.insert(
-                    (setup.session_id(), setup.stream_id()),
-                    (setup.active_term_id(), setup.term_offset()),
-                );
                 let window = (setup.term_length() / 2).max(setup.mtu_length());
+                self.expected_positions
+                    .entry((setup.session_id(), setup.stream_id(), source))
+                    .or_insert(ExpectedPosition {
+                        term_id: setup.active_term_id(),
+                        term_offset: setup.term_offset(),
+                        receiver_window_length: window,
+                    });
                 self.receive_channel_endpoints[endpoint_index].send_status_message(
                     setup.session_id(),
                     setup.stream_id(),
@@ -114,49 +124,88 @@ impl Receiver {
                 )?;
             }
             HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
-                let data = DataHeaderFlyweight::new(buffer);
-                let frame_length = data.frame_length();
-                self.receive_channel_endpoints[endpoint_index].on_data_packet(
-                    data.session_id(),
-                    data.stream_id(),
-                    data.term_id(),
-                    data.term_offset(),
-                    &bytes[DATA_HEADER_LENGTH..],
-                    source,
-                );
-                if frame_length <= 0 {
-                    return Ok(());
-                }
-                let key = (data.session_id(), data.stream_id());
-                let expected = self
-                    .expected_positions
-                    .entry(key)
-                    .or_insert((data.term_id(), data.term_offset()));
-                let expected_term = expected.0;
-                let expected_offset = expected.1;
-                if data.term_id() > expected_term
-                    || (data.term_id() == expected_term && data.term_offset() > expected_offset)
-                {
-                    let missing = if data.term_id() == expected_term {
-                        data.term_offset() - expected_offset
-                    } else {
-                        data.term_offset().max(0)
-                    };
-                    if missing > 0 {
-                        self.receive_channel_endpoints[endpoint_index].send_nak(
-                            data.session_id(),
-                            data.stream_id(),
-                            expected_term,
-                            expected_offset,
-                            missing,
-                            source,
-                        )?;
-                    }
-                } else if data.term_id() == expected_term && data.term_offset() == expected_offset {
-                    expected.1 = expected_offset + align(frame_length, FRAME_ALIGNMENT);
-                }
+                self.handle_data_frames(endpoint_index, bytes, source)?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_data_frames(
+        &mut self,
+        endpoint_index: usize,
+        bytes: &[u8],
+        source: SocketAddr,
+    ) -> Result<()> {
+        let mut packet_offset = 0usize;
+        while packet_offset + DATA_HEADER_LENGTH <= bytes.len() {
+            let frame = &bytes[packet_offset..];
+            let mut frame_bytes = frame.to_vec();
+            let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut frame_bytes));
+            let frame_length = data.frame_length();
+            if frame_length <= 0 {
+                break;
+            }
+            if (frame_length as usize) < DATA_HEADER_LENGTH {
+                break;
+            }
+            let aligned_length = align(frame_length, FRAME_ALIGNMENT) as usize;
+            if aligned_length > frame.len() {
+                break;
+            }
+            let frame_length_usize = frame_length as usize;
+            self.receive_channel_endpoints[endpoint_index].on_data_packet(
+                data.session_id(),
+                data.stream_id(),
+                data.term_id(),
+                data.term_offset(),
+                &frame[DATA_HEADER_LENGTH..frame_length_usize.min(frame.len())],
+                source,
+            );
+
+            let key = (data.session_id(), data.stream_id(), source);
+            let expected = self
+                .expected_positions
+                .entry(key)
+                .or_insert(ExpectedPosition {
+                    term_id: data.term_id(),
+                    term_offset: data.term_offset(),
+                    receiver_window_length: 0,
+                });
+            let expected_term = expected.term_id;
+            let expected_offset = expected.term_offset;
+            if data.term_id() > expected_term
+                || (data.term_id() == expected_term && data.term_offset() > expected_offset)
+            {
+                let missing = if data.term_id() == expected_term {
+                    data.term_offset() - expected_offset
+                } else {
+                    data.term_offset().max(0)
+                };
+                if missing > 0 {
+                    self.receive_channel_endpoints[endpoint_index].send_nak(
+                        data.session_id(),
+                        data.stream_id(),
+                        expected_term,
+                        expected_offset,
+                        missing,
+                        source,
+                    )?;
+                }
+            } else if data.term_id() == expected_term && data.term_offset() == expected_offset {
+                expected.term_offset = expected_offset + align(frame_length, FRAME_ALIGNMENT);
+                if expected.receiver_window_length > 0 {
+                    self.receive_channel_endpoints[endpoint_index].send_status_message(
+                        data.session_id(),
+                        data.stream_id(),
+                        expected.term_id,
+                        expected.term_offset,
+                        expected.receiver_window_length,
+                        source,
+                    )?;
+                }
+            }
+            packet_offset += aligned_length;
         }
         Ok(())
     }
