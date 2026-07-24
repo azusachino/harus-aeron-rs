@@ -19,6 +19,7 @@ DRIVER_BINARY = ROOT / "target" / "debug" / "aeron-driver"
 JAVA_SOURCE = ROOT / "deploy" / "interop" / "CncLayoutProbe.java"
 JAVA_PUBSUB_SOURCE = ROOT / "deploy" / "interop" / "JavaPubSubProbe.java"
 JAVA_UDP_SOURCE = ROOT / "deploy" / "interop" / "JavaUdpPubSubProbe.java"
+JAVA_DRIVER_HOST_SOURCE = ROOT / "deploy" / "interop" / "JavaDriverHost.java"
 # The source of truth for layout and protocol behavior is vendor/aeron source. The
 # assembled JAR is used here only as the Java runtime classpath for the interop probes.
 JAVA_BUILD = ROOT / "vendor" / "aeron" / "aeron-all" / "build" / "libs"
@@ -67,6 +68,7 @@ def main() -> int:
                 str(JAVA_SOURCE),
                 str(JAVA_PUBSUB_SOURCE),
                 str(JAVA_UDP_SOURCE),
+                str(JAVA_DRIVER_HOST_SOURCE),
             ]
         )
 
@@ -135,7 +137,58 @@ def main() -> int:
                 driver.kill()
                 driver.wait()
 
-    print("Java CnC, IPC, and UDP interop probes passed")
+        print("[7/8] Starting vendored Java MediaDriver for Rust-client mixing...")
+        with tempfile.TemporaryDirectory(prefix="aeron-java-driver-") as java_dir:
+            java_driver = subprocess.Popen(
+                [
+                    "java",
+                    "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+                    "-cp",
+                    f"{classes}:{aeron_all_jar}",
+                    "JavaDriverHost",
+                    java_dir,
+                ],
+                cwd=ROOT,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                if java_driver.stdout is None:
+                    raise RuntimeError("Java MediaDriver stdout was not available")
+                advertised_dir = java_driver.stdout.readline().strip()
+                if advertised_dir != java_dir:
+                    stderr = java_driver.stderr.read() if java_driver.stderr else ""
+                    raise RuntimeError(
+                        "Java MediaDriver did not publish its directory: "
+                        f"{advertised_dir!r}\n{stderr}"
+                    )
+                print("[8/8] Running Rust client IPC round-trip through Java MediaDriver...")
+                _run(
+                    [
+                        "cargo",
+                        "run",
+                        "-p",
+                        "aeron-client",
+                        "--bin",
+                        "rust_client_probe",
+                        "--",
+                        java_dir,
+                    ],
+                    cwd=ROOT,
+                )
+            finally:
+                if java_driver.stdin is not None:
+                    java_driver.stdin.write("release\n")
+                    java_driver.stdin.close()
+                try:
+                    java_driver.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    java_driver.kill()
+                    java_driver.wait()
+
+    print("Java CnC, bidirectional IPC, and UDP interop probes passed")
     return 0
 
 
