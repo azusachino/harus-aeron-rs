@@ -43,6 +43,13 @@ fn receiver_endpoint_sends_status_message_and_nak_frames() {
     send_endpoint.on_status_message(1001, 100, 1, 0, 65536);
     send_endpoint.on_nak_message(1001, 100, 1, 0, 1400);
 
+    let statuses = send_endpoint.take_status_messages();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].receiver_window_length, 65536);
+    let naks = send_endpoint.take_nak_messages();
+    assert_eq!(naks.len(), 1);
+    assert_eq!(naks[0].length, 1400);
+
     assert!(
         recv_endpoint
             .send_status_message(1001, 100, 1, 0, 65536, recv_addr)
