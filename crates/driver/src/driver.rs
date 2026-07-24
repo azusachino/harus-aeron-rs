@@ -119,7 +119,21 @@ impl MediaDriver {
             dispatch_work += 1;
         }
 
-        Ok(conductor_work + sender_work + receiver_work + dispatch_work)
+        // Loss is detected image-side; route each due NAK back through the receiver's endpoint.
+        let mut nak_work = 0;
+        for nak in self.conductor.poll_image_loss(now_ns) {
+            nak_work += self.receiver.send_nak_on_channel(
+                &nak.channel,
+                nak.session_id,
+                nak.stream_id,
+                nak.term_id,
+                nak.term_offset,
+                nak.length,
+                nak.source,
+            )?;
+        }
+
+        Ok(conductor_work + sender_work + receiver_work + dispatch_work + nak_work)
     }
 
     /// The mapped CnC file — clients connect by mapping the same path.

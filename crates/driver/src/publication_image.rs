@@ -14,6 +14,8 @@ use aeron_client::logbuffer::{
 };
 use aeron_client::protocol::{EOS_FLAG, FLAGS_FIELD_OFFSET};
 
+use crate::loss_detector::{Gap, LossDetector};
+
 use std::net::SocketAddr;
 
 /// The lifecycle states used by upstream `PublicationImage`.
@@ -76,6 +78,8 @@ pub struct PublicationImage {
     last_status_position: i64,
     last_overrun_threshold: i64,
     pending_loss: Option<LossRange>,
+    /// NAK timing for the earliest gap; feedback-delayed on first sight, retry-backed thereafter.
+    loss_detector: LossDetector,
     state: PublicationImageState,
     /// Wall-clock (ns) of the most recent state transition; gates the DRAINING/LINGER timeouts.
     time_of_last_state_change_ns: i64,
@@ -155,6 +159,7 @@ impl PublicationImage {
             last_status_position: active_position,
             last_overrun_threshold: active_position + (term_length as i64 / 2),
             pending_loss: None,
+            loss_detector: LossDetector::unicast(),
             state: PublicationImageState::Init,
             time_of_last_state_change_ns: 0,
             receiver_released: false,
@@ -318,6 +323,20 @@ impl PublicationImage {
 
     pub fn pending_loss(&self) -> Option<LossRange> {
         self.pending_loss
+    }
+
+    /// Drive loss timing for the current rebuild gap and return a NAK when one is due.
+    ///
+    /// Mirrors `PublicationImage.trackRebuild`/`processPendingLoss`: the gap found while rebuilding
+    /// (`pending_loss`) is fed to the image's [`LossDetector`], which holds the first NAK for a
+    /// feedback delay and re-issues it on a retry cadence until the gap is repaired.
+    pub fn track_rebuild(&mut self, now_ns: i64) -> Option<Gap> {
+        let gap = self.pending_loss.map(|loss| Gap {
+            term_id: loss.term_id,
+            term_offset: loss.term_offset as i32,
+            length: loss.length as i32,
+        });
+        self.loss_detector.scan(gap, now_ns)
     }
 
     /// Whether the publication advertised end-of-stream on a received DATA frame.
@@ -744,6 +763,57 @@ mod tests {
 
         assert_eq!(image.hwm_position(), 0);
         assert_eq!(image.pending_loss(), None);
+
+        drop(image);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn track_rebuild_delays_then_re_naks_the_rebuild_gap() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-publication-image-track-rebuild-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000);
+        let mut image = PublicationImage::new(
+            7,
+            9,
+            1,
+            buffers,
+            path.to_string_lossy().into_owned(),
+            source,
+            11,
+            12,
+        );
+
+        // No gap yet: nothing to NAK.
+        assert_eq!(image.track_rebuild(0), None);
+
+        // Deliver only the second frame, leaving a gap at offset 0.
+        let mut second = data_frame(1, 64, 0x22);
+        image.on_data_frame(1, 64, &AtomicBuffer::new(&mut second), 64, 10);
+        assert_eq!(
+            image.pending_loss(),
+            Some(LossRange {
+                term_id: 1,
+                term_offset: 0,
+                length: 64,
+            })
+        );
+
+        // The gap is armed with a feedback delay, not NAK'd immediately.
+        assert_eq!(image.track_rebuild(0), None);
+        let nak = image
+            .track_rebuild(1_000)
+            .expect("NAK once the delay elapses");
+        assert_eq!((nak.term_id, nak.term_offset, nak.length), (1, 0, 64));
+
+        // Repairing the gap stops the NAKs.
+        let mut first = data_frame(1, 0, 0x11);
+        image.on_data_frame(1, 0, &AtomicBuffer::new(&mut first), 64, 20);
+        assert_eq!(image.pending_loss(), None);
+        assert_eq!(image.track_rebuild(1_000_000), None);
 
         drop(image);
         let _ = std::fs::remove_file(path);

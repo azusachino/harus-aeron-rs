@@ -75,6 +75,21 @@ const STATUS_MESSAGE_TIMEOUT_NS: i64 = 200_000_000;
 const PENDING_SETUPS_TIMEOUT_NS: i64 = 1_000_000_000;
 
 type NetworkImageKey = (String, i32, i32, SocketAddr);
+
+/// A NAK an image wants sent upstream, tagged with the endpoint identity needed to route it.
+///
+/// Loss detection is image-driven (upstream `PublicationImage`), but the receive endpoint that
+/// must transmit the NAK lives in the `Receiver`; the driver ferries these across that boundary.
+#[derive(Debug, Clone)]
+pub struct PendingNak {
+    pub channel: String,
+    pub session_id: i32,
+    pub stream_id: i32,
+    pub source: SocketAddr,
+    pub term_id: i32,
+    pub term_offset: i32,
+    pub length: i32,
+}
 type NetworkSessionKey = NetworkImageKey;
 
 /// Receive-side session states from Aeron's `DataPacketDispatcher`.
@@ -1377,6 +1392,28 @@ impl DriverConductor {
             }
         }
         Ok(work)
+    }
+
+    /// Collect NAKs from every image whose rebuild has an outstanding, retry-due gap.
+    ///
+    /// Called after this cycle's DATA frames have been rebuilt into the images; the driver routes
+    /// each returned NAK to the receive endpoint that owns the channel.
+    pub fn poll_image_loss(&mut self, now_ns: i64) -> Vec<PendingNak> {
+        let mut naks = Vec::new();
+        for ((channel, session_id, stream_id, source), image) in &mut self.images {
+            if let Some(gap) = image.track_rebuild(now_ns) {
+                naks.push(PendingNak {
+                    channel: channel.clone(),
+                    session_id: *session_id,
+                    stream_id: *stream_id,
+                    source: *source,
+                    term_id: gap.term_id,
+                    term_offset: gap.term_offset,
+                    length: gap.length,
+                });
+            }
+        }
+        naks
     }
 
     #[allow(clippy::too_many_arguments)]

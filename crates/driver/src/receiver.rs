@@ -13,7 +13,6 @@ use aeron_client::protocol::{
 use agrona::AtomicBuffer;
 
 use crate::error::Result;
-use crate::loss_detector::{Gap, LossDetector};
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 
 /// Matches vendored `Configuration.STATUS_MESSAGE_TIMEOUT_DEFAULT_NS`.
@@ -29,16 +28,15 @@ pub struct Receiver {
     expected_positions: HashMap<(usize, i32, i32, SocketAddr), ExpectedPosition>,
 }
 
-#[derive(Debug)]
+/// Contiguous consumption position and flow-control window for one source/session/stream, used to
+/// pace Status Messages. Loss detection is handled image-side (see `DriverConductor::poll_image_loss`).
+#[derive(Debug, Clone, Copy)]
 struct ExpectedPosition {
     term_id: i32,
     term_offset: i32,
     term_length: i32,
     receiver_window_length: i32,
     last_status_ns: i64,
-    /// Loss timing for the earliest gap ahead of the expected position, if any.
-    loss_detector: LossDetector,
-    pending_gap: Option<Gap>,
 }
 
 impl ExpectedPosition {
@@ -49,8 +47,6 @@ impl ExpectedPosition {
             term_length: 0,
             receiver_window_length: 0,
             last_status_ns,
-            loss_detector: LossDetector::unicast(),
-            pending_gap: None,
         }
     }
 }
@@ -156,7 +152,6 @@ impl Receiver {
             }
         }
         count += self.send_periodic_status_messages(now_ns)?;
-        count += self.process_pending_loss(now_ns)?;
         Ok(count)
     }
 
@@ -308,39 +303,9 @@ impl Receiver {
                 .or_insert_with(|| ExpectedPosition::new(data.term_id(), data.term_offset(), 0));
             let expected_term = expected.term_id;
             let expected_offset = expected.term_offset;
-            let term_delta = data.term_id().wrapping_sub(expected_term) as i64;
-            if term_delta > 0 || (term_delta == 0 && data.term_offset() > expected_offset) {
-                let missing = if term_delta == 0 {
-                    data.term_offset() - expected_offset
-                } else {
-                    let term_length = expected.term_length.max(data.term_offset());
-                    (term_length - expected_offset).max(0) + data.term_offset().max(0)
-                };
-                if missing > 0 {
-                    // Arm loss timing for the gap rather than NAK'ing every reordered frame; the
-                    // detector releases the first NAK only after a feedback delay (upstream
-                    // LossDetector), and process_pending_loss re-NAKs on a retry cadence.
-                    let gap = Gap {
-                        term_id: expected_term,
-                        term_offset: expected_offset,
-                        length: missing,
-                    };
-                    expected.pending_gap = Some(gap);
-                    if let Some(nak) = expected.loss_detector.scan(Some(gap), now_ns) {
-                        self.receive_channel_endpoints[endpoint_index].send_nak(
-                            data.session_id(),
-                            data.stream_id(),
-                            nak.term_id,
-                            nak.term_offset,
-                            nak.length,
-                            source,
-                        )?;
-                    }
-                }
-            } else if data.term_id() == expected_term && data.term_offset() == expected_offset {
-                // In-order frame at the expected position: the front gap (if any) is repaired.
-                expected.pending_gap = None;
-                expected.loss_detector.scan(None, now_ns);
+            // A forward gap is left for image-driven loss detection (see poll_image_loss); the
+            // receiver only advances its Status-Message position on the in-order frame.
+            if data.term_id() == expected_term && data.term_offset() == expected_offset {
                 let next_offset = expected_offset + align(frame_length, FRAME_ALIGNMENT);
                 if expected.term_length > 0 && next_offset >= expected.term_length {
                     expected.term_id = expected_term.wrapping_add(1);
@@ -423,29 +388,39 @@ impl Receiver {
         Ok(due.len())
     }
 
-    /// Re-issue NAKs for gaps whose retry deadline has expired (upstream `image.processPendingLoss`).
-    fn process_pending_loss(&mut self, now_ns: i64) -> Result<usize> {
-        let mut due = Vec::new();
-        for (&(endpoint_index, session_id, stream_id, source), expected) in
-            &mut self.expected_positions
+    /// Transmit an image-generated NAK on the receive endpoint that owns `channel`.
+    ///
+    /// Loss is detected image-side; the driver calls this to route each NAK back through the
+    /// receiver, which holds the sockets. Returns 0 when no endpoint matches (already removed).
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_nak_on_channel(
+        &mut self,
+        channel: &str,
+        session_id: i32,
+        stream_id: i32,
+        term_id: i32,
+        term_offset: i32,
+        length: i32,
+        source: SocketAddr,
+    ) -> Result<usize> {
+        match self
+            .receive_channel_endpoints
+            .iter()
+            .position(|endpoint| endpoint.matches_channel(channel))
         {
-            let pending = expected.pending_gap;
-            if let Some(nak) = expected.loss_detector.scan(pending, now_ns) {
-                due.push((endpoint_index, session_id, stream_id, source, nak));
+            Some(index) => {
+                self.receive_channel_endpoints[index].send_nak(
+                    session_id,
+                    stream_id,
+                    term_id,
+                    term_offset,
+                    length,
+                    source,
+                )?;
+                Ok(1)
             }
+            None => Ok(0),
         }
-
-        for (endpoint_index, session_id, stream_id, source, nak) in &due {
-            self.receive_channel_endpoints[*endpoint_index].send_nak(
-                *session_id,
-                *stream_id,
-                nak.term_id,
-                nak.term_offset,
-                nak.length,
-                *source,
-            )?;
-        }
-        Ok(due.len())
     }
 
     /// Take the frames received since the last call for conductor dispatch.
@@ -548,8 +523,9 @@ mod tests {
     }
 
     #[test]
-    fn delays_nak_for_a_pending_gap_until_the_feedback_delay_elapses() {
+    fn routes_an_image_generated_nak_to_the_matching_endpoint() {
         let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let uri = channel.original_uri_string.clone();
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
         let peer = UdpSocket::bind(bind_addr).unwrap();
@@ -559,25 +535,23 @@ mod tests {
 
         let mut receiver = Receiver::new();
         receiver.add_receive_channel_endpoint(ReceiveChannelEndpoint::new(channel, transport));
-        let mut expected = ExpectedPosition::new(3, 128, 0);
-        expected.term_length = 64 * 1024;
-        expected.pending_gap = Some(Gap {
-            term_id: 3,
-            term_offset: 128,
-            length: 64,
-        });
-        receiver
-            .expected_positions
-            .insert((0, 7, 11, source), expected);
 
-        // Arm the detector at t=0; nothing is due yet, so no NAK is sent.
-        assert_eq!(receiver.process_pending_loss(0).unwrap(), 0);
-
-        // Once the unicast feedback delay elapses, exactly one NAK is emitted for the gap.
-        assert_eq!(receiver.process_pending_loss(1_000).unwrap(), 1);
+        // A NAK for the endpoint's channel is transmitted; an unknown channel is a no-op.
+        assert_eq!(
+            receiver
+                .send_nak_on_channel(&uri, 7, 11, 3, 128, 64, source)
+                .unwrap(),
+            1
+        );
         let mut nak = [0u8; 256];
         let (length, _) = peer.recv_from(&mut nak).unwrap();
         assert!(length > 0);
+        assert_eq!(
+            receiver
+                .send_nak_on_channel("aeron:udp?endpoint=127.0.0.1:1", 7, 11, 3, 128, 64, source)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
