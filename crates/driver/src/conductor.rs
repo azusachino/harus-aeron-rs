@@ -46,6 +46,7 @@ use aeron_client::protocol::{
     FLAGS_FIELD_OFFSET, FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA, HDR_TYPE_SETUP, SetupFlyweight,
     TYPE_FIELD_OFFSET,
 };
+use aeron_client::uri::{ChannelUri, SESSION_ID_PARAM_NAME};
 
 use crate::configuration::Configuration;
 use crate::error::{DriverError, Result};
@@ -96,6 +97,14 @@ fn is_udp_channel(channel: &str) -> bool {
     channel.starts_with("aeron:udp")
 }
 
+fn subscription_session_id(channel: &str) -> Option<i32> {
+    ChannelUri::parse(channel)
+        .ok()?
+        .get(SESSION_ID_PARAM_NAME)?
+        .parse()
+        .ok()
+}
+
 /// Round up to the next 4-byte boundary (variable-length command fields are SBE-aligned).
 fn align4(value: usize) -> usize {
     (value + 3) & !3
@@ -130,6 +139,8 @@ pub struct SubscriptionEntry {
     pub client_id: i64,
     pub stream_id: i32,
     pub channel: String,
+    /// Session-specific subscription interest, or `None` for wildcard/all sessions.
+    pub session_id: Option<i32>,
 }
 
 /// A decoded client command, extracted from a ring-buffer record so it can be processed
@@ -336,9 +347,14 @@ impl DriverConductor {
                         client_id,
                         stream_id,
                         channel: channel.clone(),
+                        session_id: subscription_session_id(&channel),
                     },
                 );
-                self.clear_no_interest_for_subscription(&channel, stream_id);
+                self.clear_no_interest_for_subscription(
+                    &channel,
+                    stream_id,
+                    subscription_session_id(&channel),
+                );
                 self.on_subscription_ready(correlation_id)?;
                 if is_ipc_channel(&channel) {
                     self.link_ipc_subscription(registration_id, stream_id)?;
@@ -674,6 +690,7 @@ impl DriverConductor {
                 .filter(|s| {
                     is_udp_channel(&s.channel)
                         && s.stream_id == stream_id
+                        && s.session_id.is_none_or(|id| id == session_id)
                         && channel.is_none_or(|value| s.channel == value)
                 })
                 .map(|s| s.registration_id)
@@ -719,6 +736,7 @@ impl DriverConductor {
             .filter(|s| {
                 is_udp_channel(&s.channel)
                     && s.stream_id == stream_id
+                    && s.session_id.is_none_or(|id| id == session_id)
                     && channel.is_none_or(|value| s.channel == value)
             })
             .map(|s| s.registration_id)
@@ -729,6 +747,23 @@ impl DriverConductor {
             self.session_states
                 .insert(image_key.clone(), (NetworkSessionState::NoInterest, now_ns));
             self.setup_elicited.remove(&image_key);
+            return Ok(());
+        }
+
+        let active_sessions: HashSet<i32> = self
+            .images
+            .keys()
+            .filter(|(image_channel, _, image_stream, _)| {
+                image_channel == &image_key.0 && *image_stream == stream_id
+            })
+            .map(|(_, image_session, _, _)| *image_session)
+            .collect();
+        if active_sessions.len() >= self.configuration.stream_session_limit {
+            // Upstream rejects the SETUP when DataPacketDispatcher's stream session limit is
+            // reached. The compact driver drops the frame and records NO_INTEREST so the duty
+            // cycle remains alive for untrusted network input.
+            self.session_states
+                .insert(image_key.clone(), (NetworkSessionState::NoInterest, now_ns));
             return Ok(());
         }
 
@@ -852,7 +887,7 @@ impl DriverConductor {
                     channel.map(|value| (value.to_owned(), session_id, stream_id, source))
                 {
                     if !self.session_states.contains_key(&key) {
-                        let state = if self.has_udp_interest(channel, stream_id) {
+                        let state = if self.has_udp_interest(channel, stream_id, session_id) {
                             NetworkSessionState::PendingSetupFrame
                         } else {
                             NetworkSessionState::NoInterest
@@ -977,10 +1012,13 @@ impl DriverConductor {
         Ok((name, buffers))
     }
 
-    fn has_udp_interest(&self, channel: Option<&str>, stream_id: i32) -> bool {
+    fn has_udp_interest(&self, channel: Option<&str>, stream_id: i32, session_id: i32) -> bool {
         self.subscriptions.values().any(|subscription| {
             is_udp_channel(&subscription.channel)
                 && subscription.stream_id == stream_id
+                && subscription
+                    .session_id
+                    .is_none_or(|sub_session_id| sub_session_id == session_id)
                 && channel.is_none_or(|value| subscription.channel == value)
         })
     }
@@ -1001,11 +1039,19 @@ impl DriverConductor {
     }
 
     /// Adding interest clears the upstream NO_INTEREST marker for the matching stream.
-    fn clear_no_interest_for_subscription(&mut self, channel: &str, stream_id: i32) {
-        for ((session_channel, _, session_stream, _), (state, _)) in &mut self.session_states {
+    fn clear_no_interest_for_subscription(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+        subscription_session_id: Option<i32>,
+    ) {
+        for ((session_channel, session_id, session_stream, _), (state, _)) in
+            &mut self.session_states
+        {
             if *state == NetworkSessionState::NoInterest
                 && *session_stream == stream_id
                 && session_channel == channel
+                && subscription_session_id.is_none_or(|id| id == *session_id)
             {
                 *state = NetworkSessionState::PendingSetupFrame;
             }
@@ -1067,10 +1113,10 @@ impl DriverConductor {
         subscription_registration_id: i64,
         stream_id: i32,
     ) -> Result<()> {
-        let Some(channel) = self
+        let Some((channel, subscription_session_id)) = self
             .subscriptions
             .get(&subscription_registration_id)
-            .map(|subscription| subscription.channel.clone())
+            .map(|subscription| (subscription.channel.clone(), subscription.session_id))
         else {
             return Ok(());
         };
@@ -1080,6 +1126,7 @@ impl DriverConductor {
             .filter(|((image_channel, _, _, _), image)| {
                 (image_channel.is_empty() || image_channel == &channel)
                     && image.stream_id() == stream_id
+                    && subscription_session_id.is_none_or(|id| image.session_id() == id)
                     && !image.has_subscription(subscription_registration_id)
             })
             .map(|(key, image)| (key.clone(), image.log_file_name().to_owned()))
@@ -1852,6 +1899,117 @@ mod tests {
         assert_eq!(
             conductor.session_states.get(&key),
             Some(&(NetworkSessionState::Active, 3_000))
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn applies_session_specific_subscription_interest() {
+        let (cnc, path) = temp_cnc("dispatcher-session-filter");
+        let dir = temp_dir("dispatcher-session-filter");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let channel = "aeron:udp?endpoint=127.0.0.1:0|session-id=7";
+        client.add_subscription(channel, 9).unwrap();
+        conductor.do_work(1_000).unwrap();
+        let _ = conductor.take_new_receive_endpoints();
+        let source = SocketAddr::from(([127, 0, 0, 1], 9013));
+
+        for session_id in [8, 7] {
+            let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+            let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+            setup
+                .header()
+                .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+                .set_version(CURRENT_VERSION)
+                .set_header_type(HDR_TYPE_SETUP);
+            setup
+                .set_session_id(session_id)
+                .set_stream_id(9)
+                .set_initial_term_id(0)
+                .set_active_term_id(0)
+                .set_term_offset(0)
+                .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+                .set_mtu_length(1408)
+                .set_ttl(0);
+            conductor
+                .on_received_frame_for_channel(
+                    &setup_bytes,
+                    source,
+                    2_000 + session_id as i64,
+                    Some(channel),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(conductor.images.len(), 1);
+        assert!(
+            conductor
+                .images
+                .keys()
+                .any(|(_, session_id, _, _)| *session_id == 7)
+        );
+        assert!(
+            conductor
+                .session_states
+                .get(&(channel.to_owned(), 8, 9, source))
+                .is_some_and(|(state, _)| *state == NetworkSessionState::NoInterest)
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn enforces_stream_session_limit() {
+        let (cnc, path) = temp_cnc("dispatcher-session-limit");
+        let dir = temp_dir("dispatcher-session-limit");
+        let mut config = small_config();
+        config.stream_session_limit = 1;
+        let mut conductor = DriverConductor::new(config, cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let channel = "aeron:udp?endpoint=127.0.0.1:0";
+        client.add_subscription(channel, 10).unwrap();
+        conductor.do_work(1_000).unwrap();
+        let _ = conductor.take_new_receive_endpoints();
+        let source = SocketAddr::from(([127, 0, 0, 1], 9014));
+
+        for session_id in [10, 11] {
+            let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+            let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+            setup
+                .header()
+                .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+                .set_version(CURRENT_VERSION)
+                .set_header_type(HDR_TYPE_SETUP);
+            setup
+                .set_session_id(session_id)
+                .set_stream_id(10)
+                .set_initial_term_id(0)
+                .set_active_term_id(0)
+                .set_term_offset(0)
+                .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+                .set_mtu_length(1408)
+                .set_ttl(0);
+            conductor
+                .on_received_frame_for_channel(
+                    &setup_bytes,
+                    source,
+                    2_000 + session_id as i64,
+                    Some(channel),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(conductor.images.len(), 1);
+        assert!(
+            conductor
+                .session_states
+                .get(&(channel.to_owned(), 11, 10, source))
+                .is_some_and(|(state, _)| *state == NetworkSessionState::NoInterest)
         );
 
         drop(conductor);

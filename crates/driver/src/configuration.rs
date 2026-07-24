@@ -39,6 +39,9 @@ pub const MAX_RESEND_PROP_NAME: &str = "aeron.max.resend";
 pub const MAX_RESEND_DEFAULT: i32 = 16;
 pub const MAX_RESEND_MAX: i32 = 256;
 
+pub const STREAM_SESSION_LIMIT_PROP_NAME: &str = "aeron.driver.stream.session.limit";
+pub const STREAM_SESSION_LIMIT_DEFAULT: usize = i32::MAX as usize;
+
 /// Driver configuration settings, populated from environment variables or defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Configuration {
@@ -55,6 +58,9 @@ pub struct Configuration {
     pub untethered_resting_timeout_ns: u64,
     pub untethered_linger_timeout_ns: i64,
     pub max_resend: i32,
+    /// Maximum number of active receive sessions allowed for one stream.
+    /// Mirrors `Configuration.streamSessionLimit()` in vendored Aeron.
+    pub stream_session_limit: usize,
 }
 
 impl Default for Configuration {
@@ -73,6 +79,7 @@ impl Default for Configuration {
             untethered_resting_timeout_ns: UNTETHERED_RESTING_TIMEOUT_DEFAULT_NS,
             untethered_linger_timeout_ns: UNTETHERED_LINGER_TIMEOUT_DEFAULT_NS,
             max_resend: MAX_RESEND_DEFAULT,
+            stream_session_limit: STREAM_SESSION_LIMIT_DEFAULT,
         }
     }
 }
@@ -149,6 +156,11 @@ impl Configuration {
         if let Some(val) = get_prop(MAX_RESEND_PROP_NAME) {
             if let Ok(v) = val.parse::<i32>() {
                 config.max_resend = v;
+            }
+        }
+        if let Some(val) = get_prop(STREAM_SESSION_LIMIT_PROP_NAME) {
+            if let Ok(v) = val.parse::<usize>() {
+                config.stream_session_limit = v;
             }
         }
 
