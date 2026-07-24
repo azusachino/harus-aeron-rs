@@ -102,6 +102,19 @@ impl MediaDriver {
                 Some(&frame.channel),
                 frame.receiver_status,
             )?;
+            if self.conductor.take_setup_elicitation(
+                &frame.channel,
+                frame.session_id,
+                frame.stream_id,
+                frame.source,
+            ) {
+                self.receiver.send_setup_eliciting_status(
+                    frame.endpoint_index,
+                    frame.session_id,
+                    frame.stream_id,
+                    frame.source,
+                )?;
+            }
             dispatch_work += 1;
         }
 

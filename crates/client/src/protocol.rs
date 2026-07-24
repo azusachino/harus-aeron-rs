@@ -495,6 +495,10 @@ pub const SM_RECEIVER_WINDOW_FIELD_OFFSET: usize = 24;
 pub const SM_RECEIVER_ID_FIELD_OFFSET: usize = 28;
 /// Length of the Status Message header (36 bytes).
 pub const STATUS_MESSAGE_HEADER_LENGTH: usize = 36;
+/// Status Message flag requesting the sender to emit a SETUP frame.
+///
+/// Matches `vendor/aeron/aeron-client/src/main/java/io/aeron/protocol/StatusMessageFlyweight.java`.
+pub const SEND_SETUP_FLAG: u8 = 0x80;
 
 /// Flyweight over a Status Message frame.
 #[derive(Copy, Clone)]

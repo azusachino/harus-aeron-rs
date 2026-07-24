@@ -47,6 +47,8 @@ pub struct ReceivedFrame {
     pub bytes: Vec<u8>,
     pub source: SocketAddr,
     pub endpoint_index: usize,
+    pub session_id: i32,
+    pub stream_id: i32,
     /// Original channel URI of the endpoint which received the datagram.
     pub channel: String,
     pub receiver_status: Option<ReceiverStatus>,
@@ -109,6 +111,8 @@ impl Receiver {
                     bytes: frame,
                     source: src,
                     endpoint_index,
+                    session_id: i32::from_le_bytes([buffer[8], buffer[9], buffer[10], buffer[11]]),
+                    stream_id: i32::from_le_bytes([buffer[12], buffer[13], buffer[14], buffer[15]]),
                     channel: self.receive_channel_endpoints[endpoint_index]
                         .udp_channel()
                         .original_uri_string
@@ -293,6 +297,24 @@ impl Receiver {
 
     pub fn receive_channel_endpoints(&self) -> &[ReceiveChannelEndpoint] {
         &self.receive_channel_endpoints
+    }
+
+    /// Send a SETUP-eliciting Status Message on the endpoint which received a DATA frame.
+    pub fn send_setup_eliciting_status(
+        &self,
+        endpoint_index: usize,
+        session_id: i32,
+        stream_id: i32,
+        source: SocketAddr,
+    ) -> Result<usize> {
+        self.receive_channel_endpoints
+            .get(endpoint_index)
+            .ok_or_else(|| {
+                crate::error::DriverError::IllegalState(
+                    "setup elicitation endpoint index out of range".to_owned(),
+                )
+            })?
+            .send_setup_eliciting_status_message(session_id, stream_id, source)
     }
 }
 

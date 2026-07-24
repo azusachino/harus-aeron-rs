@@ -6,6 +6,7 @@
 //! response events on the to-clients broadcast buffer.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
@@ -41,8 +42,9 @@ use aeron_client::logbuffer::{
 };
 use aeron_client::protocol::{
     CURRENT_VERSION, DATA_HEADER_LENGTH, DATA_SESSION_ID_FIELD_OFFSET, DATA_STREAM_ID_FIELD_OFFSET,
-    DATA_TERM_ID_FIELD_OFFSET, DATA_TERM_OFFSET_FIELD_OFFSET, DataHeaderFlyweight,
-    FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA, HDR_TYPE_SETUP, SetupFlyweight, TYPE_FIELD_OFFSET,
+    DATA_TERM_ID_FIELD_OFFSET, DATA_TERM_OFFSET_FIELD_OFFSET, DataHeaderFlyweight, EOS_FLAG,
+    FLAGS_FIELD_OFFSET, FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA, HDR_TYPE_SETUP, SetupFlyweight,
+    TYPE_FIELD_OFFSET,
 };
 
 use crate::configuration::Configuration;
@@ -67,6 +69,22 @@ const UDP_SOURCE_IDENTITY: &str = "aeron:udp";
 const IMAGE_LIVENESS_TIMEOUT_NS: i64 = 10_000_000_000;
 
 type NetworkImageKey = (String, i32, i32, SocketAddr);
+type NetworkSessionKey = NetworkImageKey;
+
+/// Receive-side session states from Aeron's `DataPacketDispatcher`.
+///
+/// Reference: `vendor/aeron/aeron-driver/src/main/java/io/aeron/driver/DataPacketDispatcher.java`
+/// (`SessionState`, `onDataPacket`, and `onSetupMessage`). This state is intentionally separate
+/// from `images`: DATA may arrive before SETUP, and cooldown/no-interest sessions must not create
+/// an image just because a later SETUP is received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkSessionState {
+    PendingSetupFrame,
+    InitInProgress,
+    Active,
+    OnCoolDown,
+    NoInterest,
+}
 
 /// Returns `true` for an IPC channel (`aeron:ipc`, optionally with parameters).
 fn is_ipc_channel(channel: &str) -> bool {
@@ -185,6 +203,10 @@ pub struct DriverConductor {
     /// The channel endpoint is part of Aeron's dispatcher identity. Stream/session alone is not
     /// sufficient when two UDP channels reuse those numeric IDs.
     images: HashMap<NetworkImageKey, PublicationImage>,
+    /// DataPacketDispatcher-equivalent state for network sessions without an active image.
+    session_states: HashMap<NetworkSessionKey, (NetworkSessionState, i64)>,
+    /// DATA-before-SETUP sessions for which the one-shot setup-eliciting SM was sent.
+    setup_elicited: HashSet<NetworkSessionKey>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
 }
@@ -233,6 +255,8 @@ impl DriverConductor {
             receive_channel_references: HashMap::new(),
             removed_network_publications: Vec::new(),
             images: HashMap::new(),
+            session_states: HashMap::new(),
+            setup_elicited: HashSet::new(),
             clients: HashMap::new(),
         })
     }
@@ -314,6 +338,7 @@ impl DriverConductor {
                         channel: channel.clone(),
                     },
                 );
+                self.clear_no_interest_for_subscription(&channel, stream_id);
                 self.on_subscription_ready(correlation_id)?;
                 if is_ipc_channel(&channel) {
                     self.link_ipc_subscription(registration_id, stream_id)?;
@@ -341,7 +366,7 @@ impl DriverConductor {
                 registration_id,
             } => {
                 if let Some(subscription) = self.subscriptions.remove(&registration_id) {
-                    self.detach_images_for_subscription(registration_id);
+                    self.detach_images_for_subscription(registration_id, now_ns);
                     if self.release_receive_endpoint(&subscription.channel) {
                         self.removed_receive_channels.push(subscription.channel);
                     }
@@ -353,7 +378,7 @@ impl DriverConductor {
                 Ok(())
             }
             Command::ClientClose { client_id } => {
-                self.remove_client(client_id);
+                self.remove_client(client_id, now_ns);
                 Ok(())
             }
         }
@@ -633,6 +658,9 @@ impl DriverConductor {
         let channel_key = channel.unwrap_or("").to_owned();
         let image_key = (channel_key, session_id, stream_id, source);
         if self.images.contains_key(&image_key) {
+            self.setup_elicited.remove(&image_key);
+            self.session_states
+                .insert(image_key.clone(), (NetworkSessionState::Active, now_ns));
             let Some(log_file_name) = self
                 .images
                 .get(&image_key)
@@ -676,6 +704,15 @@ impl DriverConductor {
             return Ok(());
         }
 
+        if let Some((NetworkSessionState::OnCoolDown, entered_at)) =
+            self.session_states.get(&image_key).copied()
+        {
+            if now_ns.saturating_sub(entered_at) < IMAGE_LIVENESS_TIMEOUT_NS {
+                return Ok(());
+            }
+            self.session_states.remove(&image_key);
+        }
+
         let subscribers: Vec<i64> = self
             .subscriptions
             .values()
@@ -687,8 +724,26 @@ impl DriverConductor {
             .map(|s| s.registration_id)
             .collect();
         if subscribers.is_empty() {
+            // Upstream records NO_INTEREST so repeated SETUP frames do not repeatedly attempt
+            // image creation until a matching subscription clears that state.
+            self.session_states
+                .insert(image_key.clone(), (NetworkSessionState::NoInterest, now_ns));
+            self.setup_elicited.remove(&image_key);
             return Ok(());
         }
+
+        match self.session_states.get(&image_key).map(|(state, _)| *state) {
+            Some(NetworkSessionState::InitInProgress)
+            | Some(NetworkSessionState::Active)
+            | Some(NetworkSessionState::NoInterest) => return Ok(()),
+            Some(NetworkSessionState::PendingSetupFrame) | None => {}
+            Some(NetworkSessionState::OnCoolDown) => return Ok(()),
+        }
+        // This is the INIT_IN_PROGRESS transition in DataPacketDispatcher.onSetupMessage.
+        self.session_states.insert(
+            image_key.clone(),
+            (NetworkSessionState::InitInProgress, now_ns),
+        );
 
         // The Java Publication exposes this metadata bit through Publication.isConnected().
         // It is set only after a real receiver setup has reached the driver, matching the
@@ -756,6 +811,9 @@ impl DriverConductor {
             )?;
             image.add_subscription_link(subscription_registration_id, correlation_id);
         }
+        self.session_states
+            .insert(image_key.clone(), (NetworkSessionState::Active, now_ns));
+        self.setup_elicited.remove(&image_key);
         self.images.insert(image_key, image);
         Ok(())
     }
@@ -786,6 +844,23 @@ impl DriverConductor {
                 .map(|(_, image)| image),
         };
         let Some(image) = image else {
+            // Mirrors DataPacketDispatcher.onDataPacket: only the first DATA frame for an
+            // interested session moves it to PENDING_SETUP_FRAME. Unknown sessions are
+            // remembered as NO_INTEREST, so repeated DATA frames stay discarded.
+            if buf.get_u8(FLAGS_FIELD_OFFSET) & EOS_FLAG == 0 {
+                if let Some(key) =
+                    channel.map(|value| (value.to_owned(), session_id, stream_id, source))
+                {
+                    if !self.session_states.contains_key(&key) {
+                        let state = if self.has_udp_interest(channel, stream_id) {
+                            NetworkSessionState::PendingSetupFrame
+                        } else {
+                            NetworkSessionState::NoInterest
+                        };
+                        self.session_states.insert(key, (state, now_ns));
+                    }
+                }
+            }
             return;
         };
         let mut offset = 0usize;
@@ -900,6 +975,41 @@ impl DriverConductor {
 
         let name = path.to_string_lossy().into_owned();
         Ok((name, buffers))
+    }
+
+    fn has_udp_interest(&self, channel: Option<&str>, stream_id: i32) -> bool {
+        self.subscriptions.values().any(|subscription| {
+            is_udp_channel(&subscription.channel)
+                && subscription.stream_id == stream_id
+                && channel.is_none_or(|value| subscription.channel == value)
+        })
+    }
+
+    /// Claim the one-shot setup elicitation requested by `DataPacketDispatcher.onDataPacket`.
+    pub fn take_setup_elicitation(
+        &mut self,
+        channel: &str,
+        session_id: i32,
+        stream_id: i32,
+        source: SocketAddr,
+    ) -> bool {
+        let key = (channel.to_owned(), session_id, stream_id, source);
+        self.session_states
+            .get(&key)
+            .is_some_and(|(state, _)| *state == NetworkSessionState::PendingSetupFrame)
+            && self.setup_elicited.insert(key)
+    }
+
+    /// Adding interest clears the upstream NO_INTEREST marker for the matching stream.
+    fn clear_no_interest_for_subscription(&mut self, channel: &str, stream_id: i32) {
+        for ((session_channel, _, session_stream, _), (state, _)) in &mut self.session_states {
+            if *state == NetworkSessionState::NoInterest
+                && *session_stream == stream_id
+                && session_channel == channel
+            {
+                *state = NetworkSessionState::PendingSetupFrame;
+            }
+        }
     }
 
     /// Connect a newly added IPC subscription to every matching existing IPC publication.
@@ -1072,7 +1182,7 @@ impl DriverConductor {
         self.clients.insert(client_id, now_ns);
     }
 
-    fn remove_client(&mut self, client_id: i64) {
+    fn remove_client(&mut self, client_id: i64, now_ns: i64) {
         self.clients.remove(&client_id);
         let removed: Vec<i64> = self
             .publications
@@ -1096,7 +1206,7 @@ impl DriverConductor {
             .map(|(registration_id, subscription)| (*registration_id, subscription.channel.clone()))
             .collect();
         for (registration_id, channel) in removed_subscriptions {
-            self.detach_images_for_subscription(registration_id);
+            self.detach_images_for_subscription(registration_id, now_ns);
             if self.release_receive_endpoint(&channel) {
                 self.removed_receive_channels.push(channel);
             }
@@ -1108,7 +1218,7 @@ impl DriverConductor {
     ///
     /// A detached image must not continue rebuilding data into a client-owned log. Dropping the
     /// mapped buffers also releases the file so a later subscription can create a fresh image.
-    fn detach_images_for_subscription(&mut self, subscription_registration_id: i64) {
+    fn detach_images_for_subscription(&mut self, subscription_registration_id: i64, now_ns: i64) {
         let keys: Vec<NetworkImageKey> = self
             .images
             .iter()
@@ -1126,6 +1236,9 @@ impl DriverConductor {
             if remove_image {
                 if let Some(mut image) = self.images.remove(&key) {
                     image.deactivate();
+                    self.session_states
+                        .insert(key.clone(), (NetworkSessionState::OnCoolDown, now_ns));
+                    self.setup_elicited.remove(&key);
                     let log_file_name = image.log_file_name().to_owned();
                     drop(image);
                     let _ = std::fs::remove_file(log_file_name);
@@ -1146,7 +1259,7 @@ impl DriverConductor {
             .map(|(&id, _)| id)
             .collect();
         for client_id in &expired {
-            self.remove_client(*client_id);
+            self.remove_client(*client_id, now_ns);
         }
         expired.len()
     }
@@ -1163,6 +1276,9 @@ impl DriverConductor {
         for key in expired {
             if let Some(mut image) = self.images.remove(&key) {
                 image.deactivate();
+                self.session_states
+                    .insert(key.clone(), (NetworkSessionState::OnCoolDown, now_ns));
+                self.setup_elicited.remove(&key);
                 let links: Vec<_> = image.image_links().collect();
                 for (subscription_registration_id, correlation_id) in links {
                     self.on_unavailable_image(correlation_id, subscription_registration_id)?;
@@ -1618,6 +1734,125 @@ mod tests {
         assert_eq!(image.image_links().count(), 1);
         assert!(image.has_subscription(first));
         assert!(!image.has_subscription(second));
+
+        drop(conductor);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tracks_data_before_setup_and_only_creates_image_after_setup() {
+        let (cnc, path) = temp_cnc("dispatcher-session-state");
+        let dir = temp_dir("dispatcher-session-state");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let channel = "aeron:udp?endpoint=127.0.0.1:0";
+        client.add_subscription(channel, 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+        let _ = conductor.take_new_receive_endpoints();
+
+        let source = SocketAddr::from(([127, 0, 0, 1], 9011));
+        let mut data_bytes = vec![0u8; DATA_HEADER_LENGTH];
+        let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut data_bytes));
+        data.set_frame_length(DATA_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_DATA)
+            .set_flags(0)
+            .set_session_id(7)
+            .set_stream_id(7)
+            .set_term_id(0)
+            .set_term_offset(0);
+
+        conductor
+            .on_received_frame_for_channel(&data_bytes, source, 2_000, Some(channel))
+            .unwrap();
+        assert!(conductor.images.is_empty());
+        assert_eq!(
+            conductor
+                .session_states
+                .get(&(channel.to_owned(), 7, 7, source)),
+            Some(&(NetworkSessionState::PendingSetupFrame, 2_000))
+        );
+
+        let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_SETUP);
+        setup
+            .set_session_id(7)
+            .set_stream_id(7)
+            .set_initial_term_id(0)
+            .set_active_term_id(0)
+            .set_term_offset(0)
+            .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+        conductor
+            .on_received_frame_for_channel(&setup_bytes, source, 3_000, Some(channel))
+            .unwrap();
+
+        assert_eq!(conductor.images.len(), 1);
+        assert_eq!(
+            conductor
+                .session_states
+                .get(&(channel.to_owned(), 7, 7, source)),
+            Some(&(NetworkSessionState::Active, 3_000))
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn records_no_interest_until_a_matching_subscription_clears_it() {
+        let (cnc, path) = temp_cnc("dispatcher-no-interest");
+        let dir = temp_dir("dispatcher-no-interest");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let channel = "aeron:udp?endpoint=127.0.0.1:0";
+        let source = SocketAddr::from(([127, 0, 0, 1], 9012));
+
+        let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_SETUP);
+        setup
+            .set_session_id(8)
+            .set_stream_id(8)
+            .set_initial_term_id(0)
+            .set_active_term_id(0)
+            .set_term_offset(0)
+            .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+
+        conductor
+            .on_received_frame_for_channel(&setup_bytes, source, 1_000, Some(channel))
+            .unwrap();
+        let key = (channel.to_owned(), 8, 8, source);
+        assert!(conductor.images.is_empty());
+        assert_eq!(
+            conductor.session_states.get(&key),
+            Some(&(NetworkSessionState::NoInterest, 1_000))
+        );
+
+        let client = proxy(&cnc);
+        client.add_subscription(channel, 8).unwrap();
+        conductor.do_work(2_000).unwrap();
+        conductor
+            .on_received_frame_for_channel(&setup_bytes, source, 3_000, Some(channel))
+            .unwrap();
+        assert_eq!(conductor.images.len(), 1);
+        assert_eq!(
+            conductor.session_states.get(&key),
+            Some(&(NetworkSessionState::Active, 3_000))
+        );
 
         drop(conductor);
         let _ = std::fs::remove_file(path);

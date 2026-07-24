@@ -5,7 +5,7 @@
 use std::net::SocketAddr;
 
 use aeron_client::protocol::{
-    CURRENT_VERSION, HDR_TYPE_NAK, HDR_TYPE_SM, NAK_HEADER_LENGTH, NakFlyweight,
+    CURRENT_VERSION, HDR_TYPE_NAK, HDR_TYPE_SM, NAK_HEADER_LENGTH, NakFlyweight, SEND_SETUP_FLAG,
     STATUS_MESSAGE_HEADER_LENGTH, StatusMessageFlyweight,
 };
 use agrona::AtomicBuffer;
@@ -135,6 +135,32 @@ impl ReceiveChannelEndpoint {
                 .set_consumption_term_id(term_id)
                 .set_consumption_term_offset(term_offset)
                 .set_receiver_window_length(window_length)
+                .set_receiver_id(0);
+        }
+        self.transport.send_to(&buf, target)
+    }
+
+    /// Send the setup-eliciting Status Message used by Aeron's DataPacketDispatcher when DATA
+    /// arrives before the first SETUP. Reference: vendored `ReceiveChannelEndpoint.java`.
+    pub fn send_setup_eliciting_status_message(
+        &self,
+        session_id: i32,
+        stream_id: i32,
+        target: SocketAddr,
+    ) -> Result<usize> {
+        let mut buf = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        {
+            let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut buf));
+            sm.header()
+                .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+                .set_version(CURRENT_VERSION)
+                .set_flags(SEND_SETUP_FLAG)
+                .set_header_type(HDR_TYPE_SM);
+            sm.set_session_id(session_id)
+                .set_stream_id(stream_id)
+                .set_consumption_term_id(0)
+                .set_consumption_term_offset(0)
+                .set_receiver_window_length(0)
                 .set_receiver_id(0);
         }
         self.transport.send_to(&buf, target)
