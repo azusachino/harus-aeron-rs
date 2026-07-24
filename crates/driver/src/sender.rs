@@ -34,6 +34,20 @@ impl Sender {
         self.network_publications.push(publication);
     }
 
+    /// Remove a publication that the conductor has detached from the driver.
+    pub fn remove_network_publication(&mut self, registration_id: i64) -> bool {
+        if let Some(index) = self
+            .network_publications
+            .iter()
+            .position(|publication| publication.registration_id() == registration_id)
+        {
+            self.network_publications.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn do_work(&mut self, now_ns: i64) -> Result<usize> {
         // Flush each network publication: SETUP announcements, new data frames, heartbeats.
         let mut work = 0;

@@ -55,6 +55,15 @@ impl ReceiveChannelEndpoint {
         &self.udp_channel
     }
 
+    /// Stable channel identity used by the conductor when a subscription is removed.
+    pub fn canonical_form(&self) -> &str {
+        &self.udp_channel.canonical_form
+    }
+
+    pub fn matches_channel(&self, channel: &str) -> bool {
+        self.udp_channel.original_uri_string == channel || self.canonical_form() == channel
+    }
+
     pub fn transport(&self) -> &UdpChannelTransport {
         &self.transport
     }

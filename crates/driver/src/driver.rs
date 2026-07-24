@@ -78,6 +78,12 @@ impl MediaDriver {
         for endpoint in self.conductor.take_new_receive_endpoints() {
             self.receiver.add_receive_channel_endpoint(endpoint);
         }
+        for channel in self.conductor.take_removed_receive_channels() {
+            self.receiver.remove_receive_channel_endpoint(&channel);
+        }
+        for registration_id in self.conductor.take_removed_network_publications() {
+            self.sender.remove_network_publication(registration_id);
+        }
         let sender_work = self.sender.do_work(now_ns)?;
         let receiver_work = self.receiver.do_work()?;
         // Hand received SETUP/DATA frames to the conductor for image creation + reassembly.

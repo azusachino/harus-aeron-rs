@@ -60,6 +60,24 @@ impl Receiver {
         self.receive_channel_endpoints.push(endpoint);
     }
 
+    /// Remove one endpoint for a subscription that no longer has receiver interest.
+    ///
+    /// The upstream dispatcher removes the stream interest from the endpoint rather than
+    /// allowing packets to continue reaching an inactive image. This compact receiver has one
+    /// endpoint per subscription, so removing the matching endpoint is the equivalent boundary.
+    pub fn remove_receive_channel_endpoint(&mut self, canonical_form: &str) -> bool {
+        if let Some(index) = self
+            .receive_channel_endpoints
+            .iter()
+            .position(|endpoint| endpoint.matches_channel(canonical_form))
+        {
+            self.receive_channel_endpoints.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn do_work(&mut self) -> Result<usize> {
         // Drain every receive endpoint's socket; the conductor turns SETUP/DATA frames into
         // images and reassembled term data.

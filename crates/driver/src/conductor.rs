@@ -151,6 +151,10 @@ pub struct DriverConductor {
     new_network_publications: Vec<NetworkPublication>,
     /// Receive endpoints created this cycle, drained by the driver into the Receiver.
     new_receive_endpoints: Vec<ReceiveChannelEndpoint>,
+    /// Channel identities whose subscription interest was removed this cycle.
+    removed_receive_channels: Vec<String>,
+    /// Network publication registrations whose sender state must be removed this cycle.
+    removed_network_publications: Vec<i64>,
     /// Reassembly state for network images, keyed by session, stream, and source.
     images: HashMap<(i32, i32, SocketAddr), PublicationImage>,
     /// client id -> last observed keepalive timestamp (ns).
@@ -182,6 +186,8 @@ impl DriverConductor {
             counters: HashMap::new(),
             new_network_publications: Vec::new(),
             new_receive_endpoints: Vec::new(),
+            removed_receive_channels: Vec::new(),
+            removed_network_publications: Vec::new(),
             images: HashMap::new(),
             clients: HashMap::new(),
         })
@@ -195,6 +201,16 @@ impl DriverConductor {
     /// Drain receive endpoints created since the last call so the Receiver can adopt them.
     pub fn take_new_receive_endpoints(&mut self) -> Vec<ReceiveChannelEndpoint> {
         std::mem::take(&mut self.new_receive_endpoints)
+    }
+
+    /// Drain receive-channel removals for the Receiver agent.
+    pub fn take_removed_receive_channels(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.removed_receive_channels)
+    }
+
+    /// Drain network-publication removals for the Sender agent.
+    pub fn take_removed_network_publications(&mut self) -> Vec<i64> {
+        std::mem::take(&mut self.removed_network_publications)
     }
 
     /// One conductor duty cycle: drain and dispatch client commands, then sweep liveness.
@@ -263,6 +279,9 @@ impl DriverConductor {
                 registration_id,
             } => {
                 if let Some(entry) = self.publications.remove(&registration_id) {
+                    if !entry.is_ipc {
+                        self.removed_network_publications.push(registration_id);
+                    }
                     self.counters.remove(&entry.publication_limit_counter_id);
                 }
                 self.log_buffers.remove(&registration_id);
@@ -272,7 +291,11 @@ impl DriverConductor {
                 correlation_id,
                 registration_id,
             } => {
-                self.subscriptions.remove(&registration_id);
+                if let Some(subscription) = self.subscriptions.remove(&registration_id) {
+                    self.removed_receive_channels
+                        .push(subscription.channel.clone());
+                    self.detach_images_for_subscription(registration_id);
+                }
                 self.on_operation_success(correlation_id)
             }
             Command::Keepalive { client_id } => {
@@ -717,11 +740,48 @@ impl DriverConductor {
             .collect();
         for registration_id in removed {
             if let Some(entry) = self.publications.remove(&registration_id) {
+                if !entry.is_ipc {
+                    self.removed_network_publications.push(registration_id);
+                }
                 self.counters.remove(&entry.publication_limit_counter_id);
             }
             self.log_buffers.remove(&registration_id);
         }
-        self.subscriptions.retain(|_, s| s.client_id != client_id);
+        let removed_subscriptions: Vec<(i64, String)> = self
+            .subscriptions
+            .iter()
+            .filter(|(_, subscription)| subscription.client_id == client_id)
+            .map(|(registration_id, subscription)| (*registration_id, subscription.channel.clone()))
+            .collect();
+        for (registration_id, channel) in removed_subscriptions {
+            self.removed_receive_channels.push(channel);
+            self.detach_images_for_subscription(registration_id);
+            self.subscriptions.remove(&registration_id);
+        }
+    }
+
+    /// Detach all images linked to a removed subscription before its endpoint is removed.
+    ///
+    /// A detached image must not continue rebuilding data into a client-owned log. Dropping the
+    /// mapped buffers also releases the file so a later subscription can create a fresh image.
+    fn detach_images_for_subscription(&mut self, subscription_registration_id: i64) {
+        let keys: Vec<(i32, i32, SocketAddr)> = self
+            .images
+            .iter()
+            .filter(|(_, image)| {
+                image.subscription_registration_id() == subscription_registration_id
+            })
+            .map(|(key, _)| *key)
+            .collect();
+
+        for key in keys {
+            if let Some(mut image) = self.images.remove(&key) {
+                image.deactivate();
+                let log_file_name = image.log_file_name().to_owned();
+                drop(image);
+                let _ = std::fs::remove_file(log_file_name);
+            }
+        }
     }
 
     fn sweep_timed_out_clients(&mut self, now_ns: i64) -> usize {
@@ -1083,6 +1143,78 @@ mod tests {
         assert!(got);
         assert_eq!(seen_type, ON_OPERATION_SUCCESS);
         assert_eq!(seen_correlation, remove_correlation);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn removing_udp_subscription_detaches_image_and_receive_channel() {
+        let (cnc, path) = temp_cnc("remove-udp-subscription");
+        let dir = temp_dir("remove-udp-subscription");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let channel = "aeron:udp?endpoint=127.0.0.1:0";
+        let registration_id = client.add_subscription(channel, 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+        let mut endpoints = conductor.take_new_receive_endpoints();
+        assert_eq!(endpoints.len(), 1);
+        endpoints.pop();
+
+        let source = SocketAddr::from(([127, 0, 0, 1], 9003));
+        let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_SETUP);
+        setup
+            .set_session_id(7)
+            .set_stream_id(7)
+            .set_initial_term_id(0)
+            .set_active_term_id(0)
+            .set_term_offset(0)
+            .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+        conductor
+            .on_received_frame(&setup_bytes, source, 2_000)
+            .unwrap();
+        assert_eq!(conductor.images.len(), 1);
+
+        client.remove_subscription(registration_id).unwrap();
+        conductor.do_work(3_000).unwrap();
+
+        assert!(conductor.images.is_empty());
+        assert_eq!(conductor.take_removed_receive_channels(), vec![channel]);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn removing_udp_publication_detaches_sender_resource() {
+        let (cnc, path) = temp_cnc("remove-udp-publication");
+        let dir = temp_dir("remove-udp-publication");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let registration_id = client
+            .add_publication("aeron:udp?endpoint=127.0.0.1:0", 7)
+            .unwrap();
+        conductor.do_work(1_000).unwrap();
+        assert_eq!(conductor.take_new_network_publications().len(), 1);
+
+        client.remove_publication(registration_id, false).unwrap();
+        conductor.do_work(2_000).unwrap();
+
+        assert_eq!(
+            conductor.take_removed_network_publications(),
+            vec![registration_id]
+        );
+        assert!(conductor.publications().is_empty());
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
