@@ -26,6 +26,20 @@ use crate::media::send_channel_endpoint::SendChannelEndpoint;
 /// Interval between SETUP re-sends and idle heartbeats (100 ms), matching upstream defaults.
 const PUBLICATION_HEARTBEAT_NS: i64 = 100_000_000;
 
+fn term_id_and_offset(
+    position: i64,
+    initial_term_id: i32,
+    position_bits_to_shift: usize,
+    term_length: usize,
+) -> (i32, i32) {
+    let term_count = position >> position_bits_to_shift;
+    let term_offset = (position as usize) & (term_length - 1);
+    (
+        initial_term_id.wrapping_add(term_count as i32),
+        term_offset as i32,
+    )
+}
+
 /// A network publication's outbound data path over a single channel endpoint.
 pub struct NetworkPublication {
     registration_id: i64,
@@ -218,16 +232,22 @@ impl NetworkPublication {
     fn send_setup(&self) -> Result<usize> {
         let mut bytes = [0u8; SETUP_HEADER_LENGTH];
         let setup = SetupFlyweight::new(AtomicBuffer::new(&mut bytes));
+        let (active_term_id, term_offset) = term_id_and_offset(
+            self.sender_position,
+            self.initial_term_id,
+            self.position_bits_to_shift,
+            self.term_length,
+        );
         let header = setup.header();
         header.set_frame_length(SETUP_HEADER_LENGTH as i32);
         header.set_version(CURRENT_VERSION);
         header.set_flags(0);
         header.set_header_type(HDR_TYPE_SETUP);
-        setup.set_term_offset(0);
+        setup.set_term_offset(term_offset);
         setup.set_session_id(self.session_id);
         setup.set_stream_id(self.stream_id);
         setup.set_initial_term_id(self.initial_term_id);
-        setup.set_active_term_id(self.initial_term_id);
+        setup.set_active_term_id(active_term_id);
         setup.set_term_length(self.term_length as i32);
         setup.set_mtu_length(self.mtu_length as i32);
         setup.set_ttl(0);
@@ -236,20 +256,52 @@ impl NetworkPublication {
     }
 
     fn send_heartbeat(&self) -> Result<usize> {
-        let index = index_by_position(self.sender_position, self.position_bits_to_shift);
-        let term_id = self.initial_term_id + index as i32;
-        let term_offset = (self.sender_position as usize) & (self.term_length - 1);
+        let (term_id, term_offset) = term_id_and_offset(
+            self.sender_position,
+            self.initial_term_id,
+            self.position_bits_to_shift,
+            self.term_length,
+        );
 
         let mut bytes = [0u8; DATA_HEADER_LENGTH];
         let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut bytes));
         data.set_frame_length(0);
         data.set_version(CURRENT_VERSION);
         data.set_header_type(HDR_TYPE_DATA);
-        data.set_term_offset(term_offset as i32);
+        data.set_term_offset(term_offset);
         data.set_session_id(self.session_id);
         data.set_stream_id(self.stream_id);
         data.set_term_id(term_id);
         self.endpoint.send_data(&bytes, self.destination)?;
         Ok(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_derive_active_term_from_absolute_position_across_ring_rotation() {
+        let (term_id, term_offset) = term_id_and_offset(
+            3 * 64 * 1024 + 96,
+            99,
+            position_bits_to_shift(64 * 1024),
+            64 * 1024,
+        );
+        assert_eq!(term_id, 102);
+        assert_eq!(term_offset, 96);
+    }
+
+    #[test]
+    fn should_wrap_term_id_like_aeron_term_counters() {
+        let (term_id, term_offset) = term_id_and_offset(
+            64 * 1024,
+            i32::MAX,
+            position_bits_to_shift(64 * 1024),
+            64 * 1024,
+        );
+        assert_eq!(term_id, i32::MIN);
+        assert_eq!(term_offset, 0);
     }
 }
