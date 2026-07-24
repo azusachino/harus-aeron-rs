@@ -145,6 +145,16 @@ impl NetworkPublication {
                     self.retransmit(nak.term_id, nak.term_offset, nak.length.max(0) as usize)?;
             }
         }
+        let setup_requests = self.endpoint.take_setup_requests();
+        if setup_requests.iter().any(|&(session_id, stream_id)| {
+            session_id == self.session_id && stream_id == self.stream_id
+        }) {
+            // Matches SendChannelEndpoint.onStatusMessage(SEND_SETUP_FLAG): the next sender
+            // duty cycle must immediately announce SETUP instead of waiting for the periodic
+            // announcement interval.
+            self.setup_sent = false;
+            work += 1;
+        }
         Ok(work)
     }
 
