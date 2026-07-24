@@ -26,6 +26,25 @@ pub enum PublicationImageState {
     Done,
 }
 
+/// Upstream `PublicationImage.SM_EOS_MULTIPLE`: the DRAINING guard waits five status-message
+/// timeouts after the log is drained before releasing, giving a stalled subscriber a last chance.
+const SM_EOS_MULTIPLE: i64 = 5;
+
+/// The outcome of one [`PublicationImage::on_time_event`] tick that the conductor must react to.
+///
+/// Mirrors the side effects upstream `DriverConductor.checkManagedResources` performs off
+/// `PublicationImage.onTimeEvent`: notify subscribers on the DRAINING->LINGER edge, and free the
+/// image once it reaches end of life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageLifecycleEvent {
+    /// No state change this tick.
+    None,
+    /// Entered LINGER: emit `UNAVAILABLE_IMAGE` to every linked subscription.
+    EnteredLinger,
+    /// Reached DONE after the receiver released it: remove the image and free its log.
+    ReachedEndOfLife,
+}
+
 /// A contiguous region not yet rebuilt because an earlier packet is missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LossRange {
@@ -58,6 +77,10 @@ pub struct PublicationImage {
     last_overrun_threshold: i64,
     pending_loss: Option<LossRange>,
     state: PublicationImageState,
+    /// Wall-clock (ns) of the most recent state transition; gates the DRAINING/LINGER timeouts.
+    time_of_last_state_change_ns: i64,
+    /// Set once the receiver has stopped adopting this image (upstream `hasReceiverReleased`).
+    receiver_released: bool,
     last_packet_ns: i64,
     end_of_stream: bool,
 }
@@ -133,6 +156,8 @@ impl PublicationImage {
             last_overrun_threshold: active_position + (term_length as i64 / 2),
             pending_loss: None,
             state: PublicationImageState::Init,
+            time_of_last_state_change_ns: 0,
+            receiver_released: false,
             last_packet_ns: 0,
             end_of_stream: false,
         }
@@ -208,13 +233,78 @@ impl PublicationImage {
         self.state
     }
 
-    pub fn activate(&mut self) {
-        self.state = PublicationImageState::Active;
+    fn set_state(&mut self, state: PublicationImageState, now_ns: i64) {
+        self.state = state;
+        self.time_of_last_state_change_ns = now_ns;
     }
 
-    pub fn deactivate(&mut self) {
+    pub fn activate(&mut self, now_ns: i64) {
+        self.set_state(PublicationImageState::Active, now_ns);
+    }
+
+    /// Move an active image to DRAINING (upstream `PublicationImage.deactivate`), invoked when the
+    /// receiver stops adopting the image because liveness was lost or its subscriptions detached.
+    pub fn deactivate(&mut self, now_ns: i64) {
         if self.state == PublicationImageState::Active {
-            self.state = PublicationImageState::Draining;
+            self.set_state(PublicationImageState::Draining, now_ns);
+        }
+    }
+
+    /// Mark that the receiver has released this image (upstream `hasReceiverReleased`). Only after
+    /// this and reaching DONE is the image eligible for freeing.
+    pub fn receiver_release(&mut self) {
+        self.receiver_released = true;
+    }
+
+    /// Upstream `PublicationImage.hasReachedEndOfLife`: released by the receiver and fully lingered.
+    pub fn has_reached_end_of_life(&self) -> bool {
+        self.receiver_released && self.state == PublicationImageState::Done
+    }
+
+    /// Whether every received byte has been rebuilt into the shared log.
+    ///
+    /// Upstream `isDrained` also requires each subscriber position to have caught up to the rebuild
+    /// position. The driver-side image does not hold the subscriber position counters (the
+    /// conductor owns them), and subscribers read the shared log even after the image is freed, so
+    /// the drain gate here is the data-side condition only.
+    fn is_drained(&self) -> bool {
+        self.rebuild_position >= self.hwm_position
+    }
+
+    /// Advance the end-of-life state machine one tick (upstream `PublicationImage.onTimeEvent`).
+    ///
+    /// DRAINING lingers for `SM_EOS_MULTIPLE` status-message timeouts after draining before the
+    /// receiver is released; LINGER holds for one image-liveness timeout (or until the last
+    /// subscription detaches) before the image is done. Returns the side effect the conductor owns.
+    pub fn on_time_event(
+        &mut self,
+        now_ns: i64,
+        sm_timeout_ns: i64,
+        liveness_timeout_ns: i64,
+    ) -> ImageLifecycleEvent {
+        match self.state {
+            PublicationImageState::Draining => {
+                if self.is_drained()
+                    && (self.time_of_last_state_change_ns + SM_EOS_MULTIPLE * sm_timeout_ns)
+                        < now_ns
+                {
+                    self.set_state(PublicationImageState::Linger, now_ns);
+                    ImageLifecycleEvent::EnteredLinger
+                } else {
+                    ImageLifecycleEvent::None
+                }
+            }
+            PublicationImageState::Linger => {
+                if self.has_no_subscriptions()
+                    || (self.time_of_last_state_change_ns + liveness_timeout_ns) < now_ns
+                {
+                    self.set_state(PublicationImageState::Done, now_ns);
+                    ImageLifecycleEvent::ReachedEndOfLife
+                } else {
+                    ImageLifecycleEvent::None
+                }
+            }
+            _ => ImageLifecycleEvent::None,
         }
     }
 
@@ -310,14 +400,17 @@ impl PublicationImage {
                 .max(packet_position.saturating_add(length as i64));
             self.last_packet_ns = now_ns;
             if self.state == PublicationImageState::Init {
-                self.state = PublicationImageState::Active;
+                self.set_state(PublicationImageState::Active, now_ns);
             }
             if frame.get_u8(FLAGS_FIELD_OFFSET) & EOS_FLAG != 0 {
                 self.end_of_stream = true;
             }
             self.advance_rebuild_position();
-            if self.end_of_stream && self.rebuild_position >= self.hwm_position {
-                self.state = PublicationImageState::Draining;
+            if self.state == PublicationImageState::Active
+                && self.end_of_stream
+                && self.rebuild_position >= self.hwm_position
+            {
+                self.set_state(PublicationImageState::Draining, now_ns);
             }
         }
     }
@@ -340,7 +433,7 @@ impl PublicationImage {
         self.hwm_position = self.hwm_position.max(position);
         self.last_packet_ns = now_ns;
         if self.state == PublicationImageState::Init {
-            self.state = PublicationImageState::Active;
+            self.set_state(PublicationImageState::Active, now_ns);
         }
         self.advance_rebuild_position();
     }
@@ -651,6 +744,103 @@ mod tests {
 
         assert_eq!(image.hwm_position(), 0);
         assert_eq!(image.pending_loss(), None);
+
+        drop(image);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn progresses_through_draining_linger_done_end_of_life() {
+        const SM: i64 = 200_000_000;
+        const LIVENESS: i64 = 10_000_000_000;
+
+        let path = std::env::temp_dir().join(format!(
+            "aeron-publication-image-lifecycle-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let mut image = PublicationImage::new(
+            7,
+            9,
+            1,
+            buffers,
+            path.to_string_lossy().into_owned(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000),
+            11,
+            12,
+        );
+        image.activate(1_000);
+
+        // The receiver drops a silent image: ACTIVE -> DRAINING plus release.
+        image.deactivate(1_000);
+        image.receiver_release();
+        assert_eq!(image.state(), PublicationImageState::Draining);
+        assert!(!image.has_reached_end_of_life());
+
+        // DRAINING holds for five status-message timeouts even though the log is drained.
+        assert_eq!(
+            image.on_time_event(1_000 + 5 * SM, SM, LIVENESS),
+            ImageLifecycleEvent::None
+        );
+        assert_eq!(
+            image.on_time_event(1_000 + 5 * SM + 1, SM, LIVENESS),
+            ImageLifecycleEvent::EnteredLinger
+        );
+        assert_eq!(image.state(), PublicationImageState::Linger);
+
+        // LINGER (with a live subscription) holds for one image-liveness timeout.
+        let linger_at = 1_000 + 5 * SM + 1;
+        assert_eq!(
+            image.on_time_event(linger_at + LIVENESS, SM, LIVENESS),
+            ImageLifecycleEvent::None
+        );
+        assert_eq!(
+            image.on_time_event(linger_at + LIVENESS + 1, SM, LIVENESS),
+            ImageLifecycleEvent::ReachedEndOfLife
+        );
+        assert_eq!(image.state(), PublicationImageState::Done);
+        assert!(image.has_reached_end_of_life());
+
+        drop(image);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn linger_ends_immediately_once_the_last_subscription_detaches() {
+        const SM: i64 = 200_000_000;
+        const LIVENESS: i64 = 10_000_000_000;
+
+        let path = std::env::temp_dir().join(format!(
+            "aeron-publication-image-linger-detach-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let mut image = PublicationImage::new(
+            7,
+            9,
+            1,
+            buffers,
+            path.to_string_lossy().into_owned(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000),
+            11,
+            12,
+        );
+        image.activate(1_000);
+        image.deactivate(1_000);
+        image.receiver_release();
+        assert_eq!(
+            image.on_time_event(1_000 + 5 * SM + 1, SM, LIVENESS),
+            ImageLifecycleEvent::EnteredLinger
+        );
+
+        // Without waiting out the liveness timeout, losing the last subscriber ends the linger.
+        image.remove_subscription_link(11);
+        assert!(image.has_no_subscriptions());
+        assert_eq!(
+            image.on_time_event(1_000 + 5 * SM + 2, SM, LIVENESS),
+            ImageLifecycleEvent::ReachedEndOfLife
+        );
+        assert!(image.has_reached_end_of_life());
 
         drop(image);
         let _ = std::fs::remove_file(path);

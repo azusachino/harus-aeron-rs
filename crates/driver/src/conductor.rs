@@ -58,7 +58,7 @@ use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
 use crate::network_publication::NetworkPublication;
-use crate::publication_image::PublicationImage;
+use crate::publication_image::{ImageLifecycleEvent, PublicationImage};
 use crate::receiver::ReceiverStatus;
 
 /// Source identity reported for IPC images — matches upstream's `aeron:ipc` channel identity.
@@ -68,6 +68,9 @@ const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
 const UDP_SOURCE_IDENTITY: &str = "aeron:udp";
 
 const IMAGE_LIVENESS_TIMEOUT_NS: i64 = 10_000_000_000;
+/// Matches `Configuration.STATUS_MESSAGE_TIMEOUT_DEFAULT_NS` in vendored Aeron; paces the image
+/// DRAINING->LINGER release window.
+const STATUS_MESSAGE_TIMEOUT_NS: i64 = 200_000_000;
 /// Matches `Configuration.PENDING_SETUPS_TIMEOUT_NS` in vendored Aeron.
 const PENDING_SETUPS_TIMEOUT_NS: i64 = 1_000_000_000;
 
@@ -837,7 +840,7 @@ impl DriverConductor {
             correlation_id,
         );
         image.touch(now_ns);
-        image.activate();
+        image.activate(now_ns);
         for subscription_registration_id in links {
             let correlation_id = self.on_available_image(
                 session_id,
@@ -1297,7 +1300,7 @@ impl DriverConductor {
             };
             if remove_image {
                 if let Some(mut image) = self.images.remove(&key) {
-                    image.deactivate();
+                    image.deactivate(now_ns);
                     self.session_states
                         .insert(key.clone(), (NetworkSessionState::OnCoolDown, now_ns));
                     self.setup_elicited.remove(&key);
@@ -1326,26 +1329,51 @@ impl DriverConductor {
         expired.len()
     }
 
+    /// Drive every network image through its end-of-life state machine once per duty cycle.
+    ///
+    /// Mirrors the split upstream keeps between the `Receiver` (drops an image that has lost
+    /// liveness: `deactivate` + `receiverRelease`) and `DriverConductor.checkManagedResources`
+    /// (runs `onTimeEvent`, notifies subscribers on the DRAINING->LINGER edge, frees the image once
+    /// it reaches end of life). Both roles live in this single-threaded conductor sweep.
     fn sweep_inactive_images(&mut self, now_ns: i64) -> Result<usize> {
-        let expired: Vec<NetworkImageKey> = self
-            .images
-            .iter()
-            .filter(|(_, image)| !image.is_connected(now_ns, IMAGE_LIVENESS_TIMEOUT_NS))
-            .map(|(key, _)| key.clone())
-            .collect();
+        let keys: Vec<NetworkImageKey> = self.images.keys().cloned().collect();
 
         let mut work = 0;
-        for key in expired {
-            if let Some(mut image) = self.images.remove(&key) {
-                image.deactivate();
+        for key in keys {
+            let Some(image) = self.images.get_mut(&key) else {
+                continue;
+            };
+
+            // Receiver role: a silent image is deactivated and released so the state machine can run.
+            if !image.is_connected(now_ns, IMAGE_LIVENESS_TIMEOUT_NS)
+                && !image.has_reached_end_of_life()
+            {
+                image.deactivate(now_ns);
+                image.receiver_release();
                 self.session_states
                     .insert(key.clone(), (NetworkSessionState::OnCoolDown, now_ns));
                 self.setup_elicited.remove(&key);
-                let links: Vec<_> = image.image_links().collect();
-                for (subscription_registration_id, correlation_id) in links {
-                    self.on_unavailable_image(correlation_id, subscription_registration_id)?;
+            }
+
+            // Conductor role: advance DRAINING->LINGER->DONE and react to each transition.
+            match image.on_time_event(now_ns, STATUS_MESSAGE_TIMEOUT_NS, IMAGE_LIVENESS_TIMEOUT_NS)
+            {
+                ImageLifecycleEvent::None => {}
+                ImageLifecycleEvent::EnteredLinger => {
+                    let links: Vec<_> = image.image_links().collect();
+                    for (subscription_registration_id, correlation_id) in links {
+                        self.on_unavailable_image(correlation_id, subscription_registration_id)?;
+                    }
+                    work += 1;
                 }
-                work += 1;
+                ImageLifecycleEvent::ReachedEndOfLife => {
+                    if let Some(image) = self.images.remove(&key) {
+                        let log_file_name = image.log_file_name().to_owned();
+                        drop(image);
+                        let _ = std::fs::remove_file(log_file_name);
+                    }
+                    work += 1;
+                }
             }
         }
         Ok(work)
@@ -2263,8 +2291,15 @@ mod tests {
 
         client.client_keepalive().unwrap();
         conductor.do_work(5_000_000_000).unwrap();
+        // Past the image-liveness timeout: the receiver deactivates and releases the silent image,
+        // moving it to DRAINING — but no UNAVAILABLE_IMAGE is emitted until it enters LINGER.
         conductor
             .do_work(IMAGE_LIVENESS_TIMEOUT_NS + 2_000)
+            .unwrap();
+        // Past the DRAINING release window (5 status-message timeouts) the image enters LINGER and
+        // notifies subscribers. The client keepalive keeps the subscription alive throughout.
+        conductor
+            .do_work(IMAGE_LIVENESS_TIMEOUT_NS + STATUS_MESSAGE_TIMEOUT_NS * 5 + 3_000)
             .unwrap();
 
         let mut unavailable = None;
