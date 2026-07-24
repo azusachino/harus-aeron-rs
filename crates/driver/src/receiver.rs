@@ -27,7 +27,15 @@ pub struct Receiver {
 struct ExpectedPosition {
     term_id: i32,
     term_offset: i32,
+    term_length: i32,
     receiver_window_length: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReceiverStatus {
+    pub term_id: i32,
+    pub term_offset: i32,
+    pub receiver_window_length: i32,
 }
 
 /// A received datagram together with the endpoint and source that delivered it.
@@ -41,6 +49,7 @@ pub struct ReceivedFrame {
     pub endpoint_index: usize,
     /// Original channel URI of the endpoint which received the datagram.
     pub channel: String,
+    pub receiver_status: Option<ReceiverStatus>,
 }
 
 impl Default for Receiver {
@@ -95,7 +104,7 @@ impl Receiver {
                 .recv_from(&mut buffer)
             {
                 let frame = buffer[..len].to_vec();
-                self.handle_frame(endpoint_index, &frame, src)?;
+                let receiver_status = self.handle_frame(endpoint_index, &frame, src)?;
                 self.received_frames.push(ReceivedFrame {
                     bytes: frame,
                     source: src,
@@ -104,6 +113,7 @@ impl Receiver {
                         .udp_channel()
                         .original_uri_string
                         .clone(),
+                    receiver_status,
                 });
                 count += 1;
             }
@@ -116,9 +126,9 @@ impl Receiver {
         endpoint_index: usize,
         bytes: &[u8],
         source: SocketAddr,
-    ) -> Result<()> {
+    ) -> Result<Option<ReceiverStatus>> {
         if bytes.len() < DATA_HEADER_LENGTH {
-            return Ok(());
+            return Ok(None);
         }
 
         let mut owned = bytes.to_vec();
@@ -140,6 +150,7 @@ impl Receiver {
                     .or_insert(ExpectedPosition {
                         term_id: setup.active_term_id(),
                         term_offset: setup.term_offset(),
+                        term_length: setup.term_length(),
                         receiver_window_length: window,
                     });
                 self.receive_channel_endpoints[endpoint_index].send_status_message(
@@ -150,13 +161,21 @@ impl Receiver {
                     window,
                     source,
                 )?;
+                Ok(self
+                    .expected_positions
+                    .get(&(setup.session_id(), setup.stream_id(), source))
+                    .map(|expected| ReceiverStatus {
+                        term_id: expected.term_id,
+                        term_offset: expected.term_offset,
+                        receiver_window_length: expected.receiver_window_length,
+                    }))
             }
             HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
-                self.handle_data_frames(endpoint_index, bytes, source)?;
+                let status = self.handle_data_frames(endpoint_index, bytes, source)?;
+                Ok(status)
             }
-            _ => {}
+            _ => Ok(None),
         }
-        Ok(())
     }
 
     fn handle_data_frames(
@@ -164,13 +183,15 @@ impl Receiver {
         endpoint_index: usize,
         bytes: &[u8],
         source: SocketAddr,
-    ) -> Result<()> {
+    ) -> Result<Option<ReceiverStatus>> {
         let mut packet_offset = 0usize;
+        let mut status_key = None;
         while packet_offset + DATA_HEADER_LENGTH <= bytes.len() {
             let frame = &bytes[packet_offset..];
             let mut frame_bytes = frame.to_vec();
             let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut frame_bytes));
             let frame_length = data.frame_length();
+            status_key = Some((data.session_id(), data.stream_id()));
             if frame_length < 0 {
                 break;
             }
@@ -209,17 +230,18 @@ impl Receiver {
                 .or_insert(ExpectedPosition {
                     term_id: data.term_id(),
                     term_offset: data.term_offset(),
+                    term_length: 0,
                     receiver_window_length: 0,
                 });
             let expected_term = expected.term_id;
             let expected_offset = expected.term_offset;
-            if data.term_id() > expected_term
-                || (data.term_id() == expected_term && data.term_offset() > expected_offset)
-            {
-                let missing = if data.term_id() == expected_term {
+            let term_delta = data.term_id().wrapping_sub(expected_term) as i64;
+            if term_delta > 0 || (term_delta == 0 && data.term_offset() > expected_offset) {
+                let missing = if term_delta == 0 {
                     data.term_offset() - expected_offset
                 } else {
-                    data.term_offset().max(0)
+                    let term_length = expected.term_length.max(data.term_offset());
+                    (term_length - expected_offset).max(0) + data.term_offset().max(0)
                 };
                 if missing > 0 {
                     self.receive_channel_endpoints[endpoint_index].send_nak(
@@ -232,7 +254,13 @@ impl Receiver {
                     )?;
                 }
             } else if data.term_id() == expected_term && data.term_offset() == expected_offset {
-                expected.term_offset = expected_offset + align(frame_length, FRAME_ALIGNMENT);
+                let next_offset = expected_offset + align(frame_length, FRAME_ALIGNMENT);
+                if expected.term_length > 0 && next_offset >= expected.term_length {
+                    expected.term_id = expected_term.wrapping_add(1);
+                    expected.term_offset = next_offset - expected.term_length;
+                } else {
+                    expected.term_offset = next_offset;
+                }
                 if expected.receiver_window_length > 0 {
                     self.receive_channel_endpoints[endpoint_index].send_status_message(
                         data.session_id(),
@@ -246,7 +274,16 @@ impl Receiver {
             }
             packet_offset += aligned_length;
         }
-        Ok(())
+        Ok(status_key.and_then(|(session_id, stream_id)| {
+            self.expected_positions
+                .get(&(session_id, stream_id, source))
+                .filter(|expected| expected.receiver_window_length > 0)
+                .map(|expected| ReceiverStatus {
+                    term_id: expected.term_id,
+                    term_offset: expected.term_offset,
+                    receiver_window_length: expected.receiver_window_length,
+                })
+        }))
     }
 
     /// Take the frames received since the last call for conductor dispatch.

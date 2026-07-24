@@ -56,6 +56,7 @@ use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
 use crate::network_publication::NetworkPublication;
 use crate::publication_image::PublicationImage;
+use crate::receiver::ReceiverStatus;
 
 /// Source identity reported for IPC images — matches upstream's `aeron:ipc` channel identity.
 const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
@@ -589,6 +590,19 @@ impl DriverConductor {
         now_ns: i64,
         channel: Option<&str>,
     ) -> Result<()> {
+        self.on_received_frame_with_status(frame, source, now_ns, channel, None)
+    }
+
+    /// Dispatch a frame together with the receiver Status Message position reached while
+    /// processing its datagram.
+    pub fn on_received_frame_with_status(
+        &mut self,
+        frame: &[u8],
+        source: SocketAddr,
+        now_ns: i64,
+        channel: Option<&str>,
+        receiver_status: Option<ReceiverStatus>,
+    ) -> Result<()> {
         if frame.len() < DATA_HEADER_LENGTH {
             return Ok(());
         }
@@ -598,7 +612,7 @@ impl DriverConductor {
         match frame_type {
             HDR_TYPE_SETUP => self.on_setup(&buf, source, now_ns, channel),
             HDR_TYPE_DATA => {
-                self.on_data(&buf, frame.len(), source, now_ns, channel);
+                self.on_data(&buf, frame.len(), source, now_ns, channel, receiver_status);
                 Ok(())
             }
             _ => Ok(()),
@@ -754,6 +768,7 @@ impl DriverConductor {
         source: SocketAddr,
         now_ns: i64,
         channel: Option<&str>,
+        receiver_status: Option<ReceiverStatus>,
     ) {
         let session_id = buf.get_i32(DATA_SESSION_ID_FIELD_OFFSET);
         let stream_id = buf.get_i32(DATA_STREAM_ID_FIELD_OFFSET);
@@ -809,6 +824,16 @@ impl DriverConductor {
             image.on_data_frame(term_id, term_offset as usize, &frame, aligned, now_ns);
 
             offset += aligned;
+        }
+        if let Some(status) = receiver_status {
+            // The status describes the contiguous position reached after this datagram. Apply it
+            // after rebuilding so the datagram that advances the receiver is not mistaken for an
+            // under-run relative to its own newly advertised position.
+            image.update_flow_control(
+                status.term_id,
+                status.term_offset,
+                status.receiver_window_length,
+            );
         }
     }
 
