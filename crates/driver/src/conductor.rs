@@ -627,10 +627,12 @@ impl DriverConductor {
             &log_file_name,
             UDP_SOURCE_IDENTITY,
         )?;
-        let mut image = PublicationImage::new(
+        let mut image = PublicationImage::new_with_active_position(
             session_id,
             stream_id,
             initial_term_id,
+            setup.active_term_id(),
+            setup.term_offset(),
             buffers,
             log_file_name.clone(),
             source,
@@ -672,15 +674,28 @@ impl DriverConductor {
             if frame_length < 0 {
                 break;
             }
+            if frame_length < DATA_HEADER_LENGTH as i32 {
+                break;
+            }
             let aligned = align(frame_length, FRAME_ALIGNMENT) as usize;
+            if aligned > length.saturating_sub(offset) {
+                break;
+            }
+            let frame_session_id = buf.get_i32(offset + DATA_SESSION_ID_FIELD_OFFSET);
+            let frame_stream_id = buf.get_i32(offset + DATA_STREAM_ID_FIELD_OFFSET);
+            if frame_session_id != session_id || frame_stream_id != stream_id {
+                break;
+            }
             let term_id = buf.get_i32(offset + DATA_TERM_ID_FIELD_OFFSET);
-            let term_offset = buf.get_i32(offset + DATA_TERM_OFFSET_FIELD_OFFSET) as usize;
+            let term_offset = buf.get_i32(offset + DATA_TERM_OFFSET_FIELD_OFFSET);
+            if term_offset < 0 {
+                break;
+            }
 
-            let mut frame_bytes = vec![0u8; aligned.min(length - offset)];
+            let mut frame_bytes = vec![0u8; aligned];
             buf.get_bytes(offset, &mut frame_bytes);
-            let frame_length = frame_bytes.len();
             let frame = AtomicBuffer::new(&mut frame_bytes);
-            image.on_data_frame(term_id, term_offset, &frame, frame_length, now_ns);
+            image.on_data_frame(term_id, term_offset as usize, &frame, aligned, now_ns);
 
             offset += aligned;
         }
@@ -1382,6 +1397,48 @@ mod tests {
 
         assert!(conductor.images.is_empty());
         assert_eq!(conductor.take_removed_receive_channels(), vec![channel]);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn receive_image_starts_at_setup_active_position() {
+        let (cnc, path) = temp_cnc("udp-image-active-position");
+        let dir = temp_dir("udp-image-active-position");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        client
+            .add_subscription("aeron:udp?endpoint=127.0.0.1:0", 7)
+            .unwrap();
+        conductor.do_work(1_000).unwrap();
+        let _ = conductor.take_new_receive_endpoints();
+
+        let source = SocketAddr::from(([127, 0, 0, 1], 9005));
+        let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_SETUP);
+        setup
+            .set_session_id(7)
+            .set_stream_id(7)
+            .set_initial_term_id(0)
+            .set_active_term_id(0)
+            .set_term_offset(1024)
+            .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+
+        conductor
+            .on_received_frame(&setup_bytes, source, 2_000)
+            .unwrap();
+        let image = conductor.images.values().next().unwrap();
+        assert_eq!(image.hwm_position(), 1024);
+        assert_eq!(image.rebuild_position(), 1024);
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);

@@ -68,13 +68,52 @@ impl PublicationImage {
         subscription_registration_id: i64,
         correlation_id: i64,
     ) -> Self {
+        Self::new_with_active_position(
+            session_id,
+            stream_id,
+            initial_term_id,
+            initial_term_id,
+            0,
+            log_buffers,
+            log_file_name,
+            source_addr,
+            subscription_registration_id,
+            correlation_id,
+        )
+    }
+
+    /// Construct an image at the active term position advertised by SETUP.
+    ///
+    /// Upstream `PublicationImage` initializes both HWM and rebuild positions from
+    /// `activeTermId`/`termOffset`; starting at zero would make a non-zero initial offset look
+    /// like a permanent loss gap.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_active_position(
+        session_id: i32,
+        stream_id: i32,
+        initial_term_id: i32,
+        active_term_id: i32,
+        active_term_offset: i32,
+        log_buffers: LogBuffers,
+        log_file_name: String,
+        source_addr: SocketAddr,
+        subscription_registration_id: i64,
+        correlation_id: i64,
+    ) -> Self {
         let term_length = log_buffers.term_length();
+        let position_bits_to_shift = position_bits_to_shift(term_length);
+        let active_position = compute_position(
+            active_term_id,
+            active_term_offset,
+            position_bits_to_shift as i32,
+            initial_term_id,
+        );
         Self {
             session_id,
             stream_id,
             initial_term_id,
             term_length,
-            position_bits_to_shift: position_bits_to_shift(term_length),
+            position_bits_to_shift,
             log_buffers,
             log_file_name,
             source_addr,
@@ -82,8 +121,8 @@ impl PublicationImage {
                 subscription_registration_id,
                 correlation_id,
             }],
-            hwm_position: 0,
-            rebuild_position: 0,
+            hwm_position: active_position,
+            rebuild_position: active_position,
             pending_loss: None,
             state: PublicationImageState::Init,
             last_packet_ns: 0,
@@ -280,7 +319,17 @@ impl PublicationImage {
         let term_offset = (self.rebuild_position as usize) & (self.term_length - 1);
         let term_id =
             self.initial_term_id + (self.rebuild_position >> self.position_bits_to_shift) as i32;
-        let limit = ((self.hwm_position as usize) & (self.term_length - 1)).max(term_offset);
+        let hwm_term_offset = (self.hwm_position as usize) & (self.term_length - 1);
+        let hwm_term_id =
+            self.initial_term_id + (self.hwm_position >> self.position_bits_to_shift) as i32;
+        // A HWM in a later term means the entire remainder of the current term is in scope.
+        // Using the later term's wrapped offset here can hide a gap at the end of the current
+        // term (the exact boundary exercised by upstream LossDetector/PublicationImage tests).
+        let limit = if hwm_term_id == term_id {
+            hwm_term_offset.max(term_offset)
+        } else {
+            self.term_length
+        };
         let term_buffers = self.log_buffers.duplicate_term_buffers();
         let term_buffer = term_buffers.get(index)?;
         let mut gap = None;
@@ -309,6 +358,9 @@ mod tests {
     use aeron_client::logbuffer::TERM_MIN_LENGTH;
     use aeron_client::protocol::{DATA_HEADER_LENGTH, DataHeaderFlyweight};
     use std::net::{IpAddr, Ipv4Addr};
+
+    // Behavioral cases are cross-checked against:
+    // vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/PublicationImageTest.java
 
     fn data_frame(term_id: i32, term_offset: i32, value: u8) -> Vec<u8> {
         let mut bytes = vec![0u8; 64];
@@ -376,6 +428,68 @@ mod tests {
         assert_eq!(image.hwm_position(), 256);
         let term_buffer = image.log_buffers.duplicate_term_buffers()[0];
         assert_eq!(term_buffer.get_i32(64), 40);
+
+        drop(image);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn should_start_positions_at_setup_active_term_and_offset() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-publication-image-position-test-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let image = PublicationImage::new_with_active_position(
+            7,
+            9,
+            1,
+            1,
+            1024,
+            buffers,
+            path.to_string_lossy().into_owned(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000),
+            11,
+            12,
+        );
+
+        assert_eq!(image.hwm_position(), 1024);
+        assert_eq!(image.rebuild_position(), 1024);
+        assert_eq!(image.pending_loss(), None);
+
+        drop(image);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn heartbeat_does_not_overwrite_data_and_data_overwrites_heartbeat() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-publication-image-heartbeat-test-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000);
+        let mut image = PublicationImage::new(
+            7,
+            9,
+            1,
+            buffers,
+            path.to_string_lossy().into_owned(),
+            source,
+            11,
+            12,
+        );
+
+        image.on_heartbeat(1, 0, 10);
+        let term_buffer = image.log_buffers.duplicate_term_buffers()[0];
+        assert_eq!(term_buffer.get_i32(0), 0);
+
+        let mut data = data_frame(1, 0, 0x11);
+        image.on_data_frame(1, 0, &AtomicBuffer::new(&mut data), 64, 20);
+        assert_eq!(term_buffer.get_i32(0), 40);
+
+        image.on_heartbeat(1, 0, 30);
+        assert_eq!(term_buffer.get_i32(0), 40);
 
         drop(image);
         let _ = std::fs::remove_file(path);
