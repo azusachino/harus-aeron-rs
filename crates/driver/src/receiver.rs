@@ -72,6 +72,10 @@ impl Receiver {
             .position(|endpoint| endpoint.matches_channel(canonical_form))
         {
             self.receive_channel_endpoints.remove(index);
+            // The compact key does not carry an endpoint identity. Reset the sequence cache
+            // when receiver interest is removed so a later subscription cannot inherit stale
+            // term offsets from the previous image.
+            self.expected_positions.clear();
             true
         } else {
             false
@@ -267,5 +271,18 @@ mod tests {
         receiver.add_receive_channel_endpoint(endpoint);
         assert_eq!(receiver.receive_channel_endpoints().len(), 1);
         assert_eq!(receiver.do_work().unwrap(), 0);
+    }
+
+    #[test]
+    fn should_remove_receive_channel_endpoint_and_reset_sequence_state() {
+        let mut receiver = Receiver::new();
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        receiver.add_receive_channel_endpoint(ReceiveChannelEndpoint::new(channel, transport));
+
+        assert!(receiver.remove_receive_channel_endpoint("aeron:udp?endpoint=localhost:0"));
+        assert!(receiver.receive_channel_endpoints().is_empty());
+        assert!(!receiver.remove_receive_channel_endpoint("aeron:udp?endpoint=localhost:0"));
     }
 }
