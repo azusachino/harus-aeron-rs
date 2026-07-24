@@ -6,6 +6,7 @@
 //! response events on the to-clients broadcast buffer.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -32,9 +33,9 @@ use aeron_client::logbuffer::{
     FRAME_ALIGNMENT, align, set_initial_term_id, set_mtu_length, store_default_frame_header,
 };
 use aeron_client::protocol::{
-    CURRENT_VERSION, DATA_HEADER_LENGTH, DATA_SESSION_ID_FIELD_OFFSET, DATA_TERM_ID_FIELD_OFFSET,
-    DATA_TERM_OFFSET_FIELD_OFFSET, DataHeaderFlyweight, FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA,
-    HDR_TYPE_SETUP, SetupFlyweight, TYPE_FIELD_OFFSET,
+    CURRENT_VERSION, DATA_HEADER_LENGTH, DATA_SESSION_ID_FIELD_OFFSET, DATA_STREAM_ID_FIELD_OFFSET,
+    DATA_TERM_ID_FIELD_OFFSET, DATA_TERM_OFFSET_FIELD_OFFSET, DataHeaderFlyweight,
+    FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA, HDR_TYPE_SETUP, SetupFlyweight, TYPE_FIELD_OFFSET,
 };
 
 use crate::configuration::Configuration;
@@ -148,8 +149,8 @@ pub struct DriverConductor {
     new_network_publications: Vec<NetworkPublication>,
     /// Receive endpoints created this cycle, drained by the driver into the Receiver.
     new_receive_endpoints: Vec<ReceiveChannelEndpoint>,
-    /// Reassembly state for network images, keyed by session id.
-    images: HashMap<i32, PublicationImage>,
+    /// Reassembly state for network images, keyed by session, stream, and source.
+    images: HashMap<(i32, i32, SocketAddr), PublicationImage>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
 }
@@ -443,7 +444,12 @@ impl DriverConductor {
     }
 
     /// Dispatch one frame received off the wire: SETUP creates an image, DATA rebuilds it.
-    pub fn on_received_frame(&mut self, frame: &[u8]) -> Result<()> {
+    pub fn on_received_frame(
+        &mut self,
+        frame: &[u8],
+        source: SocketAddr,
+        now_ns: i64,
+    ) -> Result<()> {
         if frame.len() < DATA_HEADER_LENGTH {
             return Ok(());
         }
@@ -451,9 +457,9 @@ impl DriverConductor {
         let buf = AtomicBuffer::new(&mut bytes);
         let frame_type = buf.get_i16(TYPE_FIELD_OFFSET) as u16;
         match frame_type {
-            HDR_TYPE_SETUP => self.on_setup(&buf),
+            HDR_TYPE_SETUP => self.on_setup(&buf, source),
             HDR_TYPE_DATA => {
-                self.on_data(&buf, frame.len());
+                self.on_data(&buf, frame.len(), source, now_ns);
                 Ok(())
             }
             _ => Ok(()),
@@ -461,11 +467,12 @@ impl DriverConductor {
     }
 
     /// A SETUP frame: allocate the image log for a matching UDP subscription and announce it.
-    fn on_setup(&mut self, buf: &AtomicBuffer) -> Result<()> {
+    fn on_setup(&mut self, buf: &AtomicBuffer, source: SocketAddr) -> Result<()> {
         let setup = SetupFlyweight::new(*buf);
         let session_id = setup.session_id();
         let stream_id = setup.stream_id();
-        if self.images.contains_key(&session_id) {
+        let image_key = (session_id, stream_id, source);
+        if self.images.contains_key(&image_key) {
             return Ok(());
         }
 
@@ -490,13 +497,14 @@ impl DriverConductor {
         )?;
 
         self.images.insert(
-            session_id,
+            image_key,
             PublicationImage::new(
                 session_id,
                 stream_id,
                 initial_term_id,
                 buffers,
                 log_file_name.clone(),
+                source,
             ),
         );
         self.on_available_image(
@@ -509,9 +517,10 @@ impl DriverConductor {
     }
 
     /// A DATA frame (possibly several concatenated frames): rebuild each into its image.
-    fn on_data(&mut self, buf: &AtomicBuffer, length: usize) {
+    fn on_data(&mut self, buf: &AtomicBuffer, length: usize, source: SocketAddr, now_ns: i64) {
         let session_id = buf.get_i32(DATA_SESSION_ID_FIELD_OFFSET);
-        let Some(image) = self.images.get(&session_id) else {
+        let stream_id = buf.get_i32(DATA_STREAM_ID_FIELD_OFFSET);
+        let Some(image) = self.images.get_mut(&(session_id, stream_id, source)) else {
             return;
         };
         let mut offset = 0usize;
@@ -528,7 +537,7 @@ impl DriverConductor {
             buf.get_bytes(offset, &mut frame_bytes);
             let frame_length = frame_bytes.len();
             let frame = AtomicBuffer::new(&mut frame_bytes);
-            image.on_data_frame(term_id, term_offset, &frame, frame_length);
+            image.on_data_frame(term_id, term_offset, &frame, frame_length, now_ns);
 
             offset += aligned;
         }

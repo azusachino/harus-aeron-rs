@@ -17,10 +17,21 @@ use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 
 pub struct Receiver {
     receive_channel_endpoints: Vec<ReceiveChannelEndpoint>,
-    /// Frames drained off the wire this cycle, handed to the conductor for image reassembly.
-    received_frames: Vec<Vec<u8>>,
+    /// Frames drained off the wire this cycle, handed to the conductor with their source.
+    received_frames: Vec<ReceivedFrame>,
     /// Next contiguous term position expected for each received session/stream.
     expected_positions: HashMap<(i32, i32), (i32, i32)>,
+}
+
+/// A received datagram together with the endpoint and source that delivered it.
+///
+/// Upstream keeps this association in `DataPacketDispatcher`/`PublicationImage`; losing it
+/// before conductor dispatch makes two publishers using one stream indistinguishable.
+#[derive(Debug, Clone)]
+pub struct ReceivedFrame {
+    pub bytes: Vec<u8>,
+    pub source: SocketAddr,
+    pub endpoint_index: usize,
 }
 
 impl Default for Receiver {
@@ -54,7 +65,11 @@ impl Receiver {
             {
                 let frame = buffer[..len].to_vec();
                 self.handle_frame(endpoint_index, &frame, src)?;
-                self.received_frames.push(buffer[..len].to_vec());
+                self.received_frames.push(ReceivedFrame {
+                    bytes: frame,
+                    source: src,
+                    endpoint_index,
+                });
                 count += 1;
             }
         }
@@ -77,6 +92,13 @@ impl Receiver {
         match header.header_type() {
             HDR_TYPE_SETUP => {
                 let setup = SetupFlyweight::new(buffer);
+                self.receive_channel_endpoints[endpoint_index].on_setup_message(
+                    setup.session_id(),
+                    setup.stream_id(),
+                    setup.active_term_id(),
+                    setup.term_offset(),
+                    source,
+                );
                 self.expected_positions.insert(
                     (setup.session_id(), setup.stream_id()),
                     (setup.active_term_id(), setup.term_offset()),
@@ -94,6 +116,14 @@ impl Receiver {
             HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
                 let data = DataHeaderFlyweight::new(buffer);
                 let frame_length = data.frame_length();
+                self.receive_channel_endpoints[endpoint_index].on_data_packet(
+                    data.session_id(),
+                    data.stream_id(),
+                    data.term_id(),
+                    data.term_offset(),
+                    &bytes[DATA_HEADER_LENGTH..],
+                    source,
+                );
                 if frame_length <= 0 {
                     return Ok(());
                 }
@@ -132,7 +162,7 @@ impl Receiver {
     }
 
     /// Take the frames received since the last call for conductor dispatch.
-    pub fn take_received_frames(&mut self) -> Vec<Vec<u8>> {
+    pub fn take_received_frames(&mut self) -> Vec<ReceivedFrame> {
         std::mem::take(&mut self.received_frames)
     }
 

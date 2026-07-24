@@ -14,10 +14,31 @@ use crate::error::Result;
 use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
 
+#[derive(Debug, Clone)]
+pub struct SetupMessage {
+    pub session_id: i32,
+    pub stream_id: i32,
+    pub active_term_id: i32,
+    pub term_offset: i32,
+    pub source: SocketAddr,
+}
+
+#[derive(Debug, Clone)]
+pub struct DataPacket {
+    pub session_id: i32,
+    pub stream_id: i32,
+    pub term_id: i32,
+    pub term_offset: i32,
+    pub payload: Vec<u8>,
+    pub source: SocketAddr,
+}
+
 #[derive(Debug)]
 pub struct ReceiveChannelEndpoint {
     udp_channel: UdpChannel,
     transport: UdpChannelTransport,
+    setup_messages: Vec<SetupMessage>,
+    data_packets: Vec<DataPacket>,
 }
 
 impl ReceiveChannelEndpoint {
@@ -25,6 +46,8 @@ impl ReceiveChannelEndpoint {
         Self {
             udp_channel,
             transport,
+            setup_messages: Vec::new(),
+            data_packets: Vec::new(),
         }
     }
 
@@ -38,25 +61,46 @@ impl ReceiveChannelEndpoint {
 
     pub fn on_data_packet(
         &mut self,
-        _session_id: i32,
-        _stream_id: i32,
-        _term_id: i32,
-        _term_offset: i32,
-        _payload: &[u8],
-        _src_addr: SocketAddr,
+        session_id: i32,
+        stream_id: i32,
+        term_id: i32,
+        term_offset: i32,
+        payload: &[u8],
+        src_addr: SocketAddr,
     ) {
-        // Data packet dispatch to image buffers
+        self.data_packets.push(DataPacket {
+            session_id,
+            stream_id,
+            term_id,
+            term_offset,
+            payload: payload.to_vec(),
+            source: src_addr,
+        });
     }
 
     pub fn on_setup_message(
         &mut self,
-        _session_id: i32,
-        _stream_id: i32,
-        _active_term_id: i32,
-        _term_offset: i32,
-        _src_addr: SocketAddr,
+        session_id: i32,
+        stream_id: i32,
+        active_term_id: i32,
+        term_offset: i32,
+        src_addr: SocketAddr,
     ) {
-        // Setup message handling
+        self.setup_messages.push(SetupMessage {
+            session_id,
+            stream_id,
+            active_term_id,
+            term_offset,
+            source: src_addr,
+        });
+    }
+
+    pub fn take_setup_messages(&mut self) -> Vec<SetupMessage> {
+        std::mem::take(&mut self.setup_messages)
+    }
+
+    pub fn take_data_packets(&mut self) -> Vec<DataPacket> {
+        std::mem::take(&mut self.data_packets)
     }
 
     /// Build and send a real Status Message flow-control frame to `target`.
@@ -131,5 +175,25 @@ mod tests {
             &endpoint.udp_channel().original_uri_string,
             "aeron:udp?endpoint=localhost:0"
         );
+    }
+
+    #[test]
+    fn should_dispatch_setup_and_data_callbacks() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        let mut endpoint = ReceiveChannelEndpoint::new(channel, transport);
+        let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9001);
+
+        endpoint.on_setup_message(7, 9, 1, 0, source);
+        endpoint.on_data_packet(7, 9, 1, 0, b"payload", source);
+
+        let setups = endpoint.take_setup_messages();
+        assert_eq!(setups.len(), 1);
+        assert_eq!(setups[0].source, source);
+        let packets = endpoint.take_data_packets();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].payload, b"payload");
+        assert_eq!(packets[0].source, source);
     }
 }
