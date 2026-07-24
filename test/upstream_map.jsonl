@@ -116,7 +116,7 @@
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/OptimalMulticastDelayGeneratorTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/PublicationImageTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/PublicationParamsTest.java"}
-{"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ReceiverLivenessTrackerTest.java"}
+{"layer": "driver", "rust_equivalent": "crates/driver/src/receiver_liveness_tracker.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ReceiverLivenessTrackerTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ReceiverTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/RetransmitHandlerTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/SelectorAndTransportTest.java"}
