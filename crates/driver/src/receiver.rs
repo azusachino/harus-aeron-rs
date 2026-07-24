@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 
 use aeron_client::logbuffer::{FRAME_ALIGNMENT, align};
 use aeron_client::protocol::{
-    DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP, HeaderFlyweight,
-    SetupFlyweight,
+    DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_RTTM, HDR_TYPE_SETUP,
+    HeaderFlyweight, RTTM_HEADER_LENGTH, RTTM_REPLY_FLAG, RttMeasurementFlyweight, SetupFlyweight,
 };
 use agrona::AtomicBuffer;
 
@@ -213,6 +213,21 @@ impl Receiver {
             HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
                 let status = self.handle_data_frames(endpoint_index, bytes, source, now_ns)?;
                 Ok(status)
+            }
+            HDR_TYPE_RTTM if bytes.len() >= RTTM_HEADER_LENGTH => {
+                let rtt = RttMeasurementFlyweight::new(buffer);
+                let key = (endpoint_index, rtt.session_id(), rtt.stream_id(), source);
+                if rtt.header().flags() & RTTM_REPLY_FLAG == 0
+                    && self.expected_positions.contains_key(&key)
+                {
+                    self.receive_channel_endpoints[endpoint_index].send_rtt_measurement_reply(
+                        rtt.session_id(),
+                        rtt.stream_id(),
+                        rtt.echo_timestamp(),
+                        source,
+                    )?;
+                }
+                Ok(None)
             }
             _ => Ok(None),
         }
@@ -479,5 +494,67 @@ mod tests {
             receiver.send_periodic_status_messages(200_000_001).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn should_reply_to_rtt_measurement_request_for_active_source() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        let peer = UdpSocket::bind(bind_addr).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let source = peer.local_addr().unwrap();
+
+        let mut receiver = Receiver::new();
+        receiver.add_receive_channel_endpoint(ReceiveChannelEndpoint::new(channel, transport));
+        let endpoint_addr = receiver.receive_channel_endpoints()[0]
+            .transport()
+            .local_addr()
+            .unwrap();
+        receiver.expected_positions.insert(
+            (0, 7, 11, source),
+            ExpectedPosition {
+                term_id: 3,
+                term_offset: 0,
+                term_length: 64 * 1024,
+                receiver_window_length: 32 * 1024,
+                last_status_ns: 1,
+            },
+        );
+
+        let mut request = [0u8; aeron_client::protocol::RTTM_HEADER_LENGTH];
+        {
+            let rtt = RttMeasurementFlyweight::new(AtomicBuffer::new(&mut request));
+            rtt.header()
+                .set_frame_length(RTTM_HEADER_LENGTH as i32)
+                .set_version(aeron_client::protocol::CURRENT_VERSION)
+                .set_flags(0)
+                .set_header_type(aeron_client::protocol::HDR_TYPE_RTTM);
+            rtt.set_session_id(7)
+                .set_stream_id(11)
+                .set_echo_timestamp(1234)
+                .set_reception_delta(0)
+                .set_receiver_id(0);
+        }
+        peer.send_to(&request, endpoint_addr).unwrap();
+
+        let mut work = 0;
+        for _ in 0..10 {
+            work = receiver.do_work_at(2).unwrap();
+            if work > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(work, 1);
+        let mut reply = [0u8; 128];
+        let (length, _) = peer.recv_from(&mut reply).unwrap();
+        let rtt = RttMeasurementFlyweight::new(AtomicBuffer::new(&mut reply[..length]));
+        assert_eq!(
+            rtt.header().header_type(),
+            aeron_client::protocol::HDR_TYPE_RTTM
+        );
+        assert_ne!(rtt.header().flags() & RTTM_REPLY_FLAG, 0);
+        assert_eq!(rtt.echo_timestamp(), 1234);
     }
 }

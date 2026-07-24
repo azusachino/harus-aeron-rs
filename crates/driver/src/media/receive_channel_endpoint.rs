@@ -5,7 +5,8 @@
 use std::net::SocketAddr;
 
 use aeron_client::protocol::{
-    CURRENT_VERSION, HDR_TYPE_NAK, HDR_TYPE_SM, NAK_HEADER_LENGTH, NakFlyweight, SEND_SETUP_FLAG,
+    CURRENT_VERSION, HDR_TYPE_NAK, HDR_TYPE_RTTM, HDR_TYPE_SM, NAK_HEADER_LENGTH, NakFlyweight,
+    RTTM_HEADER_LENGTH, RTTM_REPLY_FLAG, RttMeasurementFlyweight, SEND_SETUP_FLAG,
     STATUS_MESSAGE_HEADER_LENGTH, StatusMessageFlyweight,
 };
 use agrona::AtomicBuffer;
@@ -161,6 +162,35 @@ impl ReceiveChannelEndpoint {
                 .set_consumption_term_id(0)
                 .set_consumption_term_offset(0)
                 .set_receiver_window_length(0)
+                .set_receiver_id(0);
+        }
+        self.transport.send_to(&buf, target)
+    }
+
+    /// Reply to a source RTT measurement request.
+    ///
+    /// Matches `ReceiveChannelEndpoint.sendRttMeasurement(..., isReply=false)` in the
+    /// vendored Aeron driver. The echoed timestamp is preserved and the reception delta is
+    /// intentionally zero, as in Aeron's dispatcher reply path.
+    pub fn send_rtt_measurement_reply(
+        &self,
+        session_id: i32,
+        stream_id: i32,
+        echo_timestamp: i64,
+        target: SocketAddr,
+    ) -> Result<usize> {
+        let mut buf = [0u8; RTTM_HEADER_LENGTH];
+        {
+            let rtt = RttMeasurementFlyweight::new(AtomicBuffer::new(&mut buf));
+            rtt.header()
+                .set_frame_length(RTTM_HEADER_LENGTH as i32)
+                .set_version(CURRENT_VERSION)
+                .set_flags(RTTM_REPLY_FLAG)
+                .set_header_type(HDR_TYPE_RTTM);
+            rtt.set_session_id(session_id)
+                .set_stream_id(stream_id)
+                .set_echo_timestamp(echo_timestamp)
+                .set_reception_delta(0)
                 .set_receiver_id(0);
         }
         self.transport.send_to(&buf, target)
