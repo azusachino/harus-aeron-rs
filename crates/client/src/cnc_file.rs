@@ -13,6 +13,12 @@
 //! +-----------------------------+  + to_driver_length
 //! | to-clients buffer           |  (Broadcast: driver -> clients events)
 //! +-----------------------------+  + to_clients_length
+//! | counter metadata            |
+//! +-----------------------------+
+//! | counter values              |
+//! +-----------------------------+
+//! | error log                   |
+//! +-----------------------------+
 //! ```
 //!
 //! Both buffer regions include their ring/broadcast trailer, so they can be wrapped directly
@@ -20,12 +26,8 @@
 //! [`agrona::BroadcastTransmitter`]/[`agrona::BroadcastReceiver`]. Because the file is mapped
 //! `MAP_SHARED`, the driver and clients see each other's writes across processes.
 //!
-//! Parity note vs `vendor/aeron` `CncFileDescriptor` (release/1.50.x): the metadata field
-//! offsets, `META_DATA_LENGTH` (CACHE_LINE * 2 = 128), and `CNC_VERSION` (SemanticVersion
-//! 0.2.0 = 512) match upstream. Upstream additionally lays out counters-metadata,
-//! counters-values, and error-log buffers after the to-clients region; those are **not yet
-//! allocated here** (recorded lengths are 0). This subset is sufficient for the command/event
-//! plane but is not yet byte-compatible with a real Aeron client mapping the same file.
+//! The metadata field offsets, region ordering, `META_DATA_LENGTH` (CACHE_LINE * 2 = 128), and
+//! `CNC_VERSION` (SemanticVersion 0.2.0 = 512) match upstream `1.50.x`.
 
 use crate::error::{AeronError, Result};
 use agrona::AtomicBuffer;
@@ -73,6 +75,23 @@ pub const META_DATA_LENGTH: usize = align(48, CACHE_LINE_LENGTH * 2);
 pub const DEFAULT_TO_DRIVER_LENGTH: usize = (1 << 20) + RING_TRAILER_LENGTH;
 /// Default to-clients buffer length (1 MiB of data plus the broadcast trailer).
 pub const DEFAULT_TO_CLIENTS_LENGTH: usize = (1 << 20) + BROADCAST_TRAILER_LENGTH;
+/// A compact but valid counter-values region for the standalone Rust driver.
+pub const DEFAULT_COUNTER_VALUES_LENGTH: usize = 1 << 20;
+/// Upstream's ratio is four metadata bytes for every value byte.
+pub const DEFAULT_COUNTER_METADATA_LENGTH: usize = DEFAULT_COUNTER_VALUES_LENGTH * 4;
+/// Error-log region; the Java driver defaults to 4 MiB, while the layout accepts any positive
+/// region and the Rust driver does not yet write distinct error records.
+pub const DEFAULT_ERROR_LOG_LENGTH: usize = 1 << 20;
+
+/// Upstream Agrona counter layout constants used by Java `CountersReader`.
+pub const COUNTER_METADATA_LENGTH: usize = 512;
+pub const COUNTER_VALUE_LENGTH: usize = 128;
+pub const COUNTER_TYPE_ID_OFFSET: usize = 4;
+pub const COUNTER_REGISTRATION_ID_OFFSET: usize = 8;
+pub const COUNTER_KEY_OFFSET: usize = 16;
+pub const COUNTER_LABEL_OFFSET: usize = 128;
+pub const COUNTER_LABEL_MAX_LENGTH: usize = 380;
+pub const COUNTER_RECORD_ALLOCATED: i32 = 1;
 
 enum CncStorage {
     Mmap(MmapMut),
@@ -105,6 +124,12 @@ struct CncFileInner {
     to_driver_length: usize,
     to_clients_offset: usize,
     to_clients_length: usize,
+    counters_metadata_offset: usize,
+    counters_metadata_length: usize,
+    counters_values_offset: usize,
+    counters_values_length: usize,
+    error_log_offset: usize,
+    error_log_length: usize,
 }
 
 /// A handle to a mapped `cnc.dat`. Cheap to clone; clones share the same mapping.
@@ -121,7 +146,33 @@ impl CncFile {
         to_clients_length: usize,
         client_liveness_timeout_ns: i64,
     ) -> Result<Self> {
-        let total_len = META_DATA_LENGTH + to_driver_length + to_clients_length;
+        Self::create_new_with_regions(
+            path,
+            to_driver_length,
+            to_clients_length,
+            0,
+            0,
+            0,
+            client_liveness_timeout_ns,
+        )
+    }
+
+    /// Create a CnC file with the complete upstream region ordering.
+    pub fn create_new_with_regions<P: AsRef<Path>>(
+        path: P,
+        to_driver_length: usize,
+        to_clients_length: usize,
+        counters_metadata_length: usize,
+        counters_values_length: usize,
+        error_log_length: usize,
+        client_liveness_timeout_ns: i64,
+    ) -> Result<Self> {
+        let total_len = META_DATA_LENGTH
+            + to_driver_length
+            + to_clients_length
+            + counters_metadata_length
+            + counters_values_length
+            + error_log_length;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -138,9 +189,12 @@ impl CncFile {
             unsafe { AtomicBuffer::from_raw_parts(mmap.as_ptr() as *mut u8, META_DATA_LENGTH) };
         meta.put_i32(TO_DRIVER_LENGTH_OFFSET, to_driver_length as i32);
         meta.put_i32(TO_CLIENTS_LENGTH_OFFSET, to_clients_length as i32);
-        meta.put_i32(COUNTER_METADATA_LENGTH_OFFSET, 0);
-        meta.put_i32(COUNTER_VALUES_LENGTH_OFFSET, 0);
-        meta.put_i32(ERROR_LOG_LENGTH_OFFSET, 0);
+        meta.put_i32(
+            COUNTER_METADATA_LENGTH_OFFSET,
+            counters_metadata_length as i32,
+        );
+        meta.put_i32(COUNTER_VALUES_LENGTH_OFFSET, counters_values_length as i32);
+        meta.put_i32(ERROR_LOG_LENGTH_OFFSET, error_log_length as i32);
         meta.put_i64(CLIENT_LIVENESS_TIMEOUT_OFFSET, client_liveness_timeout_ns);
         meta.put_i64(START_TIMESTAMP_OFFSET, now_ms());
         meta.put_i64(PID_OFFSET, std::process::id() as i64);
@@ -187,15 +241,25 @@ impl CncFile {
 
         let to_driver_length = meta.get_i32(TO_DRIVER_LENGTH_OFFSET) as usize;
         let to_clients_length = meta.get_i32(TO_CLIENTS_LENGTH_OFFSET) as usize;
+        let counters_metadata_length = meta.get_i32(COUNTER_METADATA_LENGTH_OFFSET) as usize;
+        let counters_values_length = meta.get_i32(COUNTER_VALUES_LENGTH_OFFSET) as usize;
+        let error_log_length = meta.get_i32(ERROR_LOG_LENGTH_OFFSET) as usize;
         let to_driver_offset = META_DATA_LENGTH;
         let to_clients_offset = to_driver_offset + to_driver_length;
+        let counters_metadata_offset = to_clients_offset + to_clients_length;
+        let counters_values_offset = counters_metadata_offset + counters_metadata_length;
+        let error_log_offset = counters_values_offset + counters_values_length;
 
-        if storage.len() < to_clients_offset + to_clients_length {
+        let required_length = error_log_offset + error_log_length;
+        if storage.len() < required_length {
             return Err(AeronError::IllegalState(format!(
-                "CnC file length {} too small for declared buffers (to_driver={}, to_clients={})",
+                "CnC file length {} too small for declared buffers (to_driver={}, to_clients={}, counters_metadata={}, counters_values={}, error_log={})",
                 storage.len(),
                 to_driver_length,
-                to_clients_length
+                to_clients_length,
+                counters_metadata_length,
+                counters_values_length,
+                error_log_length
             )));
         }
 
@@ -205,6 +269,12 @@ impl CncFile {
             to_driver_length,
             to_clients_offset,
             to_clients_length,
+            counters_metadata_offset,
+            counters_metadata_length,
+            counters_values_offset,
+            counters_values_length,
+            error_log_offset,
+            error_log_length,
         })))
     }
 
@@ -224,6 +294,100 @@ impl CncFile {
     /// The to-clients region — wrap with `BroadcastTransmitter`/`BroadcastReceiver` for events.
     pub fn to_clients_buffer(&self) -> AtomicBuffer<'static> {
         self.view(self.0.to_clients_offset, self.0.to_clients_length)
+    }
+
+    pub fn counters_metadata_buffer(&self) -> AtomicBuffer<'static> {
+        self.view(
+            self.0.counters_metadata_offset,
+            self.0.counters_metadata_length,
+        )
+    }
+
+    pub fn counters_values_buffer(&self) -> AtomicBuffer<'static> {
+        self.view(self.0.counters_values_offset, self.0.counters_values_length)
+    }
+
+    pub fn error_log_buffer(&self) -> AtomicBuffer<'static> {
+        self.view(self.0.error_log_offset, self.0.error_log_length)
+    }
+
+    pub fn counters_metadata_length(&self) -> usize {
+        self.0.counters_metadata_length
+    }
+
+    pub fn counters_values_length(&self) -> usize {
+        self.0.counters_values_length
+    }
+
+    pub fn error_log_length(&self) -> usize {
+        self.0.error_log_length
+    }
+
+    /// Publish one counter record in the format consumed by Agrona's Java `CountersReader`.
+    pub fn write_counter_metadata(
+        &self,
+        counter_id: i32,
+        type_id: i32,
+        registration_id: i64,
+        value: i64,
+        label: &str,
+    ) -> Result<()> {
+        if counter_id < 0 {
+            return Err(AeronError::IllegalArgument(format!(
+                "negative counter id: {counter_id}"
+            )));
+        }
+        let counter_id = counter_id as usize;
+        let metadata_offset = counter_id.saturating_mul(COUNTER_METADATA_LENGTH);
+        let value_offset = counter_id.saturating_mul(COUNTER_VALUE_LENGTH);
+        if metadata_offset + COUNTER_METADATA_LENGTH > self.0.counters_metadata_length
+            || value_offset + 8 > self.0.counters_values_length
+        {
+            return Err(AeronError::IllegalState(format!(
+                "counter id {counter_id} does not fit CnC counter regions"
+            )));
+        }
+
+        let label_bytes = label.as_bytes();
+        if label_bytes.len() > COUNTER_LABEL_MAX_LENGTH {
+            return Err(AeronError::IllegalArgument(format!(
+                "counter label too long: {} > {COUNTER_LABEL_MAX_LENGTH}",
+                label_bytes.len()
+            )));
+        }
+
+        let metadata = self.counters_metadata_buffer();
+        metadata.put_i32(metadata_offset + COUNTER_TYPE_ID_OFFSET, type_id);
+        metadata.put_i64(
+            metadata_offset + COUNTER_REGISTRATION_ID_OFFSET,
+            registration_id,
+        );
+        metadata.put_i32(
+            metadata_offset + COUNTER_LABEL_OFFSET,
+            label_bytes.len() as i32,
+        );
+        metadata.put_bytes(metadata_offset + COUNTER_LABEL_OFFSET + 4, label_bytes);
+        self.counters_values_buffer()
+            .put_i64_ordered(value_offset, value);
+        // Publish the state last, matching CountersManager's allocation visibility contract.
+        metadata.put_i32_ordered(metadata_offset, COUNTER_RECORD_ALLOCATED);
+        Ok(())
+    }
+
+    pub fn set_counter_value(&self, counter_id: i32, value: i64) -> Result<()> {
+        if counter_id < 0 {
+            return Err(AeronError::IllegalArgument(format!(
+                "negative counter id: {counter_id}"
+            )));
+        }
+        let offset = (counter_id as usize).saturating_mul(COUNTER_VALUE_LENGTH);
+        if offset + 8 > self.0.counters_values_length {
+            return Err(AeronError::IllegalState(format!(
+                "counter id {counter_id} does not fit CnC counter values"
+            )));
+        }
+        self.counters_values_buffer().put_i64_ordered(offset, value);
+        Ok(())
     }
 
     /// CnC format version recorded in the file.
@@ -303,6 +467,30 @@ mod tests {
 
         drop(created);
         drop(mapped);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn complete_regions_follow_upstream_cnc_order() {
+        let path = temp_path("complete-regions");
+        let _ = std::fs::remove_file(&path);
+        let cnc =
+            CncFile::create_new_with_regions(&path, 128, 256, 512, 1024, 2048, 10_000_000_000)
+                .unwrap();
+        let mapped = CncFile::map_existing(&path).unwrap();
+
+        assert_eq!(mapped.counters_metadata_length(), 512);
+        assert_eq!(mapped.counters_values_length(), 1024);
+        assert_eq!(mapped.error_log_length(), 2048);
+        mapped.counters_metadata_buffer().put_i32(0, 0x1122_3344);
+        mapped.counters_values_buffer().put_i64(0, 0x5566_7788);
+        mapped.error_log_buffer().put_i32(0, 0x99AA_BBCC_u32 as i32);
+        assert_eq!(cnc.counters_metadata_buffer().get_i32(0), 0x1122_3344);
+        assert_eq!(cnc.counters_values_buffer().get_i64(0), 0x5566_7788);
+        assert_eq!(cnc.error_log_buffer().get_i32(0), 0x99AA_BBCC_u32 as i32);
+
+        drop(mapped);
+        drop(cnc);
         let _ = std::fs::remove_file(&path);
     }
 

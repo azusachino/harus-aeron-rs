@@ -19,6 +19,11 @@ use aeron_client::cnc_file::{CncFile, DEFAULT_FILE_PAGE_SIZE};
 use aeron_client::command::{
     PublicationMessageFlyweight, RemoveMessageFlyweight, SubscriptionMessageFlyweight,
 };
+use aeron_client::counters::{
+    CONTROL_PROTOCOL_SEMANTIC_VERSION, DRIVER_PUBLISHER_LIMIT_TYPE_ID,
+    DRIVER_SUBSCRIBER_POSITION_TYPE_ID, DRIVER_SYSTEM_COUNTER_TYPE_ID,
+    SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION,
+};
 use aeron_client::driver_events::{
     ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE, ON_EXCLUSIVE_PUBLICATION_READY,
     ON_OPERATION_SUCCESS, ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_IMAGE,
@@ -169,6 +174,21 @@ impl DriverConductor {
         let to_clients = BroadcastTransmitter::new(cnc.to_clients_buffer())
             .map_err(|e| DriverError::IllegalState(format!("to-clients broadcast: {e}")))?;
         let client_liveness_timeout_ns = cnc.client_liveness_timeout_ns();
+
+        // Publish the control protocol version in the standard system-counter slot so a Java
+        // Aeron client can negotiate the same command surface from the shared CnC file.
+        if cnc.counters_metadata_length()
+            >= aeron_client::cnc_file::COUNTER_METADATA_LENGTH
+                * (SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION as usize + 1)
+        {
+            cnc.write_counter_metadata(
+                SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION,
+                DRIVER_SYSTEM_COUNTER_TYPE_ID,
+                SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION as i64,
+                CONTROL_PROTOCOL_SEMANTIC_VERSION,
+                "Control protocol version",
+            )?;
+        }
 
         Ok(Self {
             cnc,
@@ -349,6 +369,12 @@ impl DriverConductor {
         // UDP opens it at creation (real Status-Message flow control lands with task-8).
         self.counters
             .insert(publication_limit_counter_id, Arc::new(AtomicI64::new(0)));
+        self.publish_counter(
+            publication_limit_counter_id,
+            DRIVER_PUBLISHER_LIMIT_TYPE_ID,
+            0,
+            "Publisher limit",
+        )?;
 
         let log_file_name = if is_ipc {
             let term_length = self.configuration.ipc_term_buffer_length as i32;
@@ -392,7 +418,7 @@ impl DriverConductor {
             self.open_publication_window(
                 publication_limit_counter_id,
                 self.configuration.publication_term_buffer_length,
-            );
+            )?;
             Some(name)
         } else {
             None
@@ -724,7 +750,7 @@ impl DriverConductor {
             self.open_publication_window(
                 publication_limit_counter_id,
                 self.configuration.ipc_term_buffer_length,
-            );
+            )?;
             self.on_available_image(
                 session_id,
                 stream_id,
@@ -789,7 +815,7 @@ impl DriverConductor {
             self.open_publication_window(
                 publication_limit_counter_id,
                 self.configuration.ipc_term_buffer_length,
-            );
+            )?;
             self.on_available_image(
                 session_id,
                 stream_id,
@@ -802,10 +828,41 @@ impl DriverConductor {
     }
 
     /// Open a publication's flow-control window to half a term (the initial window).
-    fn open_publication_window(&self, publication_limit_counter_id: i32, term_length: usize) {
+    fn open_publication_window(
+        &self,
+        publication_limit_counter_id: i32,
+        term_length: usize,
+    ) -> Result<()> {
+        let value = (term_length / 2) as i64;
         if let Some(limit) = self.counters.get(&publication_limit_counter_id) {
-            limit.store((term_length / 2) as i64, Ordering::Release);
+            limit.store(value, Ordering::Release);
         }
+        if self.cnc.counters_values_length() > 0 {
+            self.cnc
+                .set_counter_value(publication_limit_counter_id, value)?;
+        }
+        Ok(())
+    }
+
+    fn publish_counter(
+        &self,
+        counter_id: i32,
+        type_id: i32,
+        value: i64,
+        label: &str,
+    ) -> Result<()> {
+        if self.cnc.counters_metadata_length()
+            >= aeron_client::cnc_file::COUNTER_METADATA_LENGTH * (counter_id as usize + 1)
+        {
+            self.cnc.write_counter_metadata(
+                counter_id,
+                type_id,
+                counter_id as i64,
+                value,
+                label,
+            )?;
+        }
+        Ok(())
     }
 
     /// Publication limit counter for the given id, shared with an in-process client.
@@ -960,6 +1017,12 @@ impl DriverConductor {
         // The subscriber owns its position counter (starts at 0).
         self.counters
             .insert(subscriber_position_id, Arc::new(AtomicI64::new(0)));
+        self.publish_counter(
+            subscriber_position_id,
+            DRIVER_SUBSCRIBER_POSITION_TYPE_ID,
+            0,
+            "Subscriber position",
+        )?;
         // 28-byte fixed body + length-prefixed log file name + length-prefixed source identity.
         let name_field = 4 + align4(log_file_name.len());
         let source_field = 4 + source_identity.len();

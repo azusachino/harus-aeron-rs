@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aeron_client::cnc_file::{CncFile, DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH};
+use aeron_client::cnc_file::{
+    CncFile, DEFAULT_COUNTER_METADATA_LENGTH, DEFAULT_COUNTER_VALUES_LENGTH,
+    DEFAULT_ERROR_LOG_LENGTH, DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH,
+};
 
 use crate::conductor::DriverConductor;
 use crate::configuration::Configuration;
@@ -46,10 +49,13 @@ impl MediaDriver {
         })?;
         let cnc_path = aeron_dir.join(aeron_client::cnc_file::CNC_FILE);
 
-        let cnc = CncFile::create_new(
+        let cnc = CncFile::create_new_with_regions(
             &cnc_path,
             DEFAULT_TO_DRIVER_LENGTH,
             DEFAULT_TO_CLIENTS_LENGTH,
+            DEFAULT_COUNTER_METADATA_LENGTH,
+            DEFAULT_COUNTER_VALUES_LENGTH,
+            DEFAULT_ERROR_LOG_LENGTH,
             CLIENT_LIVENESS_TIMEOUT_NS,
         )?;
 
@@ -163,6 +169,23 @@ mod tests {
     fn should_launch_media_driver_and_process_a_client_command() {
         let config = Configuration::default();
         let mut driver = MediaDriver::launch(config).unwrap();
+
+        assert!(driver.cnc().counters_metadata_length() > 0);
+        assert!(driver.cnc().counters_values_length() > 0);
+        let control_counter_offset = 43 * aeron_client::cnc_file::COUNTER_METADATA_LENGTH;
+        let metadata = driver.cnc().counters_metadata_buffer();
+        assert_eq!(
+            metadata.get_i32(control_counter_offset),
+            aeron_client::cnc_file::COUNTER_RECORD_ALLOCATED
+        );
+        assert_eq!(metadata.get_i32(control_counter_offset + 4), 8);
+        assert_eq!(
+            driver
+                .cnc()
+                .counters_values_buffer()
+                .get_i64(43 * aeron_client::cnc_file::COUNTER_VALUE_LENGTH),
+            aeron_client::counters::CONTROL_PROTOCOL_SEMANTIC_VERSION
+        );
 
         // A client maps the same CnC and sends an add-subscription command.
         let ring = ManyToOneRingBuffer::new(driver.cnc().to_driver_buffer()).unwrap();
