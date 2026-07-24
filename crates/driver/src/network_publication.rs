@@ -54,6 +54,8 @@ pub struct NetworkPublication {
     position_bits_to_shift: usize,
     /// Stream position (bytes) already transmitted.
     sender_position: i64,
+    /// Position through which old term data has been cleared; trails the sender by one term.
+    clean_position: i64,
     setup_sent: bool,
     last_send_ns: i64,
     receiver_limit: i64,
@@ -89,6 +91,7 @@ impl NetworkPublication {
             mtu_length,
             position_bits_to_shift: position_bits_to_shift(term_length),
             sender_position: 0,
+            clean_position: 0,
             setup_sent: false,
             last_send_ns: i64::MIN,
             receiver_limit: 0,
@@ -110,6 +113,10 @@ impl NetworkPublication {
         self.receiver_limit
     }
 
+    pub fn clean_position(&self) -> i64 {
+        self.clean_position
+    }
+
     /// Drain SM/NAK control frames and apply them to this publication.
     pub fn poll_control(&mut self) -> Result<usize> {
         let mut work = self.endpoint.poll_control()?;
@@ -127,9 +134,8 @@ impl NetworkPublication {
                 // newer data-progress SM. A reliable publication must not move its send limit
                 // backwards because of that stale control frame.
                 self.receiver_limit = self.receiver_limit.max(new_receiver_limit);
-                self.publication_limit
-                    .store(self.receiver_limit, Ordering::Release);
                 self.status_received = true;
+                self.update_publication_limit();
                 work += 1;
             }
         }
@@ -179,6 +185,7 @@ impl NetworkPublication {
             term_buffer.get_bytes(term_offset, &mut bytes);
             self.endpoint.send_data(&bytes, self.destination)?;
             self.sender_position += (available + padding) as i64;
+            self.clean_log_behind_sender();
             self.last_send_ns = now_ns;
             return Ok(1);
         }
@@ -190,6 +197,53 @@ impl NetworkPublication {
             return Ok(1);
         }
         Ok(0)
+    }
+
+    fn update_publication_limit(&self) {
+        if !self.status_received {
+            self.publication_limit.store(0, Ordering::Release);
+            return;
+        }
+
+        let current_limit = self.publication_limit.load(Ordering::Acquire);
+        if self.receiver_limit <= current_limit {
+            return;
+        }
+
+        // This is the same dirty-term guard as NetworkPublication.updatePublisherPositionAndLimit
+        // in vendor/aeron/aeron-driver/src/main/java/io/aeron/driver/NetworkPublication.java:
+        // the producer may advance through the current term, but must not advance two terms
+        // beyond the term that has been cleaned.
+        let clean_term = self.clean_position >> self.position_bits_to_shift;
+        let active_term = self.receiver_limit >> self.position_bits_to_shift;
+        let term_gap = active_term - clean_term;
+        let clean_term_is_partial = (self.clean_position & (self.term_length as i64 - 1)) != 0;
+        if term_gap < 2 || (term_gap == 2 && clean_term_is_partial) {
+            self.publication_limit
+                .store(self.receiver_limit, Ordering::Release);
+        }
+    }
+
+    /// Clear data which is at least one complete term behind the sender.
+    fn clean_log_behind_sender(&mut self) {
+        let target = self.sender_position.saturating_sub(self.term_length as i64);
+        if target <= self.clean_position {
+            return;
+        }
+
+        let term_buffers = self.log_buffers.duplicate_term_buffers();
+        let mut position = self.clean_position;
+        while position < target {
+            let index = index_by_position(position, self.position_bits_to_shift);
+            let offset = (position as usize) & (self.term_length - 1);
+            let length = (target - position).min((self.term_length - offset) as i64) as usize;
+            if let Some(term_buffer) = term_buffers.get(index) {
+                term_buffer.put_bytes(offset, &vec![0; length]);
+            }
+            position += length as i64;
+        }
+        self.clean_position = target;
+        self.update_publication_limit();
     }
 
     fn retransmit(&self, term_id: i32, term_offset: i32, length: usize) -> Result<usize> {
@@ -280,6 +334,13 @@ impl NetworkPublication {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::send_channel_endpoint::SendChannelEndpoint;
+    use crate::media::udp_channel::UdpChannel;
+    use crate::media::udp_channel_transport::UdpChannelTransport;
+    use aeron_client::cnc_file::DEFAULT_FILE_PAGE_SIZE;
+    use aeron_client::log_buffers::LogBuffers;
+    use aeron_client::logbuffer::TERM_MIN_LENGTH;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
     fn should_derive_active_term_from_absolute_position_across_ring_rotation() {
@@ -303,5 +364,50 @@ mod tests {
         );
         assert_eq!(term_id, i32::MIN);
         assert_eq!(term_offset, 0);
+    }
+
+    #[test]
+    fn should_clean_one_term_behind_sender_and_keep_limit_inside_clean_data() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-network-publication-clean-test-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind, None, 0, 0).unwrap();
+        let endpoint = SendChannelEndpoint::new(channel, transport);
+        let publication_limit = Arc::new(AtomicI64::new(0));
+        let mut publication = NetworkPublication::new(
+            1,
+            buffers,
+            endpoint,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9),
+            7,
+            9,
+            1,
+            1408,
+            publication_limit.clone(),
+            16,
+        );
+        publication.status_received = true;
+        publication.receiver_limit = TERM_MIN_LENGTH as i64 + 128;
+        let term_buffers = publication.log_buffers.duplicate_term_buffers();
+        term_buffers[0].put_i32(0, 111);
+        term_buffers[0].put_i32(256, 222);
+        publication.sender_position = TERM_MIN_LENGTH as i64 + 128;
+
+        publication.clean_log_behind_sender();
+
+        assert_eq!(publication.clean_position(), 128);
+        assert_eq!(term_buffers[0].get_i32(0), 0);
+        assert_eq!(term_buffers[0].get_i32(256), 222);
+        assert_eq!(
+            publication_limit.load(Ordering::Acquire),
+            TERM_MIN_LENGTH as i64 + 128
+        );
+
+        drop(publication);
+        let _ = std::fs::remove_file(path);
     }
 }
