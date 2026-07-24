@@ -8,6 +8,7 @@
 
 pub mod conductor;
 pub mod configuration;
+pub mod congestion_control;
 pub mod driver;
 pub mod error;
 pub mod flow_control;
