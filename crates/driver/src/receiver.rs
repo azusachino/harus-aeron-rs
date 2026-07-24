@@ -39,6 +39,8 @@ pub struct ReceivedFrame {
     pub bytes: Vec<u8>,
     pub source: SocketAddr,
     pub endpoint_index: usize,
+    /// Original channel URI of the endpoint which received the datagram.
+    pub channel: String,
 }
 
 impl Default for Receiver {
@@ -98,6 +100,10 @@ impl Receiver {
                     bytes: frame,
                     source: src,
                     endpoint_index,
+                    channel: self.receive_channel_endpoints[endpoint_index]
+                        .udp_channel()
+                        .original_uri_string
+                        .clone(),
                 });
                 count += 1;
             }

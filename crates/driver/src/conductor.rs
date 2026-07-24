@@ -6,6 +6,8 @@
 //! response events on the to-clients broadcast buffer.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,6 +65,8 @@ const UDP_SOURCE_IDENTITY: &str = "aeron:udp";
 
 const IMAGE_LIVENESS_TIMEOUT_NS: i64 = 10_000_000_000;
 
+type NetworkImageKey = (String, i32, i32, SocketAddr);
+
 /// Returns `true` for an IPC channel (`aeron:ipc`, optionally with parameters).
 fn is_ipc_channel(channel: &str) -> bool {
     channel == "aeron:ipc" || channel.starts_with("aeron:ipc?")
@@ -76,6 +80,12 @@ fn is_udp_channel(channel: &str) -> bool {
 /// Round up to the next 4-byte boundary (variable-length command fields are SBE-aligned).
 fn align4(value: usize) -> usize {
     (value + 3) & !3
+}
+
+fn stable_channel_tag(channel: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    channel.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[derive(Debug, Clone)]
@@ -161,10 +171,19 @@ pub struct DriverConductor {
     new_receive_endpoints: Vec<ReceiveChannelEndpoint>,
     /// Channel identities whose subscription interest was removed this cycle.
     removed_receive_channels: Vec<String>,
+    /// Number of subscriptions sharing each receive channel endpoint.
+    ///
+    /// Upstream `ReceiveChannelEndpoint` owns one transport per channel and aggregates
+    /// stream/session interest through its `DataPacketDispatcher`; it does not bind one socket
+    /// per subscription.
+    receive_channel_references: HashMap<String, usize>,
     /// Network publication registrations whose sender state must be removed this cycle.
     removed_network_publications: Vec<i64>,
-    /// Reassembly state for network images, keyed by session, stream, and source.
-    images: HashMap<(i32, i32, SocketAddr), PublicationImage>,
+    /// Reassembly state for network images, keyed by channel, session, stream, and source.
+    ///
+    /// The channel endpoint is part of Aeron's dispatcher identity. Stream/session alone is not
+    /// sufficient when two UDP channels reuse those numeric IDs.
+    images: HashMap<NetworkImageKey, PublicationImage>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
 }
@@ -210,6 +229,7 @@ impl DriverConductor {
             new_network_publications: Vec::new(),
             new_receive_endpoints: Vec::new(),
             removed_receive_channels: Vec::new(),
+            receive_channel_references: HashMap::new(),
             removed_network_publications: Vec::new(),
             images: HashMap::new(),
             clients: HashMap::new(),
@@ -320,9 +340,10 @@ impl DriverConductor {
                 registration_id,
             } => {
                 if let Some(subscription) = self.subscriptions.remove(&registration_id) {
-                    self.removed_receive_channels
-                        .push(subscription.channel.clone());
                     self.detach_images_for_subscription(registration_id);
+                    if self.release_receive_endpoint(&subscription.channel) {
+                        self.removed_receive_channels.push(subscription.channel);
+                    }
                 }
                 self.on_operation_success(correlation_id)
             }
@@ -513,6 +534,11 @@ impl DriverConductor {
 
     /// Bind a receive channel endpoint for a UDP subscription and queue it for the Receiver.
     fn add_receive_endpoint(&mut self, channel: &str) -> Result<()> {
+        if let Some(references) = self.receive_channel_references.get_mut(channel) {
+            *references += 1;
+            return Ok(());
+        }
+
         let udp_channel = UdpChannel::parse(channel)
             .map_err(|e| DriverError::IllegalState(format!("parse udp channel: {e}")))?;
         // Bind to the endpoint address so the publisher's frames arrive here.
@@ -520,7 +546,26 @@ impl DriverConductor {
         let transport = UdpChannelTransport::bind(udp_channel.clone(), bind, None, 0, 0)?;
         self.new_receive_endpoints
             .push(ReceiveChannelEndpoint::new(udp_channel, transport));
+        self.receive_channel_references
+            .insert(channel.to_owned(), 1);
         Ok(())
+    }
+
+    /// Drop one subscription's claim on a channel endpoint.
+    ///
+    /// Returns true only when the transport itself has no remaining subscription references and
+    /// should be removed from the Receiver agent.
+    fn release_receive_endpoint(&mut self, channel: &str) -> bool {
+        let Some(references) = self.receive_channel_references.get_mut(channel) else {
+            return false;
+        };
+        if *references > 1 {
+            *references -= 1;
+            false
+        } else {
+            self.receive_channel_references.remove(channel);
+            true
+        }
     }
 
     /// Dispatch one frame received off the wire: SETUP creates an image, DATA rebuilds it.
@@ -530,6 +575,20 @@ impl DriverConductor {
         source: SocketAddr,
         now_ns: i64,
     ) -> Result<()> {
+        self.on_received_frame_for_channel(frame, source, now_ns, None)
+    }
+
+    /// Dispatch a frame received by a specific channel endpoint.
+    ///
+    /// `None` is retained for unit-test callers that inject a frame without endpoint context;
+    /// real MediaDriver traffic always supplies the channel URI.
+    pub fn on_received_frame_for_channel(
+        &mut self,
+        frame: &[u8],
+        source: SocketAddr,
+        now_ns: i64,
+        channel: Option<&str>,
+    ) -> Result<()> {
         if frame.len() < DATA_HEADER_LENGTH {
             return Ok(());
         }
@@ -537,9 +596,9 @@ impl DriverConductor {
         let buf = AtomicBuffer::new(&mut bytes);
         let frame_type = buf.get_i16(TYPE_FIELD_OFFSET) as u16;
         match frame_type {
-            HDR_TYPE_SETUP => self.on_setup(&buf, source, now_ns),
+            HDR_TYPE_SETUP => self.on_setup(&buf, source, now_ns, channel),
             HDR_TYPE_DATA => {
-                self.on_data(&buf, frame.len(), source, now_ns);
+                self.on_data(&buf, frame.len(), source, now_ns, channel);
                 Ok(())
             }
             _ => Ok(()),
@@ -547,11 +606,18 @@ impl DriverConductor {
     }
 
     /// A SETUP frame: allocate the image log for a matching UDP subscription and announce it.
-    fn on_setup(&mut self, buf: &AtomicBuffer, source: SocketAddr, now_ns: i64) -> Result<()> {
+    fn on_setup(
+        &mut self,
+        buf: &AtomicBuffer,
+        source: SocketAddr,
+        now_ns: i64,
+        channel: Option<&str>,
+    ) -> Result<()> {
         let setup = SetupFlyweight::new(*buf);
         let session_id = setup.session_id();
         let stream_id = setup.stream_id();
-        let image_key = (session_id, stream_id, source);
+        let channel_key = channel.unwrap_or("").to_owned();
+        let image_key = (channel_key, session_id, stream_id, source);
         if self.images.contains_key(&image_key) {
             let Some(log_file_name) = self
                 .images
@@ -563,7 +629,11 @@ impl DriverConductor {
             let subscribers: Vec<i64> = self
                 .subscriptions
                 .values()
-                .filter(|s| is_udp_channel(&s.channel) && s.stream_id == stream_id)
+                .filter(|s| {
+                    is_udp_channel(&s.channel)
+                        && s.stream_id == stream_id
+                        && channel.is_none_or(|value| s.channel == value)
+                })
                 .map(|s| s.registration_id)
                 .collect();
             let mut new_links = Vec::new();
@@ -595,7 +665,11 @@ impl DriverConductor {
         let subscribers: Vec<i64> = self
             .subscriptions
             .values()
-            .filter(|s| is_udp_channel(&s.channel) && s.stream_id == stream_id)
+            .filter(|s| {
+                is_udp_channel(&s.channel)
+                    && s.stream_id == stream_id
+                    && channel.is_none_or(|value| s.channel == value)
+            })
             .map(|s| s.registration_id)
             .collect();
         if subscribers.is_empty() {
@@ -608,7 +682,12 @@ impl DriverConductor {
         let publication_registration_id = self
             .publications
             .values()
-            .find(|p| !p.is_ipc && p.session_id == session_id && p.stream_id == stream_id)
+            .find(|p| {
+                !p.is_ipc
+                    && p.session_id == session_id
+                    && p.stream_id == stream_id
+                    && channel.is_none_or(|value| p.channel == value)
+            })
             .map(|publication| publication.registration_id);
         if let Some(registration_id) = publication_registration_id {
             if let Some(buffers) = self.log_buffers.get(&registration_id) {
@@ -625,6 +704,7 @@ impl DriverConductor {
             initial_term_id,
             term_length,
             mtu_length,
+            channel,
         )?;
 
         let mut links = subscribers.into_iter();
@@ -667,10 +747,30 @@ impl DriverConductor {
     }
 
     /// A DATA frame (possibly several concatenated frames): rebuild each into its image.
-    fn on_data(&mut self, buf: &AtomicBuffer, length: usize, source: SocketAddr, now_ns: i64) {
+    fn on_data(
+        &mut self,
+        buf: &AtomicBuffer,
+        length: usize,
+        source: SocketAddr,
+        now_ns: i64,
+        channel: Option<&str>,
+    ) {
         let session_id = buf.get_i32(DATA_SESSION_ID_FIELD_OFFSET);
         let stream_id = buf.get_i32(DATA_STREAM_ID_FIELD_OFFSET);
-        let Some(image) = self.images.get_mut(&(session_id, stream_id, source)) else {
+        let image_key = channel.map(|value| (value.to_owned(), session_id, stream_id, source));
+        let image = match image_key {
+            Some(key) => self.images.get_mut(&key),
+            None => self
+                .images
+                .iter_mut()
+                .find(|((_, image_session, image_stream, image_source), _)| {
+                    *image_session == session_id
+                        && *image_stream == stream_id
+                        && *image_source == source
+                })
+                .map(|(_, image)| image),
+        };
+        let Some(image) = image else {
             return;
         };
         let mut offset = 0usize;
@@ -720,11 +820,13 @@ impl DriverConductor {
         initial_term_id: i32,
         term_length: i32,
         mtu_length: i32,
+        channel: Option<&str>,
     ) -> Result<(String, LogBuffers)> {
         let dir = self.aeron_dir.join("images");
         std::fs::create_dir_all(&dir)
             .map_err(|e| DriverError::IllegalState(format!("create images dir: {e}")))?;
-        let path = dir.join(format!("{session_id}-{stream_id}.logbuffer"));
+        let channel_tag = channel.map(stable_channel_tag).unwrap_or_default();
+        let path = dir.join(format!("{session_id}-{stream_id}-{channel_tag}.logbuffer"));
 
         let buffers = LogBuffers::map_new(&path, term_length, DEFAULT_FILE_PAGE_SIZE)
             .map_err(|e| DriverError::IllegalState(format!("map image log buffer: {e}")))?;
@@ -830,20 +932,28 @@ impl DriverConductor {
         subscription_registration_id: i64,
         stream_id: i32,
     ) -> Result<()> {
-        let images: Vec<((i32, i32, SocketAddr), String)> = self
+        let Some(channel) = self
+            .subscriptions
+            .get(&subscription_registration_id)
+            .map(|subscription| subscription.channel.clone())
+        else {
+            return Ok(());
+        };
+        let images: Vec<(NetworkImageKey, String)> = self
             .images
             .iter()
-            .filter(|(_, image)| {
-                image.stream_id() == stream_id
+            .filter(|((image_channel, _, _, _), image)| {
+                (image_channel.is_empty() || image_channel == &channel)
+                    && image.stream_id() == stream_id
                     && !image.has_subscription(subscription_registration_id)
             })
-            .map(|(key, image)| (*key, image.log_file_name().to_owned()))
+            .map(|(key, image)| (key.clone(), image.log_file_name().to_owned()))
             .collect();
 
         for (key, log_file_name) in images {
-            let (session_id, _, _) = key;
+            let (_, session_id, _, _) = &key;
             let correlation_id = self.on_available_image(
-                session_id,
+                *session_id,
                 stream_id,
                 subscription_registration_id,
                 &log_file_name,
@@ -961,8 +1071,10 @@ impl DriverConductor {
             .map(|(registration_id, subscription)| (*registration_id, subscription.channel.clone()))
             .collect();
         for (registration_id, channel) in removed_subscriptions {
-            self.removed_receive_channels.push(channel);
             self.detach_images_for_subscription(registration_id);
+            if self.release_receive_endpoint(&channel) {
+                self.removed_receive_channels.push(channel);
+            }
             self.subscriptions.remove(&registration_id);
         }
     }
@@ -972,11 +1084,11 @@ impl DriverConductor {
     /// A detached image must not continue rebuilding data into a client-owned log. Dropping the
     /// mapped buffers also releases the file so a later subscription can create a fresh image.
     fn detach_images_for_subscription(&mut self, subscription_registration_id: i64) {
-        let keys: Vec<(i32, i32, SocketAddr)> = self
+        let keys: Vec<NetworkImageKey> = self
             .images
             .iter()
             .filter(|(_, image)| image.has_subscription(subscription_registration_id))
-            .map(|(key, _)| *key)
+            .map(|(key, _)| key.clone())
             .collect();
 
         for key in keys {
@@ -1015,11 +1127,11 @@ impl DriverConductor {
     }
 
     fn sweep_inactive_images(&mut self, now_ns: i64) -> Result<usize> {
-        let expired: Vec<(i32, i32, SocketAddr)> = self
+        let expired: Vec<NetworkImageKey> = self
             .images
             .iter()
             .filter(|(_, image)| !image.is_connected(now_ns, IMAGE_LIVENESS_TIMEOUT_NS))
-            .map(|(key, _)| *key)
+            .map(|(key, _)| key.clone())
             .collect();
 
         let mut work = 0;
@@ -1411,6 +1523,79 @@ mod tests {
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shares_udp_receive_endpoint_until_last_subscription_is_removed() {
+        let (cnc, path) = temp_cnc("shared-udp-endpoint");
+        let dir = temp_dir("shared-udp-endpoint");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let channel = "aeron:udp?endpoint=127.0.0.1:0";
+
+        let first = client.add_subscription(channel, 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+        assert_eq!(conductor.take_new_receive_endpoints().len(), 1);
+
+        let second = client.add_subscription(channel, 8).unwrap();
+        conductor.do_work(2_000).unwrap();
+        assert!(conductor.take_new_receive_endpoints().is_empty());
+
+        client.remove_subscription(first).unwrap();
+        conductor.do_work(3_000).unwrap();
+        assert!(conductor.take_removed_receive_channels().is_empty());
+
+        client.remove_subscription(second).unwrap();
+        conductor.do_work(4_000).unwrap();
+        assert_eq!(conductor.take_removed_receive_channels(), vec![channel]);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn routes_identical_streams_by_receive_channel_identity() {
+        let (cnc, path) = temp_cnc("channel-isolation");
+        let dir = temp_dir("channel-isolation");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let first_channel = "aeron:udp?endpoint=127.0.0.1:0";
+        let second_channel = "aeron:udp?endpoint=localhost:0";
+        let first = client.add_subscription(first_channel, 7).unwrap();
+        let second = client.add_subscription(second_channel, 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+        let _ = conductor.take_new_receive_endpoints();
+
+        let source = SocketAddr::from(([127, 0, 0, 1], 9010));
+        let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_SETUP);
+        setup
+            .set_session_id(7)
+            .set_stream_id(7)
+            .set_initial_term_id(0)
+            .set_active_term_id(0)
+            .set_term_offset(0)
+            .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+
+        conductor
+            .on_received_frame_for_channel(&setup_bytes, source, 2_000, Some(first_channel))
+            .unwrap();
+        let image = conductor.images.values().next().unwrap();
+        assert_eq!(image.image_links().count(), 1);
+        assert!(image.has_subscription(first));
+        assert!(!image.has_subscription(second));
+
+        drop(conductor);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

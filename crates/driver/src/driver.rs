@@ -95,8 +95,12 @@ impl MediaDriver {
         // Hand received SETUP/DATA frames to the conductor for image creation + reassembly.
         let mut dispatch_work = 0;
         for frame in self.receiver.take_received_frames() {
-            self.conductor
-                .on_received_frame(&frame.bytes, frame.source, now_ns)?;
+            self.conductor.on_received_frame_for_channel(
+                &frame.bytes,
+                frame.source,
+                now_ns,
+                Some(&frame.channel),
+            )?;
             dispatch_work += 1;
         }
 
