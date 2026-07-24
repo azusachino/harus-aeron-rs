@@ -14,6 +14,7 @@ pub mod error;
 pub mod flow_control;
 pub mod loss_detector;
 pub mod media;
+pub mod multicast_flow_control;
 pub mod network_publication;
 pub mod publication_image;
 pub mod publication_params;
