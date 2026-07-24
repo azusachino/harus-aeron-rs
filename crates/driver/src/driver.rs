@@ -91,7 +91,7 @@ impl MediaDriver {
             self.sender.remove_network_publication(registration_id);
         }
         let sender_work = self.sender.do_work(now_ns)?;
-        let receiver_work = self.receiver.do_work()?;
+        let receiver_work = self.receiver.do_work_at(now_ns)?;
         // Hand received SETUP/DATA frames to the conductor for image creation + reassembly.
         let mut dispatch_work = 0;
         for frame in self.receiver.take_received_frames() {

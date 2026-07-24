@@ -15,6 +15,9 @@ use agrona::AtomicBuffer;
 use crate::error::Result;
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 
+/// Matches vendored `Configuration.STATUS_MESSAGE_TIMEOUT_DEFAULT_NS`.
+const STATUS_MESSAGE_TIMEOUT_NS: i64 = 200_000_000;
+
 pub struct Receiver {
     receive_channel_endpoints: Vec<ReceiveChannelEndpoint>,
     /// Frames drained off the wire this cycle, handed to the conductor with their source.
@@ -31,6 +34,7 @@ struct ExpectedPosition {
     term_offset: i32,
     term_length: i32,
     receiver_window_length: i32,
+    last_status_ns: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,6 +102,15 @@ impl Receiver {
     }
 
     pub fn do_work(&mut self) -> Result<usize> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as i64)
+            .unwrap_or(0);
+        self.do_work_at(now_ns)
+    }
+
+    /// Run one receive duty cycle using the driver's shared clock.
+    pub fn do_work_at(&mut self, now_ns: i64) -> Result<usize> {
         // Drain every receive endpoint's socket; the conductor turns SETUP/DATA frames into
         // images and reassembled term data.
         let mut buffer = [0u8; 2048];
@@ -108,7 +121,7 @@ impl Receiver {
                 .recv_from(&mut buffer)
             {
                 let frame = buffer[..len].to_vec();
-                let receiver_status = self.handle_frame(endpoint_index, &frame, src)?;
+                let receiver_status = self.handle_frame(endpoint_index, &frame, src, now_ns)?;
                 self.received_frames.push(ReceivedFrame {
                     bytes: frame,
                     source: src,
@@ -124,6 +137,7 @@ impl Receiver {
                 count += 1;
             }
         }
+        count += self.send_periodic_status_messages(now_ns)?;
         Ok(count)
     }
 
@@ -132,6 +146,7 @@ impl Receiver {
         endpoint_index: usize,
         bytes: &[u8],
         source: SocketAddr,
+        now_ns: i64,
     ) -> Result<Option<ReceiverStatus>> {
         if bytes.len() < DATA_HEADER_LENGTH {
             return Ok(None);
@@ -163,6 +178,7 @@ impl Receiver {
                         term_offset: setup.term_offset(),
                         term_length: setup.term_length(),
                         receiver_window_length: window,
+                        last_status_ns: now_ns,
                     });
                 self.receive_channel_endpoints[endpoint_index].send_status_message(
                     setup.session_id(),
@@ -172,6 +188,14 @@ impl Receiver {
                     window,
                     source,
                 )?;
+                if let Some(expected) = self.expected_positions.get_mut(&(
+                    endpoint_index,
+                    setup.session_id(),
+                    setup.stream_id(),
+                    source,
+                )) {
+                    expected.last_status_ns = now_ns;
+                }
                 Ok(self
                     .expected_positions
                     .get(&(
@@ -187,7 +211,7 @@ impl Receiver {
                     }))
             }
             HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
-                let status = self.handle_data_frames(endpoint_index, bytes, source)?;
+                let status = self.handle_data_frames(endpoint_index, bytes, source, now_ns)?;
                 Ok(status)
             }
             _ => Ok(None),
@@ -199,6 +223,7 @@ impl Receiver {
         endpoint_index: usize,
         bytes: &[u8],
         source: SocketAddr,
+        now_ns: i64,
     ) -> Result<Option<ReceiverStatus>> {
         let mut packet_offset = 0usize;
         let mut status_key = None;
@@ -248,6 +273,7 @@ impl Receiver {
                     term_offset: data.term_offset(),
                     term_length: 0,
                     receiver_window_length: 0,
+                    last_status_ns: 0,
                 });
             let expected_term = expected.term_id;
             let expected_offset = expected.term_offset;
@@ -286,6 +312,7 @@ impl Receiver {
                         expected.receiver_window_length,
                         source,
                     )?;
+                    expected.last_status_ns = now_ns;
                 }
             }
             packet_offset += aligned_length;
@@ -300,6 +327,55 @@ impl Receiver {
                     receiver_window_length: expected.receiver_window_length,
                 })
         }))
+    }
+
+    fn send_periodic_status_messages(&mut self, now_ns: i64) -> Result<usize> {
+        let mut due = Vec::new();
+        for (&(endpoint_index, session_id, stream_id, source), expected) in &self.expected_positions
+        {
+            if expected.receiver_window_length > 0
+                && now_ns.saturating_sub(expected.last_status_ns) >= STATUS_MESSAGE_TIMEOUT_NS
+            {
+                due.push((
+                    endpoint_index,
+                    session_id,
+                    stream_id,
+                    expected.term_id,
+                    expected.term_offset,
+                    expected.receiver_window_length,
+                    source,
+                ));
+            }
+        }
+
+        for (
+            endpoint_index,
+            session_id,
+            stream_id,
+            term_id,
+            term_offset,
+            receiver_window_length,
+            source,
+        ) in &due
+        {
+            self.receive_channel_endpoints[*endpoint_index].send_status_message(
+                *session_id,
+                *stream_id,
+                *term_id,
+                *term_offset,
+                *receiver_window_length,
+                *source,
+            )?;
+            if let Some(expected) = self.expected_positions.get_mut(&(
+                *endpoint_index,
+                *session_id,
+                *stream_id,
+                *source,
+            )) {
+                expected.last_status_ns = now_ns;
+            }
+        }
+        Ok(due.len())
     }
 
     /// Take the frames received since the last call for conductor dispatch.
@@ -335,7 +411,8 @@ mod tests {
     use super::*;
     use crate::media::udp_channel::UdpChannel;
     use crate::media::udp_channel_transport::UdpChannelTransport;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+    use std::time::Duration;
 
     #[test]
     fn should_add_receive_channel_endpoint_and_do_work() {
@@ -361,5 +438,46 @@ mod tests {
         assert!(receiver.remove_receive_channel_endpoint("aeron:udp?endpoint=localhost:0"));
         assert!(receiver.receive_channel_endpoints().is_empty());
         assert!(!receiver.remove_receive_channel_endpoint("aeron:udp?endpoint=localhost:0"));
+    }
+
+    #[test]
+    fn should_refresh_status_after_source_timeout() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        let peer = UdpSocket::bind(bind_addr).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let source = peer.local_addr().unwrap();
+
+        let mut receiver = Receiver::new();
+        receiver.add_receive_channel_endpoint(ReceiveChannelEndpoint::new(channel, transport));
+        receiver.expected_positions.insert(
+            (0, 7, 11, source),
+            ExpectedPosition {
+                term_id: 3,
+                term_offset: 128,
+                term_length: 64 * 1024,
+                receiver_window_length: 32 * 1024,
+                last_status_ns: 0,
+            },
+        );
+
+        assert_eq!(
+            receiver
+                .send_periodic_status_messages(STATUS_MESSAGE_TIMEOUT_NS)
+                .unwrap(),
+            1
+        );
+        let mut status = [0u8; 256];
+        let (length, _) = peer.recv_from(&mut status).unwrap();
+        assert!(length > 0);
+        assert_eq!(
+            receiver.expected_positions[&(0, 7, 11, source)].last_status_ns,
+            200_000_000
+        );
+        assert_eq!(
+            receiver.send_periodic_status_messages(200_000_001).unwrap(),
+            0
+        );
     }
 }

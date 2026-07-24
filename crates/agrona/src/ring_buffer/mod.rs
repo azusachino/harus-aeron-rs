@@ -31,11 +31,12 @@ pub const CONSUMER_HEARTBEAT_OFFSET: usize = COUNTER_PADDING * 5;
 /// padding is part of the shared-buffer geometry, so omitting it makes a CnC ring buffer
 /// unreadable by the Java client even though the Rust producer/consumer can still wrap it.
 ///
-/// Reference: Agrona 2.4.0 (`vendor/aeron/gradle/libs.versions.toml`), source file
+/// Source of truth: Agrona 2.4.0, selected by `vendor/aeron/gradle/libs.versions.toml`,
 /// `org/agrona/concurrent/ringbuffer/RingBufferDescriptor.java`:
 /// <https://raw.githubusercontent.com/aeron-io/agrona/2.4.0/agrona/src/main/java/org/agrona/concurrent/ringbuffer/RingBufferDescriptor.java>.
-/// Its static layout is tail=128, head-cache=256, head=384, correlation=512,
-/// heartbeat=640, trailer=768.
+/// The vendored Aeron tree does not include Agrona's Java source; the JAR is runtime-only and
+/// is not used to derive these offsets. The source defines tail=128, head-cache=256, head=384,
+/// correlation=512, heartbeat=640, trailer=768.
 pub const TRAILER_LENGTH: usize = COUNTER_PADDING * 6;
 
 /// Length of the record header (4 bytes length + 4 bytes type ID).
