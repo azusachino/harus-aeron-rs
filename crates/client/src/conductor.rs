@@ -355,14 +355,12 @@ impl<'a> ClientConductor<'a> {
         log_file_name: &str,
         exclusive: bool,
     ) -> Result<()> {
-        let pending = self
-            .pending_publications
-            .remove(&correlation_id)
-            .ok_or_else(|| {
-                AeronError::IllegalState(format!(
-                    "unknown publication correlation {correlation_id}"
-                ))
-            })?;
+        // The to-clients broadcast is shared by every client; ignore a publication-ready
+        // event for a correlation this client never registered (it belongs to another client).
+        let pending = match self.pending_publications.remove(&correlation_id) {
+            Some(pending) => pending,
+            None => return Ok(()),
+        };
         if pending.exclusive != exclusive {
             return Err(AeronError::IllegalState(format!(
                 "publication mode mismatch for correlation {correlation_id}"
@@ -406,14 +404,11 @@ impl<'a> ClientConductor<'a> {
         correlation_id: i64,
         channel_status_counter_id: i32,
     ) -> Result<()> {
-        let pending = self
-            .pending_subscriptions
-            .remove(&correlation_id)
-            .ok_or_else(|| {
-                AeronError::IllegalState(format!(
-                    "unknown subscription correlation {correlation_id}"
-                ))
-            })?;
+        // Shared broadcast: ignore a subscription-ready event for another client's correlation.
+        let pending = match self.pending_subscriptions.remove(&correlation_id) {
+            Some(pending) => pending,
+            None => return Ok(()),
+        };
         let mut subscription =
             Subscription::new(correlation_id, pending.stream_id, pending.channel);
         subscription.set_channel_status_counter_id(channel_status_counter_id);
@@ -665,12 +660,15 @@ impl<'a> ClientConductor<'a> {
     }
 
     fn load_log_buffers(&self, name: &str) -> Result<LogBuffers> {
+        // A registered buffer (unit tests / in-memory scenarios) wins; otherwise map the
+        // driver-named log file `MAP_SHARED` so publisher writes are visible to this
+        // subscriber's reads (real cross-process/IPC log sharing, not a private copy).
         let buffers = self
             .log_buffers
             .get(name)
             .cloned()
             .map(Ok)
-            .unwrap_or_else(|| LogBuffers::from_file(name))?;
+            .unwrap_or_else(|| LogBuffers::map_existing(name))?;
         if self.pre_touch_mapped_memory {
             buffers.pre_touch();
         }

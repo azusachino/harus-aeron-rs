@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use agrona::AtomicBuffer;
 use agrona::BroadcastTransmitter;
@@ -26,7 +28,10 @@ use aeron_client::driver_proxy::{
     REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION,
 };
 use aeron_client::log_buffers::LogBuffers;
-use aeron_client::logbuffer::{set_initial_term_id, set_mtu_length};
+use aeron_client::logbuffer::{set_initial_term_id, set_mtu_length, store_default_frame_header};
+use aeron_client::protocol::{
+    CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA,
+};
 
 use crate::configuration::Configuration;
 use crate::error::{DriverError, Result};
@@ -117,6 +122,10 @@ pub struct DriverConductor {
     /// Registration id -> shared log buffer handle, kept mapped for the publication's life so
     /// that matching IPC images can hand subscribers the very same log (zero-copy IPC).
     log_buffers: HashMap<i64, LogBuffers>,
+    /// Counter id -> position counter (publication limit / subscriber position). These stand
+    /// in for the shared CnC counters region (not yet laid out); an in-process client shares
+    /// these `Arc`s via [`DriverConductor::counters`] until that region lands.
+    counters: HashMap<i32, Arc<AtomicI64>>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
 }
@@ -143,6 +152,7 @@ impl DriverConductor {
             publications: HashMap::new(),
             subscriptions: HashMap::new(),
             log_buffers: HashMap::new(),
+            counters: HashMap::new(),
             clients: HashMap::new(),
         })
     }
@@ -209,7 +219,9 @@ impl DriverConductor {
                 correlation_id,
                 registration_id,
             } => {
-                self.publications.remove(&registration_id);
+                if let Some(entry) = self.publications.remove(&registration_id) {
+                    self.counters.remove(&entry.publication_limit_counter_id);
+                }
                 self.log_buffers.remove(&registration_id);
                 self.on_operation_success(correlation_id)
             }
@@ -265,9 +277,14 @@ impl DriverConductor {
         let is_ipc = is_ipc_channel(&channel);
         let session_id = self.next_session_id();
         let publication_limit_counter_id = self.next_counter_id();
+        // Publication limit starts at 0 (no window); it opens to the flow-control window when
+        // a subscriber connects (see `on_available_image`).
+        self.counters
+            .insert(publication_limit_counter_id, Arc::new(AtomicI64::new(0)));
 
         let log_file_name = if is_ipc {
-            let (name, buffers) = self.allocate_ipc_log_buffers(registration_id)?;
+            let (name, buffers) =
+                self.allocate_ipc_log_buffers(registration_id, session_id, stream_id)?;
             self.log_buffers.insert(registration_id, buffers);
             Some(name)
         } else {
@@ -300,14 +317,24 @@ impl DriverConductor {
                 &log_file_name,
                 exclusive,
             )?;
-            self.link_ipc_publication(registration_id, stream_id, session_id, &log_file_name)?;
+            self.link_ipc_publication(
+                stream_id,
+                session_id,
+                publication_limit_counter_id,
+                &log_file_name,
+            )?;
         }
         Ok(())
     }
 
     /// Create and map a fresh IPC log file under `aeron_dir/publications/`, initialising its
     /// metadata so publishers and subscribers see a valid, shared log.
-    fn allocate_ipc_log_buffers(&self, registration_id: i64) -> Result<(String, LogBuffers)> {
+    fn allocate_ipc_log_buffers(
+        &self,
+        registration_id: i64,
+        session_id: i32,
+        stream_id: i32,
+    ) -> Result<(String, LogBuffers)> {
         let dir = self.aeron_dir.join("publications");
         std::fs::create_dir_all(&dir)
             .map_err(|e| DriverError::IllegalState(format!("create publications dir: {e}")))?;
@@ -323,6 +350,17 @@ impl DriverConductor {
         set_initial_term_id(&meta, 0);
         set_mtu_length(&meta, self.configuration.ipc_mtu_length as i32);
 
+        // Seed the default frame header (DATA type + session/stream ids) so the publisher's
+        // HeaderWriter stamps real data frames — without this every frame reads as padding.
+        let mut header_bytes = [0u8; DATA_HEADER_LENGTH];
+        let header_buf = AtomicBuffer::new(&mut header_bytes);
+        let header = DataHeaderFlyweight::new(header_buf);
+        header.set_version(CURRENT_VERSION);
+        header.set_header_type(HDR_TYPE_DATA);
+        header.set_session_id(session_id);
+        header.set_stream_id(stream_id);
+        store_default_frame_header(&meta, &header_buf);
+
         let name = path.to_string_lossy().into_owned();
         Ok((name, buffers))
     }
@@ -333,17 +371,22 @@ impl DriverConductor {
         subscription_registration_id: i64,
         stream_id: i32,
     ) -> Result<()> {
-        let matches: Vec<(i32, String)> = self
+        let matches: Vec<(i32, i32, String)> = self
             .publications
             .values()
             .filter(|p| p.is_ipc && p.stream_id == stream_id)
-            .filter_map(|p| p.log_file_name.clone().map(|name| (p.session_id, name)))
+            .filter_map(|p| {
+                p.log_file_name
+                    .clone()
+                    .map(|name| (p.session_id, p.publication_limit_counter_id, name))
+            })
             .collect();
-        for (session_id, log_file_name) in matches {
+        for (session_id, publication_limit_counter_id, log_file_name) in matches {
             self.on_available_image(
                 session_id,
                 stream_id,
                 subscription_registration_id,
+                publication_limit_counter_id,
                 &log_file_name,
             )?;
         }
@@ -353,9 +396,9 @@ impl DriverConductor {
     /// Connect a newly added IPC publication to every matching existing IPC subscription.
     fn link_ipc_publication(
         &mut self,
-        _registration_id: i64,
         stream_id: i32,
         session_id: i32,
+        publication_limit_counter_id: i32,
         log_file_name: &str,
     ) -> Result<()> {
         let subscribers: Vec<i64> = self
@@ -369,10 +412,21 @@ impl DriverConductor {
                 session_id,
                 stream_id,
                 subscription_registration_id,
+                publication_limit_counter_id,
                 log_file_name,
             )?;
         }
         Ok(())
+    }
+
+    /// Half a term is the initial flow-control window a subscriber opens for its publication.
+    fn initial_window(&self) -> i64 {
+        (self.configuration.ipc_term_buffer_length / 2) as i64
+    }
+
+    /// Publication limit counter for the given id, shared with an in-process client.
+    pub fn counters(&self) -> &HashMap<i32, Arc<AtomicI64>> {
+        &self.counters
     }
 
     fn touch_client(&mut self, client_id: i64, now_ns: i64) {
@@ -388,7 +442,9 @@ impl DriverConductor {
             .map(|p| p.registration_id)
             .collect();
         for registration_id in removed {
-            self.publications.remove(&registration_id);
+            if let Some(entry) = self.publications.remove(&registration_id) {
+                self.counters.remove(&entry.publication_limit_counter_id);
+            }
             self.log_buffers.remove(&registration_id);
         }
         self.subscriptions.retain(|_, s| s.client_id != client_id);
@@ -447,10 +503,18 @@ impl DriverConductor {
         session_id: i32,
         stream_id: i32,
         subscription_registration_id: i64,
+        publication_limit_counter_id: i32,
         log_file_name: &str,
     ) -> Result<()> {
         let correlation_id = self.next_id();
         let subscriber_position_id = self.next_counter_id();
+        // The subscriber owns its position counter (starts at 0); the driver opens the
+        // publication's limit to the initial window so the publisher can offer immediately.
+        self.counters
+            .insert(subscriber_position_id, Arc::new(AtomicI64::new(0)));
+        if let Some(limit) = self.counters.get(&publication_limit_counter_id) {
+            limit.store(self.initial_window(), Ordering::Release);
+        }
         // 28-byte fixed body + length-prefixed log file name + length-prefixed source identity.
         let name_field = 4 + align4(log_file_name.len());
         let source_field = 4 + IPC_SOURCE_IDENTITY.len();

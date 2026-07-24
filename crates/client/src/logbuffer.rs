@@ -743,6 +743,23 @@ impl TermReader {
 /// Offset at which default frame headers begin in the metadata buffer.
 pub const LOG_DEFAULT_FRAME_HEADER_OFFSET: usize = 640;
 
+/// Offset of the default-frame-header length field in the log metadata.
+pub const LOG_DEFAULT_FRAME_HEADER_LENGTH_OFFSET: usize = 524;
+
+/// Store the default frame-header template into the log metadata and record its length.
+///
+/// The publication's `HeaderWriter` copies this template into every frame it appends, so the
+/// driver seeds it with the DATA type plus session/stream ids when it creates a log.
+pub fn store_default_frame_header(log_metadata_buffer: &AtomicBuffer, header: &AtomicBuffer) {
+    log_metadata_buffer.put_i32(LOG_DEFAULT_FRAME_HEADER_LENGTH_OFFSET, HEADER_LENGTH);
+    log_metadata_buffer.put_bytes_from(
+        LOG_DEFAULT_FRAME_HEADER_OFFSET,
+        header,
+        0,
+        HEADER_LENGTH as usize,
+    );
+}
+
 /// Store/apply the default header template to a term buffer at `term_offset`.
 pub fn apply_default_header(
     log_metadata_buffer: &AtomicBuffer,
