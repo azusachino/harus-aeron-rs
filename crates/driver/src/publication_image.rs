@@ -42,6 +42,8 @@ pub struct PublicationImage {
     log_buffers: LogBuffers,
     log_file_name: String,
     source_addr: SocketAddr,
+    subscription_registration_id: i64,
+    correlation_id: i64,
     hwm_position: i64,
     rebuild_position: i64,
     pending_loss: Option<LossRange>,
@@ -50,6 +52,7 @@ pub struct PublicationImage {
 }
 
 impl PublicationImage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: i32,
         stream_id: i32,
@@ -57,6 +60,8 @@ impl PublicationImage {
         log_buffers: LogBuffers,
         log_file_name: String,
         source_addr: SocketAddr,
+        subscription_registration_id: i64,
+        correlation_id: i64,
     ) -> Self {
         let term_length = log_buffers.term_length();
         Self {
@@ -68,6 +73,8 @@ impl PublicationImage {
             log_buffers,
             log_file_name,
             source_addr,
+            subscription_registration_id,
+            correlation_id,
             hwm_position: 0,
             rebuild_position: 0,
             pending_loss: None,
@@ -90,6 +97,18 @@ impl PublicationImage {
 
     pub fn source_addr(&self) -> SocketAddr {
         self.source_addr
+    }
+
+    pub fn subscription_registration_id(&self) -> i64 {
+        self.subscription_registration_id
+    }
+
+    pub fn correlation_id(&self) -> i64 {
+        self.correlation_id
+    }
+
+    pub fn touch(&mut self, now_ns: i64) {
+        self.last_packet_ns = now_ns;
     }
 
     pub fn state(&self) -> PublicationImageState {
@@ -275,6 +294,8 @@ mod tests {
             buffers,
             path.to_string_lossy().into_owned(),
             source,
+            11,
+            12,
         );
 
         let mut second = data_frame(1, 64, 0x22);

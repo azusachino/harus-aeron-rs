@@ -21,8 +21,8 @@ use aeron_client::command::{
 };
 use aeron_client::driver_events::{
     ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE, ON_EXCLUSIVE_PUBLICATION_READY,
-    ON_OPERATION_SUCCESS, ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, OperationSucceededFlyweight,
-    PublicationBuffersReadyFlyweight, SubscriptionReadyFlyweight,
+    ON_OPERATION_SUCCESS, ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_IMAGE,
+    OperationSucceededFlyweight, PublicationBuffersReadyFlyweight, SubscriptionReadyFlyweight,
 };
 use aeron_client::driver_proxy::{
     ADD_EXCLUSIVE_PUBLICATION, ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE, CLIENT_KEEPALIVE,
@@ -52,6 +52,8 @@ const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
 
 /// Source identity reported for network images.
 const UDP_SOURCE_IDENTITY: &str = "aeron:udp";
+
+const IMAGE_LIVENESS_TIMEOUT_NS: i64 = 10_000_000_000;
 
 /// Returns `true` for an IPC channel (`aeron:ipc`, optionally with parameters).
 fn is_ipc_channel(channel: &str) -> bool {
@@ -211,6 +213,7 @@ impl DriverConductor {
             self.dispatch(command, now_ns)?;
         }
 
+        work += self.sweep_inactive_images(now_ns)?;
         work += self.sweep_timed_out_clients(now_ns);
         Ok(work)
     }
@@ -468,7 +471,7 @@ impl DriverConductor {
         let buf = AtomicBuffer::new(&mut bytes);
         let frame_type = buf.get_i16(TYPE_FIELD_OFFSET) as u16;
         match frame_type {
-            HDR_TYPE_SETUP => self.on_setup(&buf, source),
+            HDR_TYPE_SETUP => self.on_setup(&buf, source, now_ns),
             HDR_TYPE_DATA => {
                 self.on_data(&buf, frame.len(), source, now_ns);
                 Ok(())
@@ -478,7 +481,7 @@ impl DriverConductor {
     }
 
     /// A SETUP frame: allocate the image log for a matching UDP subscription and announce it.
-    fn on_setup(&mut self, buf: &AtomicBuffer, source: SocketAddr) -> Result<()> {
+    fn on_setup(&mut self, buf: &AtomicBuffer, source: SocketAddr, now_ns: i64) -> Result<()> {
         let setup = SetupFlyweight::new(*buf);
         let session_id = setup.session_id();
         let stream_id = setup.stream_id();
@@ -507,24 +510,27 @@ impl DriverConductor {
             mtu_length,
         )?;
 
-        self.images.insert(
-            image_key,
-            PublicationImage::new(
-                session_id,
-                stream_id,
-                initial_term_id,
-                buffers,
-                log_file_name.clone(),
-                source,
-            ),
-        );
-        self.on_available_image(
+        let correlation_id = self.on_available_image(
             session_id,
             stream_id,
             subscription_registration_id,
             &log_file_name,
             UDP_SOURCE_IDENTITY,
-        )
+        )?;
+        let mut image = PublicationImage::new(
+            session_id,
+            stream_id,
+            initial_term_id,
+            buffers,
+            log_file_name,
+            source,
+            subscription_registration_id,
+            correlation_id,
+        );
+        image.touch(now_ns);
+        image.activate();
+        self.images.insert(image_key, image);
+        Ok(())
     }
 
     /// A DATA frame (possibly several concatenated frames): rebuild each into its image.
@@ -735,6 +741,28 @@ impl DriverConductor {
         expired.len()
     }
 
+    fn sweep_inactive_images(&mut self, now_ns: i64) -> Result<usize> {
+        let expired: Vec<(i32, i32, SocketAddr)> = self
+            .images
+            .iter()
+            .filter(|(_, image)| !image.is_connected(now_ns, IMAGE_LIVENESS_TIMEOUT_NS))
+            .map(|(key, _)| *key)
+            .collect();
+
+        let mut work = 0;
+        for key in expired {
+            if let Some(mut image) = self.images.remove(&key) {
+                image.deactivate();
+                self.on_unavailable_image(
+                    image.correlation_id(),
+                    image.subscription_registration_id(),
+                )?;
+                work += 1;
+            }
+        }
+        Ok(work)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn on_publication_ready(
         &mut self,
@@ -773,7 +801,7 @@ impl DriverConductor {
         subscription_registration_id: i64,
         log_file_name: &str,
         source_identity: &str,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let correlation_id = self.next_id();
         let subscriber_position_id = self.next_counter_id();
         // The subscriber owns its position counter (starts at 0).
@@ -793,7 +821,20 @@ impl DriverConductor {
         fw.set_subscriber_position_id(subscriber_position_id);
         fw.set_log_file_name(log_file_name);
         fw.set_source_identity(source_identity);
-        self.transmit(ON_AVAILABLE_IMAGE, &buf, len)
+        self.transmit(ON_AVAILABLE_IMAGE, &buf, len)?;
+        Ok(correlation_id)
+    }
+
+    fn on_unavailable_image(
+        &self,
+        correlation_id: i64,
+        subscription_registration_id: i64,
+    ) -> Result<()> {
+        let mut scratch = [0u8; 16];
+        let buf = AtomicBuffer::new(&mut scratch);
+        buf.put_i64(0, correlation_id);
+        buf.put_i64(8, subscription_registration_id);
+        self.transmit(ON_UNAVAILABLE_IMAGE, &buf, 16)
     }
 
     fn on_subscription_ready(&self, correlation_id: i64) -> Result<()> {
@@ -1068,6 +1109,76 @@ mod tests {
             conductor.publications().len(),
             0,
             "timed-out client's resources removed"
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn expires_network_image_and_emits_unavailable_image() {
+        let (cnc, path) = temp_cnc("image-liveness");
+        let dir = temp_dir("image-liveness");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+        let subscription_registration = client
+            .add_subscription("aeron:udp?endpoint=127.0.0.1:0", 7)
+            .unwrap();
+        conductor.do_work(1_000).unwrap();
+        let _ = conductor.take_new_receive_endpoints();
+
+        let source = SocketAddr::from(([127, 0, 0, 1], 9002));
+        let mut setup_bytes = vec![0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_SETUP);
+        setup
+            .set_session_id(7)
+            .set_stream_id(7)
+            .set_initial_term_id(0)
+            .set_active_term_id(0)
+            .set_term_offset(0)
+            .set_term_length(aeron_client::logbuffer::TERM_MIN_LENGTH)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+        conductor
+            .on_received_frame(&setup_bytes, source, 1_000)
+            .unwrap();
+
+        let mut available_correlation = 0i64;
+        while events
+            .receive_next(|msg_type, buf, offset, _| {
+                if msg_type == ON_AVAILABLE_IMAGE {
+                    available_correlation = buf.get_i64(offset);
+                }
+            })
+            .unwrap()
+        {}
+        assert_ne!(available_correlation, 0);
+
+        client.client_keepalive().unwrap();
+        conductor.do_work(5_000_000_000).unwrap();
+        conductor
+            .do_work(IMAGE_LIVENESS_TIMEOUT_NS + 2_000)
+            .unwrap();
+
+        let mut unavailable = None;
+        while events
+            .receive_next(|msg_type, buf, offset, _| {
+                if msg_type == ON_UNAVAILABLE_IMAGE {
+                    unavailable = Some((buf.get_i64(offset), buf.get_i64(offset + 8)));
+                }
+            })
+            .unwrap()
+        {}
+        assert_eq!(
+            unavailable,
+            Some((available_correlation, subscription_registration))
         );
 
         drop(conductor);
