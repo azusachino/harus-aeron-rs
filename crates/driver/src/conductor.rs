@@ -31,13 +31,14 @@ use aeron_client::counters::{
 use aeron_client::driver_events::{
     ClientTimeoutFlyweight, ErrorResponseFlyweight, ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE,
     ON_CLIENT_TIMEOUT, ON_COUNTER_READY, ON_ERROR, ON_EXCLUSIVE_PUBLICATION_READY,
-    ON_OPERATION_SUCCESS, ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER,
-    ON_UNAVAILABLE_IMAGE, OperationSucceededFlyweight, PublicationBuffersReadyFlyweight,
-    SubscriptionReadyFlyweight,
+    ON_NEXT_AVAILABLE_SESSION_ID, ON_OPERATION_SUCCESS, ON_PUBLICATION_READY,
+    ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER, ON_UNAVAILABLE_IMAGE,
+    OperationSucceededFlyweight, PublicationBuffersReadyFlyweight, SubscriptionReadyFlyweight,
 };
 use aeron_client::driver_proxy::{
     ADD_COUNTER, ADD_EXCLUSIVE_PUBLICATION, ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE,
-    CLIENT_KEEPALIVE, REMOVE_COUNTER, REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION, TERMINATE_DRIVER,
+    CLIENT_KEEPALIVE, GET_NEXT_AVAILABLE_SESSION_ID, REMOVE_COUNTER, REMOVE_PUBLICATION,
+    REMOVE_SUBSCRIPTION, TERMINATE_DRIVER,
 };
 use aeron_client::log_buffers::LogBuffers;
 use aeron_client::logbuffer::{
@@ -255,6 +256,11 @@ enum Command {
         correlation_id: i64,
         registration_id: i64,
     },
+    GetNextAvailableSessionId {
+        client_id: i64,
+        correlation_id: i64,
+        stream_id: i32,
+    },
     Keepalive {
         client_id: i64,
     },
@@ -280,6 +286,7 @@ impl Command {
             | Self::RemovePublication { correlation_id, .. }
             | Self::RemoveSubscription { correlation_id, .. }
             | Self::RemoveCounter { correlation_id, .. }
+            | Self::GetNextAvailableSessionId { correlation_id, .. }
             | Self::TerminateDriver { correlation_id, .. }
             | Self::Unknown { correlation_id, .. } => Some(*correlation_id),
             Self::Keepalive { .. } | Self::ClientClose { .. } => None,
@@ -567,6 +574,15 @@ impl DriverConductor {
                 } else {
                     self.on_operation_success(correlation_id)
                 }
+            }
+            Command::GetNextAvailableSessionId {
+                client_id,
+                correlation_id,
+                stream_id: _stream_id,
+            } => {
+                self.touch_client(client_id, now_ns);
+                let session_id = self.next_session_id();
+                self.on_next_available_session_id(correlation_id, session_id)
             }
             Command::Keepalive { client_id } => {
                 self.touch_client(client_id, now_ns);
@@ -1809,6 +1825,15 @@ impl DriverConductor {
         self.transmit_counter_update(ON_UNAVAILABLE_COUNTER, correlation_id, counter_id)
     }
 
+    fn on_next_available_session_id(&self, correlation_id: i64, session_id: i32) -> Result<()> {
+        let mut scratch = [0u8; 12];
+        let len = scratch.len();
+        let buf = AtomicBuffer::new(&mut scratch);
+        buf.put_i64(0, correlation_id);
+        buf.put_i32(8, session_id);
+        self.transmit(ON_NEXT_AVAILABLE_SESSION_ID, &buf, len)
+    }
+
     fn transmit_counter_update(
         &self,
         message_type: i32,
@@ -1944,6 +1969,17 @@ fn decode_command(
                 registration_id: fw.registration_id(),
             })
         }
+        GET_NEXT_AVAILABLE_SESSION_ID
+            if length >= aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH + 4 =>
+        {
+            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
+            Some(Command::GetNextAvailableSessionId {
+                client_id: fw.client_id(),
+                correlation_id: fw.correlation_id(),
+                stream_id: buffer
+                    .get_i32(offset + aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH),
+            })
+        }
         CLIENT_KEEPALIVE => {
             let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
             Some(Command::Keepalive {
@@ -1995,8 +2031,9 @@ mod tests {
         DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH,
     };
     use aeron_client::driver_events::{
-        CounterUpdateFlyweight, ErrorResponseFlyweight, ON_CLIENT_TIMEOUT, ON_COUNTER_READY,
-        ON_ERROR, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER,
+        CounterUpdateFlyweight, ErrorResponseFlyweight, NextAvailableSessionIdFlyweight,
+        ON_CLIENT_TIMEOUT, ON_COUNTER_READY, ON_ERROR, ON_NEXT_AVAILABLE_SESSION_ID,
+        ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER,
     };
     use aeron_client::driver_proxy::DriverProxy;
     use agrona::BroadcastReceiver;
@@ -2170,6 +2207,37 @@ mod tests {
         assert_ne!(remove_correlation, unavailable_correlation);
         assert!(!conductor.counters().contains_key(&counter_id));
         assert_eq!(metadata.get_i32(metadata_offset), 0);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn returns_next_available_session_ids_through_the_cnc() {
+        let (cnc, path) = temp_cnc("next-session-id");
+        let dir = temp_dir("next-session-id");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+
+        let first_correlation = client.get_next_available_session_id(7).unwrap();
+        let second_correlation = client.get_next_available_session_id(8).unwrap();
+        assert_eq!(conductor.do_work(1_000).unwrap(), 2);
+
+        let mut responses = Vec::new();
+        while events
+            .receive_next(|msg_type, buf, offset, _len| {
+                assert_eq!(msg_type, ON_NEXT_AVAILABLE_SESSION_ID);
+                let response = NextAvailableSessionIdFlyweight::wrap(*buf, offset);
+                responses.push((response.correlation_id(), response.next_session_id()));
+            })
+            .unwrap()
+        {}
+        assert_eq!(
+            responses,
+            vec![(first_correlation, 1), (second_correlation, 2)]
+        );
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
