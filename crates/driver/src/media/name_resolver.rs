@@ -92,6 +92,21 @@ pub trait DutyCycleTracker {
     fn measure_and_update(&self, now_ns: i64);
 }
 
+struct Measurement<'a, C: NanoClock, T: DutyCycleTracker> {
+    clock: &'a C,
+    tracker: &'a T,
+}
+
+impl<C, T> Drop for Measurement<'_, C, T>
+where
+    C: NanoClock,
+    T: DutyCycleTracker,
+{
+    fn drop(&mut self) {
+        self.tracker.measure_and_update(self.clock.nano_time());
+    }
+}
+
 /// Decorates a resolver and accounts for the time spent in lookup and resolve calls, including
 /// calls that return an error.
 pub struct TimeTrackingNameResolver<R, C, T> {
@@ -102,6 +117,7 @@ pub struct TimeTrackingNameResolver<R, C, T> {
 
 impl<R, C, T> TimeTrackingNameResolver<R, C, T>
 where
+    R: NameResolver,
     C: NanoClock,
     T: DutyCycleTracker,
 {
@@ -123,10 +139,30 @@ where
     {
         let begin_ns = self.clock.nano_time();
         self.tracker.update(begin_ns);
-        let result = operation(&self.delegate);
-        let end_ns = self.clock.nano_time();
-        self.tracker.measure_and_update(end_ns);
-        result
+        let _measurement = Measurement {
+            clock: &self.clock,
+            tracker: &self.tracker,
+        };
+        operation(&self.delegate)
+    }
+
+    /// Forward resolver lifecycle initialisation to the wrapped resolver.
+    pub fn init(&self) {
+        self.delegate.init();
+    }
+
+    /// Forward periodic resolver work and preserve the delegate's work count.
+    pub fn do_work(&self, now_ms: i64) -> usize {
+        self.delegate.do_work(now_ms)
+    }
+
+    /// Forward shutdown to the wrapped resolver.
+    pub fn close(&mut self) {
+        self.delegate.close();
+    }
+
+    pub fn name(&self) -> String {
+        format!("TimeTracking({})", self.delegate.name())
     }
 }
 
@@ -147,6 +183,22 @@ where
 
     fn lookup(&self, name: &str, uri_param_name: &str, is_re_lookup: bool) -> String {
         self.measure(|delegate| delegate.lookup(name, uri_param_name, is_re_lookup))
+    }
+
+    fn init(&self) {
+        self.delegate.init();
+    }
+
+    fn do_work(&self, now_ms: i64) -> usize {
+        self.delegate.do_work(now_ms)
+    }
+
+    fn name(&self) -> String {
+        format!("TimeTracking({})", self.delegate.name())
+    }
+
+    fn close(&mut self) {
+        self.delegate.close();
     }
 }
 
@@ -212,6 +264,42 @@ mod tests {
         }
     }
 
+    struct LifecycleResolver {
+        events: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl NameResolver for LifecycleResolver {
+        fn resolve(
+            &self,
+            _name: &str,
+            _uri_param_name: &str,
+            _is_re_resolution: bool,
+        ) -> Result<IpAddr> {
+            Ok(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        }
+
+        fn lookup(&self, name: &str, _uri_param_name: &str, _is_re_lookup: bool) -> String {
+            name.to_string()
+        }
+
+        fn init(&self) {
+            self.events.borrow_mut().push("init".to_string());
+        }
+
+        fn do_work(&self, _now_ms: i64) -> usize {
+            self.events.borrow_mut().push("do_work".to_string());
+            7
+        }
+
+        fn name(&self) -> String {
+            "lifecycle".to_string()
+        }
+
+        fn close(&mut self) {
+            self.events.borrow_mut().push("close".to_string());
+        }
+    }
+
     #[test]
     fn time_tracking_measures_lookup_and_resolve() {
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -233,5 +321,63 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         );
         assert_eq!(*events.borrow(), vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn time_tracking_forwards_resolver_lifecycle_and_name() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut resolver = TimeTrackingNameResolver::new(
+            LifecycleResolver {
+                events: events.clone(),
+            },
+            TestClock {
+                values: RefCell::new(Vec::new()),
+            },
+            TestTracker {
+                events: Rc::new(RefCell::new(Vec::new())),
+            },
+        );
+
+        resolver.init();
+        assert_eq!(resolver.do_work(123), 7);
+        assert_eq!(resolver.name(), "TimeTracking(lifecycle)");
+        resolver.close();
+
+        assert_eq!(*events.borrow(), vec!["init", "do_work", "close"]);
+    }
+
+    #[test]
+    fn time_tracking_updates_tracker_when_resolution_panics() {
+        struct PanickingResolver;
+        impl NameResolver for PanickingResolver {
+            fn resolve(
+                &self,
+                _name: &str,
+                _uri_param_name: &str,
+                _is_re_resolution: bool,
+            ) -> Result<IpAddr> {
+                panic!("resolver failure")
+            }
+
+            fn lookup(&self, name: &str, _uri_param_name: &str, _is_re_lookup: bool) -> String {
+                name.to_string()
+            }
+        }
+
+        let tracker_events = Rc::new(RefCell::new(Vec::new()));
+        let resolver = TimeTrackingNameResolver::new(
+            PanickingResolver,
+            TestClock {
+                values: RefCell::new(vec![1, 2]),
+            },
+            TestTracker {
+                events: tracker_events.clone(),
+            },
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = resolver.resolve("panic", "endpoint", false);
+        }));
+        assert!(result.is_err());
+        assert_eq!(*tracker_events.borrow(), vec![1, 2]);
     }
 }

@@ -9,6 +9,22 @@ use crate::error::{DriverError, Result};
 pub trait NameResolver {
     fn resolve(&self, name: &str, uri_param_name: &str, is_re_resolution: bool) -> Result<IpAddr>;
     fn lookup(&self, name: &str, uri_param_name: &str, is_re_lookup: bool) -> String;
+
+    /// Complete resolver construction after the driver has created its shared counters.
+    fn init(&self) {}
+
+    /// Perform periodic resolver work and return the amount of work completed.
+    fn do_work(&self, _now_ms: i64) -> usize {
+        0
+    }
+
+    /// Name used in diagnostics and runtime status.
+    fn name(&self) -> String {
+        std::any::type_name::<Self>().to_string()
+    }
+
+    /// Release resolver-owned resources during driver shutdown.
+    fn close(&mut self) {}
 }
 
 pub struct DefaultNameResolver;

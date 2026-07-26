@@ -124,7 +124,7 @@
 {"layer": "driver", "rust_equivalent": "crates/driver/src/congestion_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/StaticWindowCongestionControlTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/multicast_flow_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TaggedMulticastFlowControlTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/driver.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TerminateDriverTest.java"}
-{"layer": "driver", "rust_equivalent": "crates/driver/src/media/name_resolver.rs::TimeTrackingNameResolver", "status": "in-progress", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TimeTrackingNameResolverTest.java"}
+{"layer": "driver", "rust_equivalent": "crates/driver/src/media/name_resolver.rs::TimeTrackingNameResolver", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TimeTrackingNameResolverTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/media/udp_channel.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/UdpChannelTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/conductor.rs::untethered_ipc_subscription_leaves_flow_control_and_rejoins", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/UntetheredSubscriptionTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/log_factory.rs::FileStoreLogFactory", "status": "in-progress", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/buffer/FileStoreLogFactoryTest.java"}
