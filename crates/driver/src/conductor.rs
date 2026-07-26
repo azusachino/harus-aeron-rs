@@ -2348,8 +2348,35 @@ fn decode_command(
     offset: usize,
     length: usize,
 ) -> Option<Command> {
+    const CORRELATED_HEADER: usize = aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH;
+
+    // Client commands arrive through a shared ring buffer.  Treat their declared record length
+    // as untrusted: the flyweights deliberately provide zero-copy access and therefore do not
+    // perform bounds checks for every field read.
+    let malformed = || {
+        (length >= CORRELATED_HEADER).then(|| {
+            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
+            Command::Unknown {
+                correlation_id: fw.correlation_id(),
+                message_type: msg_type,
+            }
+        })
+    };
+
     match msg_type {
         ADD_PUBLICATION | ADD_EXCLUSIVE_PUBLICATION => {
+            if length < aeron_client::command::PUB_CHANNEL_OFFSET {
+                return malformed();
+            }
+            let channel_length =
+                buffer.get_i32(offset + aeron_client::command::PUB_CHANNEL_LENGTH_OFFSET);
+            if channel_length < 0
+                || aeron_client::command::PUB_CHANNEL_OFFSET
+                    .checked_add(channel_length as usize)
+                    .is_none_or(|end| end > length)
+            {
+                return malformed();
+            }
             let fw = PublicationMessageFlyweight::new(*buffer, offset);
             Some(Command::AddPublication {
                 client_id: fw.client_id(),
@@ -2360,6 +2387,18 @@ fn decode_command(
             })
         }
         ADD_SUBSCRIPTION => {
+            if length < aeron_client::command::SUB_CHANNEL_OFFSET {
+                return malformed();
+            }
+            let channel_length =
+                buffer.get_i32(offset + aeron_client::command::SUB_CHANNEL_LENGTH_OFFSET);
+            if channel_length < 0
+                || aeron_client::command::SUB_CHANNEL_OFFSET
+                    .checked_add(channel_length as usize)
+                    .is_none_or(|end| end > length)
+            {
+                return malformed();
+            }
             let fw = SubscriptionMessageFlyweight::new(*buffer, offset);
             Some(Command::AddSubscription {
                 client_id: fw.client_id(),
@@ -2370,19 +2409,39 @@ fn decode_command(
         }
         ADD_COUNTER if length >= aeron_client::command::KEY_BUFFER_OFFSET => {
             let fw = CounterMessageFlyweight::new(*buffer, offset);
-            let key_length = fw.key_buffer_length();
-            let label_offset = fw.label_buffer_offset();
-            if label_offset + 4 > length {
-                return None;
+            let key_length_raw = buffer.get_i32(offset + aeron_client::command::KEY_LENGTH_OFFSET);
+            if key_length_raw < 0 {
+                return malformed();
             }
-            let label_length = fw.label_buffer_length();
-            if aeron_client::command::KEY_BUFFER_OFFSET + key_length + 4 + label_length > length {
-                return None;
+            let key_length = key_length_raw as usize;
+            let label_length_offset = aeron_client::command::KEY_BUFFER_OFFSET
+                .checked_add(key_length)
+                .and_then(|value| value.checked_add(0));
+            let Some(label_length_offset) = label_length_offset else {
+                return malformed();
+            };
+            if label_length_offset
+                .checked_add(4)
+                .is_none_or(|end| end > length)
+            {
+                return malformed();
+            }
+            let label_length_raw = buffer.get_i32(offset + label_length_offset);
+            if label_length_raw < 0 {
+                return malformed();
+            }
+            let label_length = label_length_raw as usize;
+            if label_length_offset
+                .checked_add(4)
+                .and_then(|end| end.checked_add(label_length))
+                .is_none_or(|end| end > length)
+            {
+                return malformed();
             }
             let mut key = vec![0u8; key_length];
             buffer.get_bytes(offset + fw.key_buffer_offset(), &mut key);
             let mut label_bytes = vec![0u8; label_length];
-            buffer.get_bytes(offset + label_offset + 4, &mut label_bytes);
+            buffer.get_bytes(offset + label_length_offset + 4, &mut label_bytes);
             Some(Command::AddCounter {
                 client_id: fw.client_id(),
                 correlation_id: fw.correlation_id(),
@@ -2391,26 +2450,31 @@ fn decode_command(
                 label: String::from_utf8_lossy(&label_bytes).into_owned(),
             })
         }
-        REMOVE_PUBLICATION => {
+        REMOVE_PUBLICATION
+            if length
+                >= aeron_client::command::RemoveMessageFlyweight::remove_publication_length() =>
+        {
             let fw = RemoveMessageFlyweight::new(*buffer, offset);
             Some(Command::RemovePublication {
                 correlation_id: fw.correlation_id(),
                 registration_id: fw.registration_id(),
             })
         }
-        REMOVE_SUBSCRIPTION => {
+        REMOVE_SUBSCRIPTION | REMOVE_COUNTER
+            if length >= aeron_client::command::RemoveMessageFlyweight::length() =>
+        {
             let fw = RemoveMessageFlyweight::new(*buffer, offset);
-            Some(Command::RemoveSubscription {
-                correlation_id: fw.correlation_id(),
-                registration_id: fw.registration_id(),
-            })
-        }
-        REMOVE_COUNTER => {
-            let fw = RemoveMessageFlyweight::new(*buffer, offset);
-            Some(Command::RemoveCounter {
-                correlation_id: fw.correlation_id(),
-                registration_id: fw.registration_id(),
-            })
+            if msg_type == REMOVE_SUBSCRIPTION {
+                Some(Command::RemoveSubscription {
+                    correlation_id: fw.correlation_id(),
+                    registration_id: fw.registration_id(),
+                })
+            } else {
+                Some(Command::RemoveCounter {
+                    correlation_id: fw.correlation_id(),
+                    registration_id: fw.registration_id(),
+                })
+            }
         }
         GET_NEXT_AVAILABLE_SESSION_ID
             if length >= aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH + 4 =>
@@ -2423,19 +2487,28 @@ fn decode_command(
                     .get_i32(offset + aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH),
             })
         }
-        CLIENT_KEEPALIVE => {
+        CLIENT_KEEPALIVE | CLIENT_CLOSE if length >= CORRELATED_HEADER => {
             let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
-            Some(Command::Keepalive {
-                client_id: fw.client_id(),
-            })
+            if msg_type == CLIENT_KEEPALIVE {
+                Some(Command::Keepalive {
+                    client_id: fw.client_id(),
+                })
+            } else {
+                Some(Command::ClientClose {
+                    client_id: fw.client_id(),
+                })
+            }
         }
-        CLIENT_CLOSE => {
-            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
-            Some(Command::ClientClose {
-                client_id: fw.client_id(),
-            })
-        }
-        TERMINATE_DRIVER => {
+        TERMINATE_DRIVER if length >= CORRELATED_HEADER + 4 => {
+            let token_length = buffer.get_i32(offset + CORRELATED_HEADER);
+            if token_length < 0
+                || CORRELATED_HEADER
+                    .checked_add(4)
+                    .and_then(|start| start.checked_add(token_length as usize))
+                    .is_none_or(|end| end > length)
+            {
+                return malformed();
+            }
             let fw = TerminateDriverFlyweight::new(*buffer, offset);
             Some(Command::TerminateDriver {
                 client_id: fw.client_id(),
@@ -2531,6 +2604,51 @@ mod tests {
         )
         .unwrap();
         (cnc, path)
+    }
+
+    #[test]
+    fn malformed_variable_length_commands_are_rejected_without_panicking() {
+        let mut bytes = vec![0u8; 32];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        buffer.put_i64(0, CLIENT_ID);
+        buffer.put_i64(8, 91);
+        buffer.put_i32(aeron_client::command::PUB_CHANNEL_LENGTH_OFFSET, 128);
+
+        let command = decode_command(
+            aeron_client::driver_proxy::ADD_PUBLICATION,
+            &buffer,
+            0,
+            aeron_client::command::PUB_CHANNEL_OFFSET,
+        );
+        assert!(matches!(
+            command,
+            Some(Command::Unknown {
+                correlation_id: 91,
+                message_type: aeron_client::driver_proxy::ADD_PUBLICATION,
+            })
+        ));
+    }
+
+    #[test]
+    fn malformed_counter_lengths_are_rejected_without_panicking() {
+        let mut bytes = vec![0u8; 32];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        buffer.put_i64(8, 92);
+        buffer.put_i32(aeron_client::command::KEY_LENGTH_OFFSET, -1);
+
+        let command = decode_command(
+            aeron_client::driver_proxy::ADD_COUNTER,
+            &buffer,
+            0,
+            aeron_client::command::KEY_BUFFER_OFFSET,
+        );
+        assert!(matches!(
+            command,
+            Some(Command::Unknown {
+                correlation_id: 92,
+                message_type: aeron_client::driver_proxy::ADD_COUNTER,
+            })
+        ));
     }
 
     fn proxy(cnc: &CncFile) -> DriverProxy<'static> {
