@@ -63,7 +63,9 @@ use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
 use crate::network_publication::NetworkPublication;
 use crate::publication_image::{ImageLifecycleEvent, PublicationImage};
-use crate::publication_params::{DummyPublicationLookup, PublicationParams};
+use crate::publication_params::{
+    PublicationParams, TaggedPublicationInfo, TaggedPublicationLookup,
+};
 use crate::receiver::ReceiverStatus;
 
 /// Source identity reported for IPC images — matches upstream's `aeron:ipc` channel identity.
@@ -181,12 +183,7 @@ fn publication_options(channel: &str) -> Result<(String, Option<i32>)> {
         .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
     let session_id = uri
         .get(SESSION_ID_PARAM_NAME)
-        .map(|value| {
-            value.parse::<i32>().map_err(|_| {
-                DriverError::InvalidChannel(format!("invalid session-id in channel: {value}"))
-            })
-        })
-        .transpose()?;
+        .and_then(|value| value.parse::<i32>().ok());
     uri.remove(SESSION_ID_PARAM_NAME);
     Ok((uri.to_string(), session_id))
 }
@@ -212,11 +209,48 @@ pub struct PublicationEntry {
     pub is_exclusive: bool,
     pub is_ipc: bool,
     pub session_id: i32,
+    /// Entity tag used to resolve tagged session ids and reject duplicate tagged publications.
+    pub entity_tag: i64,
+    pub term_length: usize,
+    pub mtu_length: usize,
     /// Counter id of the publication limit position (driver-assigned).
     pub publication_limit_counter_id: i32,
     /// Absolute path of the shared log file backing this publication; `None` until a log
     /// buffer is allocated (network publications get theirs in the Sender data-path task).
     pub log_file_name: Option<String>,
+}
+
+struct ActivePublicationLookup<'a> {
+    publications: &'a HashMap<i64, PublicationEntry>,
+    next_session_id: i32,
+}
+
+impl TaggedPublicationLookup for ActivePublicationLookup<'_> {
+    fn find_network_publication_by_tag(&self, tag: i64) -> Option<TaggedPublicationInfo> {
+        self.publications.values().find_map(|publication| {
+            (publication.entity_tag == tag && !publication.is_ipc).then_some(
+                TaggedPublicationInfo {
+                    session_id: publication.session_id,
+                    term_length: publication.term_length,
+                    mtu_length: publication.mtu_length,
+                },
+            )
+        })
+    }
+
+    fn find_ipc_publication_by_tag(&self, tag: i64) -> Option<TaggedPublicationInfo> {
+        self.publications.values().find_map(|publication| {
+            (publication.entity_tag == tag && publication.is_ipc).then_some(TaggedPublicationInfo {
+                session_id: publication.session_id,
+                term_length: publication.term_length,
+                mtu_length: publication.mtu_length,
+            })
+        })
+    }
+
+    fn next_available_session_id(&self, _stream_id: i32, _media: &str) -> i32 {
+        self.next_session_id
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -675,14 +709,22 @@ impl DriverConductor {
         let (identity, requested_session_id) = publication_options(&channel)?;
         let channel_uri = ChannelUri::parse(&channel)
             .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
+        let next_session_id = self.next_session_id;
+        let lookup = ActivePublicationLookup {
+            publications: &self.publications,
+            next_session_id,
+        };
         let params = PublicationParams::get_publication_params(
             &channel_uri,
             &self.configuration,
-            &DummyPublicationLookup,
+            &lookup,
             stream_id,
             &channel,
         )?;
-        let session_id = requested_session_id.unwrap_or_else(|| self.next_session_id());
+        let session_id = requested_session_id.unwrap_or(params.session_id);
+        if requested_session_id.is_none() {
+            self.next_session_id = self.next_session_id.wrapping_add(1);
+        }
         if let Some(existing) = self.publications.values().find(|publication| {
             publication.stream_id == stream_id
                 && publication_options(&publication.channel)
@@ -777,6 +819,9 @@ impl DriverConductor {
                 is_exclusive: exclusive,
                 is_ipc,
                 session_id,
+                entity_tag: params.entity_tag,
+                term_length: params.term_length,
+                mtu_length: params.mtu_length,
                 publication_limit_counter_id,
                 log_file_name: log_file_name.clone(),
             },
@@ -3436,6 +3481,34 @@ mod tests {
         assert_eq!(seen_name, log_file_name);
         assert_eq!(seen_session, entry.session_id);
         assert_eq!(correlation_id, entry.correlation_id);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resolves_tagged_session_id_against_active_publication() {
+        let (cnc, path) = temp_cnc("tagged-session");
+        let dir = temp_dir("tagged-session");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+
+        let tagged = client
+            .add_publication("aeron:ipc?tags=100,200", 1011)
+            .unwrap();
+        conductor.do_work(1_000).unwrap();
+        let tagged_entry = conductor.publications().get(&tagged).unwrap().clone();
+        assert_eq!(tagged_entry.entity_tag, 200);
+
+        let resolved = client
+            .add_publication("aeron:ipc?session-id=tag:200", 1011)
+            .unwrap();
+        conductor.do_work(2_000).unwrap();
+        let resolved_entry = conductor.publications().get(&resolved).unwrap();
+        assert_eq!(resolved_entry.session_id, tagged_entry.session_id);
+        assert_eq!(resolved_entry.term_length, tagged_entry.term_length);
+        assert_eq!(resolved_entry.mtu_length, tagged_entry.mtu_length);
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
