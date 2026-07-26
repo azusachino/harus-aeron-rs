@@ -13,13 +13,12 @@ Cargo workspace mirroring upstream Aeron's actual module boundaries: `agrona`
 (Conductor/Sender/Receiver + UDP transport, also home to the `aeron-driver` binary),
 `aeron-archive`, and `aeron-cluster`.
 
-`agrona` (v0.0.2) is implemented: ring buffers (SPSC/MPSC), broadcast
-transmitter/receiver, atomic buffer, idle strategies, counters manager. `aeron-client`
-(v0.0.3) has its wire protocol (`HeaderFlyweight`/`ErrorFlyweight`/`DataHeaderFlyweight`)
-and log buffer (`LogBufferDescriptor`, `Header`/`HeaderWriter`, term scan/read/rebuild/
-unblock utilities) implemented; `Publication`/`Subscription`/`ClientConductor` and
-`aeron-driver`, `aeron-archive`, `aeron-cluster` are still skeletons — see
-[`docs/plan.md`](docs/plan.md) for the milestone roadmap.
+The current branch has a working driver slice: shared mmap CnC/log buffers, real
+`DriverConductor` command processing, IPC and UDP publication paths, flow control and
+NAK retransmission, and a managed `MediaDriver` lifecycle. The latest parity ledger is
+29/268 upstream test files (16/41 driver files); this is evidence for the v0.1 driver
+milestone, not a claim of full Aeron parity. `aeron-archive` and `aeron-cluster` remain
+future phases — see [`docs/plan.md`](docs/plan.md).
 
 ## Getting Started
 

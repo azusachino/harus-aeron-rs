@@ -23,6 +23,7 @@ aeron-archive = { path = "crates/archive" }
 aeron-cluster = { path = "crates/cluster" }
 
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal"] }
+socket2 = "0.5"
 bytes = "1"
 memmap2 = "0.9"  # shared memory-mapped log buffers and CnC file (cross-process, MAP_SHARED)
 thiserror = "2"
@@ -44,4 +45,3 @@ inherits = "release"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
-

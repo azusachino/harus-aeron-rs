@@ -1,6 +1,7 @@
 # Java Interop Smoke Status
 
-This document tracks interop smoke verification between `harus-aeron-rs` (Rust MediaDriver) and upstream Java Aeron `1.50.x`.
+This document tracks interop smoke verification between `harus-aeron-rs` (Rust MediaDriver)
+and upstream Java Aeron `1.50.x`. It is a smoke gate, not full protocol or parity proof.
 
 ## Interop Architecture
 
@@ -14,10 +15,13 @@ This document tracks interop smoke verification between `harus-aeron-rs` (Rust M
 | :--- | :--- | :--- | :--- |
 | **Driver Startup** | Local IPC | **PASS** | Rust MediaDriver process launches cleanly |
 | **CnC metadata mapping** | `cnc.dat` | **PASS** | Aeron Java `CncFileDescriptor` and `CountersReader` map Rust output |
-| **Publication Reg** | `aeron:ipc`, `aeron:udp` | **PASS** | Java client registration completed through the Rust CnC command path |
-| **Subscription Reg** | `aeron:ipc`, `aeron:udp` | **PASS** | Java client received Rust driver readiness/image events |
+| **Publication Reg** | `aeron:ipc`, `aeron:udp` | **PASS** | Java client registration completed through the Rust CnC command path in the smoke harness |
+| **Subscription Reg** | `aeron:ipc`, `aeron:udp` | **PASS** | Java client received Rust driver readiness/image events in the smoke harness |
 | **Pub/Sub Loop** | IPC + UDP Loopback | **PASS** | Java publication payloads were delivered through the Rust driver to Java subscriptions |
 | **Reverse Pub/Sub Loop** | IPC | **PASS** | Rust client mapped Java CnC/counters and exchanged a payload through Java MediaDriver |
+
+The harness does not yet prove 268-file parity, multicast parity, cluster/archive behavior,
+or a long-running soak under packet loss.
 
 ## Execution
 

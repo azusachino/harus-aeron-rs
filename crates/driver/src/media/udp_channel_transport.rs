@@ -4,6 +4,8 @@
 
 use std::net::{SocketAddr, UdpSocket};
 
+use socket2::{Domain, Protocol, Socket, Type};
+
 use crate::error::{DriverError, Result};
 use crate::media::udp_channel::UdpChannel;
 
@@ -23,24 +25,42 @@ impl UdpChannelTransport {
         socket_rcvbuf_length: usize,
         socket_sndbuf_length: usize,
     ) -> Result<Self> {
-        let socket = UdpSocket::bind(bind_address).map_err(|e| {
+        let socket = Socket::new(
+            Domain::for_address(bind_address),
+            Type::DGRAM,
+            Some(Protocol::UDP),
+        )
+        .map_err(|e| DriverError::IllegalState(format!("failed to create UDP socket: {e}")))?;
+
+        if socket_rcvbuf_length > 0 {
+            socket
+                .set_recv_buffer_size(socket_rcvbuf_length)
+                .map_err(|e| {
+                    DriverError::IllegalState(format!("failed to set UDP receive buffer: {e}"))
+                })?;
+        }
+        if socket_sndbuf_length > 0 {
+            socket
+                .set_send_buffer_size(socket_sndbuf_length)
+                .map_err(|e| {
+                    DriverError::IllegalState(format!("failed to set UDP send buffer: {e}"))
+                })?;
+        }
+
+        socket.bind(&bind_address.into()).map_err(|e| {
             DriverError::IllegalState(format!("failed to bind UDP socket to {bind_address}: {e}"))
         })?;
+
+        let socket: UdpSocket = socket.into();
 
         socket.set_nonblocking(true).map_err(|e| {
             DriverError::IllegalState(format!("failed to set non-blocking mode: {e}"))
         })?;
 
-        if socket_rcvbuf_length > 0 {
-            // Best effort socket option configuration
-            let _ = socket;
-        }
-        if socket_sndbuf_length > 0 {
-            let _ = socket_sndbuf_length;
-        }
-
         if let Some(target) = connect_address {
-            let _ = socket.connect(target);
+            socket.connect(target).map_err(|e| {
+                DriverError::IllegalState(format!("failed to connect UDP socket to {target}: {e}"))
+            })?;
         }
 
         Ok(Self {
@@ -95,5 +115,18 @@ mod tests {
         let transport = UdpChannelTransport::bind(channel, bind_addr, None, 0, 0).unwrap();
         let local_addr = transport.local_addr().unwrap();
         assert_ne!(local_addr.port(), 0);
+    }
+
+    #[test]
+    fn should_apply_requested_socket_buffers() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+        let transport =
+            UdpChannelTransport::bind(channel, bind_addr, None, 32 * 1024, 32 * 1024).unwrap();
+        let socket = socket2::Socket::from(transport.socket.try_clone().unwrap());
+
+        assert!(socket.recv_buffer_size().unwrap() >= 32 * 1024);
+        assert!(socket.send_buffer_size().unwrap() >= 32 * 1024);
     }
 }
