@@ -5,6 +5,7 @@
 //! driver agents. Not yet implemented.
 pub mod control_mode;
 pub mod interface_search_address;
+pub mod name_resolver;
 pub mod named_interface;
 pub mod network_util;
 pub mod receive_channel_endpoint;
