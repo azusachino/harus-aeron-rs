@@ -136,12 +136,13 @@ impl Receiver {
             {
                 let frame = buffer[..len].to_vec();
                 let receiver_status = self.handle_frame(endpoint_index, &frame, src, now_ns)?;
+                let (session_id, stream_id) = frame_identity(&frame);
                 self.received_frames.push(ReceivedFrame {
                     bytes: frame,
                     source: src,
                     endpoint_index,
-                    session_id: i32::from_le_bytes([buffer[8], buffer[9], buffer[10], buffer[11]]),
-                    stream_id: i32::from_le_bytes([buffer[12], buffer[13], buffer[14], buffer[15]]),
+                    session_id,
+                    stream_id,
                     channel: self.receive_channel_endpoints[endpoint_index]
                         .udp_channel()
                         .original_uri_string
@@ -451,6 +452,32 @@ impl Receiver {
     }
 }
 
+/// Decode the identity fields at their frame-type-specific offsets without indexing an
+/// untrusted datagram. SETUP and DATA both use the standard session/stream offsets, while short or
+/// unsupported frames carry no dispatch identity.
+fn frame_identity(bytes: &[u8]) -> (i32, i32) {
+    if bytes.len() < 8 {
+        return (0, 0);
+    }
+    let mut owned = bytes.to_vec();
+    let header = HeaderFlyweight::new(AtomicBuffer::new(&mut owned));
+    match header.header_type() {
+        HDR_TYPE_SETUP if bytes.len() >= aeron_client::protocol::SETUP_HEADER_LENGTH => {
+            let setup = SetupFlyweight::new(AtomicBuffer::new(&mut owned));
+            (setup.session_id(), setup.stream_id())
+        }
+        HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
+            let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut owned));
+            (data.session_id(), data.stream_id())
+        }
+        HDR_TYPE_RTTM if bytes.len() >= RTTM_HEADER_LENGTH => {
+            let rtt = RttMeasurementFlyweight::new(AtomicBuffer::new(&mut owned));
+            (rtt.session_id(), rtt.stream_id())
+        }
+        _ => (0, 0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +547,96 @@ mod tests {
             receiver.send_periodic_status_messages(200_000_001).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn should_dispatch_setup_and_data_and_advance_status_position() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        let endpoint_addr = transport.local_addr().unwrap();
+        let peer = UdpSocket::bind(bind_addr).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+
+        let mut receiver = Receiver::new();
+        receiver.add_receive_channel_endpoint(ReceiveChannelEndpoint::new(channel, transport));
+
+        let mut setup_bytes = [0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(aeron_client::protocol::CURRENT_VERSION)
+            .set_flags(0)
+            .set_header_type(aeron_client::protocol::HDR_TYPE_SETUP);
+        setup
+            .set_session_id(7)
+            .set_stream_id(11)
+            .set_initial_term_id(3)
+            .set_active_term_id(3)
+            .set_term_offset(0)
+            .set_term_length(64 * 1024)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+        peer.send_to(&setup_bytes, endpoint_addr).unwrap();
+
+        let mut work = 0;
+        for _ in 0..10 {
+            work = receiver.do_work_at(1).unwrap();
+            if work > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(work, 1);
+        let frames = receiver.take_received_frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].session_id, 7);
+        let mut status_bytes = [0u8; 256];
+        let (status_length, _) = peer.recv_from(&mut status_bytes).unwrap();
+        let status = aeron_client::protocol::StatusMessageFlyweight::new(AtomicBuffer::new(
+            &mut status_bytes[..status_length],
+        ));
+        assert_eq!(status.consumption_term_id(), 3);
+        assert_eq!(status.consumption_term_offset(), 0);
+
+        let payload = b"receiver-test";
+        let frame_length = DATA_HEADER_LENGTH + payload.len();
+        let aligned_length = align(frame_length as i32, FRAME_ALIGNMENT) as usize;
+        let mut data_bytes = vec![0u8; aligned_length];
+        let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut data_bytes));
+        data.set_frame_length(frame_length as i32)
+            .set_version(aeron_client::protocol::CURRENT_VERSION)
+            .set_flags(aeron_client::protocol::BEGIN_AND_END_FLAGS)
+            .set_header_type(HDR_TYPE_DATA)
+            .set_session_id(7)
+            .set_stream_id(11)
+            .set_term_id(3)
+            .set_term_offset(0);
+        AtomicBuffer::new(&mut data_bytes).put_bytes(DATA_HEADER_LENGTH, payload);
+        peer.send_to(&data_bytes, endpoint_addr).unwrap();
+
+        let mut work = 0;
+        for _ in 0..10 {
+            work = receiver.do_work_at(2).unwrap();
+            if work > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(work, 1);
+        let frames = receiver.take_received_frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(&frames[0].bytes[DATA_HEADER_LENGTH..frame_length], payload);
+        assert_eq!(
+            frames[0].receiver_status.unwrap().term_offset,
+            aligned_length as i32
+        );
+        let (status_length, _) = peer.recv_from(&mut status_bytes).unwrap();
+        let status = aeron_client::protocol::StatusMessageFlyweight::new(AtomicBuffer::new(
+            &mut status_bytes[..status_length],
+        ));
+        assert_eq!(status.consumption_term_offset(), aligned_length as i32);
     }
 
     #[test]
