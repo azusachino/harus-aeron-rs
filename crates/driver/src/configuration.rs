@@ -24,6 +24,9 @@ pub const IPC_PUBLICATION_TERM_WINDOW_LENGTH_PROP_NAME: &str =
 pub const PUBLICATION_LINGER_PROP_NAME: &str = "aeron.publication.linger.timeout";
 pub const PUBLICATION_LINGER_DEFAULT_NS: u64 = 5 * 1000 * 1000 * 1000; // 5s in ns
 
+pub const CLIENT_LIVENESS_TIMEOUT_PROP_NAME: &str = "aeron.client.liveness.timeout";
+pub const CLIENT_LIVENESS_TIMEOUT_DEFAULT_NS: i64 = 10 * 1000 * 1000 * 1000;
+
 pub const SPIES_SIMULATE_CONNECTION_PROP_NAME: &str = "aeron.spies.simulate.connection";
 
 pub const UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME: &str = "aeron.untethered.window.limit.timeout";
@@ -57,6 +60,7 @@ pub struct Configuration {
     pub publication_term_window_length: usize,
     pub ipc_publication_term_window_length: usize,
     pub publication_linger_timeout_ns: u64,
+    pub client_liveness_timeout_ns: i64,
     pub spies_simulate_connection: bool,
     pub untethered_window_limit_timeout_ns: u64,
     pub untethered_resting_timeout_ns: u64,
@@ -81,6 +85,7 @@ impl Default for Configuration {
             publication_term_window_length: 0,
             ipc_publication_term_window_length: 0,
             publication_linger_timeout_ns: PUBLICATION_LINGER_DEFAULT_NS,
+            client_liveness_timeout_ns: CLIENT_LIVENESS_TIMEOUT_DEFAULT_NS,
             spies_simulate_connection: false,
             untethered_window_limit_timeout_ns: UNTETHERED_WINDOW_LIMIT_TIMEOUT_DEFAULT_NS,
             untethered_resting_timeout_ns: UNTETHERED_RESTING_TIMEOUT_DEFAULT_NS,
@@ -141,6 +146,11 @@ impl Configuration {
         if let Some(val) = get_prop(PUBLICATION_LINGER_PROP_NAME) {
             if let Ok(v) = val.parse::<u64>() {
                 config.publication_linger_timeout_ns = v;
+            }
+        }
+        if let Some(val) = get_prop(CLIENT_LIVENESS_TIMEOUT_PROP_NAME) {
+            if let Ok(v) = val.parse::<i64>() {
+                config.client_liveness_timeout_ns = v;
             }
         }
         if let Some(val) = get_prop(SPIES_SIMULATE_CONNECTION_PROP_NAME) {
@@ -242,6 +252,10 @@ mod tests {
             config.publication_linger_timeout_ns,
             PUBLICATION_LINGER_DEFAULT_NS
         );
+        assert_eq!(
+            config.client_liveness_timeout_ns,
+            CLIENT_LIVENESS_TIMEOUT_DEFAULT_NS
+        );
         assert!(!config.spies_simulate_connection);
         assert_eq!(
             config.untethered_window_limit_timeout_ns,
@@ -266,5 +280,14 @@ mod tests {
         });
 
         assert!(config.allow_termination);
+    }
+
+    #[test]
+    fn should_load_client_liveness_timeout_from_property() {
+        let config = Configuration::load_from_getter(|property| {
+            (property == CLIENT_LIVENESS_TIMEOUT_PROP_NAME).then(|| "123456789".to_string())
+        });
+
+        assert_eq!(config.client_liveness_timeout_ns, 123_456_789);
     }
 }

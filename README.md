@@ -16,7 +16,7 @@ Cargo workspace mirroring upstream Aeron's actual module boundaries: `agrona`
 The current branch has a working driver slice: shared mmap CnC/log buffers, real
 `DriverConductor` command processing, IPC and UDP publication paths, flow control and
 NAK retransmission, and a managed `MediaDriver` lifecycle. The latest parity ledger is
-29/268 upstream test files (16/41 driver files); this is evidence for the v0.1 driver
+39/268 upstream test files (26/41 driver files); this is evidence for the v0.1 driver
 milestone, not a claim of full Aeron parity. `aeron-archive` and `aeron-cluster` remain
 future phases — see [`docs/plan.md`](docs/plan.md).
 

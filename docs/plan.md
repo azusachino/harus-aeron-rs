@@ -69,7 +69,7 @@ root (16). **Exit: 33/33 client parity.**
 
 ### v0.0.5 — aeron-driver: Conductor/Sender/Receiver + media
 Port the driver runtime boundary: CnC command processing, IPC and UDP data paths,
-flow control, loss recovery, and managed lifecycle. **Current: 16/41 driver test
+flow control, loss recovery, and managed lifecycle. **Current: 26/41 driver test
 files; exit not met.**
 
 ### v0.0.6 — driver/client system tests

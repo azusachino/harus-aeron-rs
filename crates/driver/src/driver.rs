@@ -19,11 +19,6 @@ use crate::error::Result;
 use crate::receiver::Receiver;
 use crate::sender::Sender;
 
-/// Default client liveness timeout (10 seconds) before the conductor reclaims a client's
-/// resources. A proper `aeron.client.liveness.timeout` config knob lands with the lifecycle
-/// task; this default keeps the CnC metadata honest in the meantime.
-const CLIENT_LIVENESS_TIMEOUT_NS: i64 = 10_000_000_000;
-
 static DRIVER_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct MediaDriver {
@@ -90,7 +85,7 @@ impl MediaDriver {
             DEFAULT_COUNTER_METADATA_LENGTH,
             DEFAULT_COUNTER_VALUES_LENGTH,
             DEFAULT_ERROR_LOG_LENGTH,
-            CLIENT_LIVENESS_TIMEOUT_NS,
+            configuration.client_liveness_timeout_ns,
         )?;
 
         let conductor = DriverConductor::new(configuration.clone(), cnc, aeron_dir.clone())?;
@@ -368,6 +363,18 @@ mod tests {
         let work = driver.do_work().unwrap();
         assert_eq!(work, 1);
         assert_eq!(driver.conductor().subscriptions().len(), 1);
+    }
+
+    #[test]
+    fn should_publish_configured_client_liveness_timeout_in_cnc_metadata() {
+        let timeout_ns = 123_456_789;
+        let driver = MediaDriver::launch(Configuration {
+            client_liveness_timeout_ns: timeout_ns,
+            ..Configuration::default()
+        })
+        .unwrap();
+
+        assert_eq!(driver.cnc().client_liveness_timeout_ns(), timeout_ns);
     }
 
     #[test]
