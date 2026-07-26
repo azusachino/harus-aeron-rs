@@ -2634,6 +2634,45 @@ mod tests {
     }
 
     #[test]
+    fn ipc_publication_limit_starts_closed_and_opens_for_a_subscription() {
+        let (cnc, path) = temp_cnc("ipc-limit");
+        let dir = temp_dir("ipc-limit");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+
+        let publication = client.add_publication("aeron:ipc", 1010).unwrap();
+        conductor.do_work(1_000).unwrap();
+        let counter_id = conductor
+            .publications()
+            .get(&publication)
+            .unwrap()
+            .publication_limit_counter_id;
+        assert_eq!(
+            conductor
+                .counters()
+                .get(&counter_id)
+                .unwrap()
+                .load(Ordering::Acquire),
+            0
+        );
+
+        client.add_subscription("aeron:ipc", 1010).unwrap();
+        conductor.do_work(2_000).unwrap();
+        assert!(
+            conductor
+                .counters()
+                .get(&counter_id)
+                .unwrap()
+                .load(Ordering::Acquire)
+                > 0
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn ipc_publication_and_subscription_connect_with_available_image() {
         let (cnc, path) = temp_cnc("ipcimage");
         let dir = temp_dir("ipcimage");
