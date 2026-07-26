@@ -30,3 +30,13 @@ Run the interop smoke harness:
 ```bash
 make interop-smoke
 ```
+
+Run the independent Rust-process evidence:
+
+```bash
+make interop-rust-smoke
+```
+
+That harness starts separate Rust driver processes and client processes for IPC, then
+separate publisher/subscriber driver and client processes for UDP. Each process has a
+bounded timeout and is released or killed during cleanup.
