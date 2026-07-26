@@ -211,6 +211,14 @@ pub struct SubscriptionEntry {
     pub reliable: bool,
 }
 
+#[derive(Debug)]
+struct ReceiveChannelReference {
+    references: usize,
+    /// The Receiver identity of the endpoint that was actually bound. Wildcard ports can
+    /// receive a unique canonical suffix each time their URI is parsed.
+    canonical_form: String,
+}
+
 /// A decoded client command, extracted from a ring-buffer record so it can be processed
 /// after the (immutable) ring-buffer read borrow is released.
 enum Command {
@@ -296,7 +304,7 @@ pub struct DriverConductor {
     /// Upstream `ReceiveChannelEndpoint` owns one transport per channel and aggregates
     /// stream/session interest through its `DataPacketDispatcher`; it does not bind one socket
     /// per subscription.
-    receive_channel_references: HashMap<String, usize>,
+    receive_channel_references: HashMap<String, ReceiveChannelReference>,
     /// Network publication registrations whose sender state must be removed this cycle.
     removed_network_publications: Vec<i64>,
     /// Reassembly state for network images, keyed by channel, session, stream, and source.
@@ -495,8 +503,9 @@ impl DriverConductor {
             } => {
                 if let Some(subscription) = self.subscriptions.remove(&registration_id) {
                     self.detach_images_for_subscription(registration_id, now_ns);
-                    if self.release_receive_endpoint(&subscription.channel) {
-                        self.removed_receive_channels.push(subscription.channel);
+                    if let Some(endpoint_key) = self.release_receive_endpoint(&subscription.channel)
+                    {
+                        self.removed_receive_channels.push(endpoint_key);
                     }
                 }
                 self.on_operation_success(correlation_id)
@@ -716,37 +725,45 @@ impl DriverConductor {
 
     /// Bind a receive channel endpoint for a UDP subscription and queue it for the Receiver.
     fn add_receive_endpoint(&mut self, channel: &str) -> Result<()> {
-        if let Some(references) = self.receive_channel_references.get_mut(channel) {
-            *references += 1;
+        let udp_channel = UdpChannel::parse(channel)
+            .map_err(|e| DriverError::InvalidChannel(format!("parse udp channel: {e}")))?;
+        let (endpoint_key, _, _) = subscription_options(channel)?;
+        if let Some(reference) = self.receive_channel_references.get_mut(&endpoint_key) {
+            reference.references += 1;
             return Ok(());
         }
 
-        let udp_channel = UdpChannel::parse(channel)
-            .map_err(|e| DriverError::InvalidChannel(format!("parse udp channel: {e}")))?;
         // Bind to the endpoint address so the publisher's frames arrive here.
         let bind = udp_channel.remote_data;
         let transport = UdpChannelTransport::bind(udp_channel.clone(), bind, None, 0, 0)?;
+        let canonical_form = udp_channel.canonical_form.clone();
         self.new_receive_endpoints
             .push(ReceiveChannelEndpoint::new(udp_channel, transport));
-        self.receive_channel_references
-            .insert(channel.to_owned(), 1);
+        self.receive_channel_references.insert(
+            endpoint_key,
+            ReceiveChannelReference {
+                references: 1,
+                canonical_form,
+            },
+        );
         Ok(())
     }
 
     /// Drop one subscription's claim on a channel endpoint.
     ///
-    /// Returns true only when the transport itself has no remaining subscription references and
-    /// should be removed from the Receiver agent.
-    fn release_receive_endpoint(&mut self, channel: &str) -> bool {
-        let Some(references) = self.receive_channel_references.get_mut(channel) else {
-            return false;
-        };
-        if *references > 1 {
-            *references -= 1;
-            false
+    /// Returns the canonical endpoint key only when the transport itself has no remaining
+    /// subscription references and should be removed from the Receiver agent.
+    fn release_receive_endpoint(&mut self, channel: &str) -> Option<String> {
+        let endpoint_key = subscription_options(channel)
+            .ok()
+            .map(|options| options.0)?;
+        let reference = self.receive_channel_references.get_mut(&endpoint_key)?;
+        if reference.references > 1 {
+            reference.references -= 1;
+            None
         } else {
-            self.receive_channel_references.remove(channel);
-            true
+            let reference = self.receive_channel_references.remove(&endpoint_key)?;
+            Some(reference.canonical_form)
         }
     }
 
@@ -1407,8 +1424,8 @@ impl DriverConductor {
             .collect();
         for (registration_id, channel) in removed_subscriptions {
             self.detach_images_for_subscription(registration_id, now_ns);
-            if self.release_receive_endpoint(&channel) {
-                self.removed_receive_channels.push(channel);
+            if let Some(endpoint_key) = self.release_receive_endpoint(&channel) {
+                self.removed_receive_channels.push(endpoint_key);
             }
             self.subscriptions.remove(&registration_id);
         }
@@ -2165,6 +2182,7 @@ mod tests {
         conductor.do_work(1_000).unwrap();
         let mut endpoints = conductor.take_new_receive_endpoints();
         assert_eq!(endpoints.len(), 1);
+        let endpoint_key = endpoints[0].canonical_form().to_owned();
         endpoints.pop();
 
         let source = SocketAddr::from(([127, 0, 0, 1], 9003));
@@ -2193,7 +2211,10 @@ mod tests {
         conductor.do_work(3_000).unwrap();
 
         assert!(conductor.images.is_empty());
-        assert_eq!(conductor.take_removed_receive_channels(), vec![channel]);
+        assert_eq!(
+            conductor.take_removed_receive_channels(),
+            vec![endpoint_key]
+        );
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
@@ -2210,7 +2231,9 @@ mod tests {
 
         let first = client.add_subscription(channel, 7).unwrap();
         conductor.do_work(1_000).unwrap();
-        assert_eq!(conductor.take_new_receive_endpoints().len(), 1);
+        let endpoints = conductor.take_new_receive_endpoints();
+        assert_eq!(endpoints.len(), 1);
+        let endpoint_key = endpoints[0].canonical_form().to_owned();
 
         let second = client.add_subscription(channel, 8).unwrap();
         conductor.do_work(2_000).unwrap();
@@ -2222,7 +2245,50 @@ mod tests {
 
         client.remove_subscription(second).unwrap();
         conductor.do_work(4_000).unwrap();
-        assert_eq!(conductor.take_removed_receive_channels(), vec![channel]);
+        assert_eq!(
+            conductor.take_removed_receive_channels(),
+            vec![endpoint_key]
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shares_udp_receive_endpoint_across_session_and_reliability_uri_options() {
+        let (cnc, path) = temp_cnc("shared-udp-options");
+        let dir = temp_dir("shared-udp-options");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+
+        let first = client
+            .add_subscription("aeron:udp?endpoint=127.0.0.1:0|session-id=1024", 7)
+            .unwrap();
+        conductor.do_work(1_000).unwrap();
+        let endpoints = conductor.take_new_receive_endpoints();
+        assert_eq!(endpoints.len(), 1);
+        let endpoint_key = endpoints[0].canonical_form().to_owned();
+
+        let second = client
+            .add_subscription(
+                "aeron:udp?endpoint=127.0.0.1:0|session-id=1025|reliable=false",
+                7,
+            )
+            .unwrap();
+        conductor.do_work(2_000).unwrap();
+        assert!(conductor.take_new_receive_endpoints().is_empty());
+
+        client.remove_subscription(first).unwrap();
+        conductor.do_work(3_000).unwrap();
+        assert!(conductor.take_removed_receive_channels().is_empty());
+
+        client.remove_subscription(second).unwrap();
+        conductor.do_work(4_000).unwrap();
+        assert_eq!(
+            conductor.take_removed_receive_channels(),
+            vec![endpoint_key]
+        );
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
