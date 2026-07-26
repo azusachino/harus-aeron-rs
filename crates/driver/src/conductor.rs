@@ -205,6 +205,20 @@ enum Command {
     },
 }
 
+impl Command {
+    fn correlation_id(&self) -> Option<i64> {
+        match self {
+            Self::AddPublication { correlation_id, .. }
+            | Self::AddSubscription { correlation_id, .. }
+            | Self::RemovePublication { correlation_id, .. }
+            | Self::RemoveSubscription { correlation_id, .. }
+            | Self::TerminateDriver { correlation_id, .. }
+            | Self::Unknown { correlation_id, .. } => Some(*correlation_id),
+            Self::Keepalive { .. } | Self::ClientClose { .. } => None,
+        }
+    }
+}
+
 pub struct DriverConductor {
     cnc: CncFile,
     to_driver: ManyToOneRingBuffer<'static>,
@@ -341,7 +355,15 @@ impl DriverConductor {
 
         let mut work = read;
         for command in commands {
-            self.dispatch(command, now_ns)?;
+            let correlation_id = command.correlation_id();
+            if let Err(error) = self.dispatch(command, now_ns) {
+                if let Some(correlation_id) = correlation_id {
+                    self.on_error(correlation_id, error_code(&error), error.to_string())?;
+                    work += 1;
+                } else {
+                    return Err(error);
+                }
+            }
         }
 
         work += self.sweep_inactive_images(now_ns)?;
@@ -368,6 +390,11 @@ impl DriverConductor {
                 channel,
             } => {
                 self.touch_client(client_id, now_ns);
+                if !is_ipc_channel(&channel) && !is_udp_channel(&channel) {
+                    return Err(DriverError::InvalidChannel(format!(
+                        "unsupported media in channel: {channel}"
+                    )));
+                }
                 // The subscription's registration id is the client's correlation id — that is
                 // the id the client keys its subscription by and the driver echoes back in
                 // AVAILABLE_IMAGE (upstream SubscriptionLink semantics).
@@ -488,6 +515,11 @@ impl DriverConductor {
         let registration_id = correlation_id;
         let is_ipc = is_ipc_channel(&channel);
         let is_udp = is_udp_channel(&channel);
+        if !is_ipc && !is_udp {
+            return Err(DriverError::InvalidChannel(format!(
+                "unsupported media in channel: {channel}"
+            )));
+        }
         let session_id = self.next_session_id();
         let publication_limit_counter_id = self.next_counter_id();
         // Publication limit starts at 0 (no window). IPC opens it when a subscriber connects;
@@ -602,7 +634,7 @@ impl DriverConductor {
         publication_limit: Arc<AtomicI64>,
     ) -> Result<()> {
         let udp_channel = UdpChannel::parse(channel)
-            .map_err(|e| DriverError::IllegalState(format!("parse udp channel: {e}")))?;
+            .map_err(|e| DriverError::InvalidChannel(format!("parse udp channel: {e}")))?;
         let rrwm_default = if udp_channel.is_multicast {
             MULTICAST_RRWM_DEFAULT
         } else {
@@ -637,7 +669,7 @@ impl DriverConductor {
         }
 
         let udp_channel = UdpChannel::parse(channel)
-            .map_err(|e| DriverError::IllegalState(format!("parse udp channel: {e}")))?;
+            .map_err(|e| DriverError::InvalidChannel(format!("parse udp channel: {e}")))?;
         // Bind to the endpoint address so the publisher's frames arrive here.
         let bind = udp_channel.remote_data;
         let transport = UdpChannelTransport::bind(udp_channel.clone(), bind, None, 0, 0)?;
@@ -1662,6 +1694,19 @@ fn decode_command(
     }
 }
 
+fn error_code(error: &DriverError) -> i32 {
+    match error {
+        DriverError::InvalidChannel(_) => 1,
+        DriverError::IllegalState(message) | DriverError::IllegalArgument(message)
+            if message.contains("No space left on device")
+                || message.contains("There is not enough space on the disk") =>
+        {
+            12
+        }
+        DriverError::IllegalState(_) | DriverError::IllegalArgument(_) => 11,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1830,6 +1875,74 @@ mod tests {
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reports_invalid_channel_and_continues_processing_commands() {
+        let (cnc, path) = temp_cnc("invalid-channel");
+        let dir = temp_dir("invalid-channel");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+
+        let invalid_correlation = client.add_publication("aeron:unknown", 7).unwrap();
+        assert_eq!(conductor.do_work(1_000).unwrap(), 2);
+        assert!(conductor.publications().is_empty());
+
+        let mut seen_type = 0;
+        let mut seen_correlation = 0;
+        let mut seen_code = 0;
+        let mut seen_message = String::new();
+        assert!(
+            events
+                .receive_next(|msg_type, buf, offset, _len| {
+                    seen_type = msg_type;
+                    let error = ErrorResponseFlyweight::wrap(*buf, offset);
+                    seen_correlation = error.offending_command_correlation_id();
+                    seen_code = error.error_code();
+                    seen_message = error.error_message().unwrap();
+                })
+                .unwrap()
+        );
+        assert_eq!(seen_type, ON_ERROR);
+        assert_eq!(seen_correlation, invalid_correlation);
+        assert_eq!(seen_code, 1);
+        assert!(seen_message.contains("unsupported media"));
+
+        let valid_correlation = client.add_subscription("aeron:ipc", 7).unwrap();
+        assert_eq!(conductor.do_work(2_000).unwrap(), 1);
+        assert_eq!(conductor.subscriptions().len(), 1);
+        let mut ready_correlation = 0;
+        assert!(
+            events
+                .receive_next(|msg_type, buf, offset, _len| {
+                    assert_eq!(msg_type, ON_SUBSCRIPTION_READY);
+                    ready_correlation =
+                        SubscriptionReadyFlyweight::wrap(*buf, offset).correlation_id();
+                })
+                .unwrap()
+        );
+        assert_eq!(ready_correlation, valid_correlation);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn classifies_command_failures_like_aeron_error_codes() {
+        assert_eq!(error_code(&DriverError::InvalidChannel("bad".into())), 1);
+        assert_eq!(
+            error_code(&DriverError::IllegalState("No space left on device".into())),
+            12
+        );
+        assert_eq!(
+            error_code(&DriverError::IllegalArgument(
+                "There is not enough space on the disk".into()
+            )),
+            12
+        );
+        assert_eq!(error_code(&DriverError::IllegalState("other".into())), 11);
     }
 
     #[test]

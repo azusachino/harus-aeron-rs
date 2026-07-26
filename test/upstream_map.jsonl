@@ -99,7 +99,7 @@
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/service/ClusteredServiceAgentTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/service/ClusteredServiceContainerContextTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/service/ServiceSnapshotTakerTest.java"}
-{"layer": "driver", "rust_equivalent": "crates/driver/src/conductor.rs", "status": "in-progress", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ClientCommandAdapterTest.java"}
+{"layer": "driver", "rust_equivalent": "crates/driver/src/conductor.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ClientCommandAdapterTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/configuration.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ConfigurationTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/DataPacketDispatcherTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/multicast_flow_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/DefaultMulticastFlowControlSupplierTest.java"}
