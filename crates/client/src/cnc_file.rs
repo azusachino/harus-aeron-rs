@@ -93,6 +93,7 @@ pub const COUNTER_OWNER_ID_OFFSET: usize = 16;
 pub const COUNTER_REFERENCE_ID_OFFSET: usize = 24;
 pub const COUNTER_KEY_OFFSET: usize = 16;
 pub const COUNTER_LABEL_OFFSET: usize = 128;
+pub const COUNTER_KEY_MAX_LENGTH: usize = COUNTER_LABEL_OFFSET - COUNTER_KEY_OFFSET;
 pub const COUNTER_LABEL_MAX_LENGTH: usize = 380;
 pub const COUNTER_RECORD_ALLOCATED: i32 = 1;
 
@@ -335,6 +336,26 @@ impl CncFile {
         value: i64,
         label: &str,
     ) -> Result<()> {
+        self.write_counter_metadata_with_key(
+            counter_id,
+            type_id,
+            registration_id,
+            value,
+            &[],
+            label,
+        )
+    }
+
+    /// Publish a counter record with its optional application key and label.
+    pub fn write_counter_metadata_with_key(
+        &self,
+        counter_id: i32,
+        type_id: i32,
+        registration_id: i64,
+        value: i64,
+        key: &[u8],
+        label: &str,
+    ) -> Result<()> {
         if counter_id < 0 {
             return Err(AeronError::IllegalArgument(format!(
                 "negative counter id: {counter_id}"
@@ -352,6 +373,12 @@ impl CncFile {
         }
 
         let label_bytes = label.as_bytes();
+        if key.len() > COUNTER_KEY_MAX_LENGTH {
+            return Err(AeronError::IllegalArgument(format!(
+                "counter key too long: {} > {COUNTER_KEY_MAX_LENGTH}",
+                key.len()
+            )));
+        }
         if label_bytes.len() > COUNTER_LABEL_MAX_LENGTH {
             return Err(AeronError::IllegalArgument(format!(
                 "counter label too long: {} > {COUNTER_LABEL_MAX_LENGTH}",
@@ -361,6 +388,7 @@ impl CncFile {
 
         let metadata = self.counters_metadata_buffer();
         metadata.put_i32(metadata_offset + COUNTER_TYPE_ID_OFFSET, type_id);
+        metadata.put_bytes(metadata_offset + COUNTER_KEY_OFFSET, key);
         metadata.put_i32(
             metadata_offset + COUNTER_LABEL_OFFSET,
             label_bytes.len() as i32,
@@ -393,6 +421,30 @@ impl CncFile {
             )));
         }
         self.counters_values_buffer().put_i64_ordered(offset, value);
+        Ok(())
+    }
+
+    /// Release a counter record so shared readers stop reporting it as allocated.
+    pub fn free_counter(&self, counter_id: i32) -> Result<()> {
+        if counter_id < 0 {
+            return Err(AeronError::IllegalArgument(format!(
+                "negative counter id: {counter_id}"
+            )));
+        }
+        let counter_id = counter_id as usize;
+        let metadata_offset = counter_id.saturating_mul(COUNTER_METADATA_LENGTH);
+        let value_offset = counter_id.saturating_mul(COUNTER_VALUE_LENGTH);
+        if metadata_offset + COUNTER_METADATA_LENGTH > self.0.counters_metadata_length
+            || value_offset + COUNTER_REFERENCE_ID_OFFSET + 8 > self.0.counters_values_length
+        {
+            return Err(AeronError::IllegalState(format!(
+                "counter id {counter_id} does not fit CnC counter regions"
+            )));
+        }
+        self.counters_metadata_buffer()
+            .put_i32_ordered(metadata_offset, 0);
+        self.counters_values_buffer()
+            .put_i64_ordered(value_offset, 0);
         Ok(())
     }
 

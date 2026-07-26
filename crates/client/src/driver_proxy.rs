@@ -5,8 +5,8 @@ use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::command::{
-    DestinationMessageFlyweight, PublicationMessageFlyweight, RemoveMessageFlyweight,
-    SubscriptionMessageFlyweight, TerminateDriverFlyweight,
+    CounterMessageFlyweight, DestinationMessageFlyweight, PublicationMessageFlyweight,
+    RemoveMessageFlyweight, SubscriptionMessageFlyweight, TerminateDriverFlyweight,
 };
 use crate::error::{AeronError, Result};
 
@@ -172,6 +172,52 @@ impl<'a> DriverProxy<'a> {
             ));
         }
 
+        Ok(correlation_id)
+    }
+
+    /// Add a client-owned counter and return its registration correlation id.
+    pub fn add_counter(&self, type_id: i32, key: &[u8], label: &str) -> Result<i64> {
+        let correlation_id = self.next_correlation_id();
+        let length = crate::command::KEY_BUFFER_OFFSET + key.len() + 4 + label.len();
+        let mut buf = vec![0u8; length];
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = CounterMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(correlation_id);
+        flyweight.set_type_id(type_id);
+        flyweight.set_key_buffer(key);
+        flyweight.set_label(label);
+
+        let written = self
+            .to_driver_ring_buffer
+            .write(ADD_COUNTER, &atomic_buf, 0, length)?;
+        if !written {
+            return Err(AeronError::CommandWriteFailed(
+                "failed to write add counter command".to_string(),
+            ));
+        }
+        Ok(correlation_id)
+    }
+
+    /// Remove a client-owned counter by its add-counter registration id.
+    pub fn remove_counter(&self, registration_id: i64) -> Result<i64> {
+        let correlation_id = self.next_correlation_id();
+        let length = RemoveMessageFlyweight::length();
+        let mut buf = vec![0u8; length];
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = RemoveMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(correlation_id);
+        flyweight.set_registration_id(registration_id);
+
+        let written = self
+            .to_driver_ring_buffer
+            .write(REMOVE_COUNTER, &atomic_buf, 0, length)?;
+        if !written {
+            return Err(AeronError::CommandWriteFailed(
+                "failed to write remove counter command".to_string(),
+            ));
+        }
         Ok(correlation_id)
     }
 

@@ -20,8 +20,8 @@ use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 
 use aeron_client::cnc_file::{CncFile, DEFAULT_FILE_PAGE_SIZE};
 use aeron_client::command::{
-    PublicationMessageFlyweight, RemoveMessageFlyweight, SubscriptionMessageFlyweight,
-    TerminateDriverFlyweight,
+    CounterMessageFlyweight, PublicationMessageFlyweight, RemoveMessageFlyweight,
+    SubscriptionMessageFlyweight, TerminateDriverFlyweight,
 };
 use aeron_client::counters::{
     CONTROL_PROTOCOL_SEMANTIC_VERSION, DRIVER_PUBLISHER_LIMIT_TYPE_ID,
@@ -30,13 +30,14 @@ use aeron_client::counters::{
 };
 use aeron_client::driver_events::{
     ClientTimeoutFlyweight, ErrorResponseFlyweight, ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE,
-    ON_CLIENT_TIMEOUT, ON_ERROR, ON_EXCLUSIVE_PUBLICATION_READY, ON_OPERATION_SUCCESS,
-    ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_IMAGE, OperationSucceededFlyweight,
-    PublicationBuffersReadyFlyweight, SubscriptionReadyFlyweight,
+    ON_CLIENT_TIMEOUT, ON_COUNTER_READY, ON_ERROR, ON_EXCLUSIVE_PUBLICATION_READY,
+    ON_OPERATION_SUCCESS, ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER,
+    ON_UNAVAILABLE_IMAGE, OperationSucceededFlyweight, PublicationBuffersReadyFlyweight,
+    SubscriptionReadyFlyweight,
 };
 use aeron_client::driver_proxy::{
-    ADD_EXCLUSIVE_PUBLICATION, ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE, CLIENT_KEEPALIVE,
-    REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION, TERMINATE_DRIVER,
+    ADD_COUNTER, ADD_EXCLUSIVE_PUBLICATION, ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE,
+    CLIENT_KEEPALIVE, REMOVE_COUNTER, REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION, TERMINATE_DRIVER,
 };
 use aeron_client::log_buffers::LogBuffers;
 use aeron_client::logbuffer::{
@@ -235,11 +236,22 @@ enum Command {
         stream_id: i32,
         channel: String,
     },
+    AddCounter {
+        client_id: i64,
+        correlation_id: i64,
+        type_id: i32,
+        key: Vec<u8>,
+        label: String,
+    },
     RemovePublication {
         correlation_id: i64,
         registration_id: i64,
     },
     RemoveSubscription {
+        correlation_id: i64,
+        registration_id: i64,
+    },
+    RemoveCounter {
         correlation_id: i64,
         registration_id: i64,
     },
@@ -264,8 +276,10 @@ impl Command {
         match self {
             Self::AddPublication { correlation_id, .. }
             | Self::AddSubscription { correlation_id, .. }
+            | Self::AddCounter { correlation_id, .. }
             | Self::RemovePublication { correlation_id, .. }
             | Self::RemoveSubscription { correlation_id, .. }
+            | Self::RemoveCounter { correlation_id, .. }
             | Self::TerminateDriver { correlation_id, .. }
             | Self::Unknown { correlation_id, .. } => Some(*correlation_id),
             Self::Keepalive { .. } | Self::ClientClose { .. } => None,
@@ -293,6 +307,8 @@ pub struct DriverConductor {
     /// in for the shared CnC counters region (not yet laid out); an in-process client shares
     /// these `Arc`s via [`DriverConductor::counters`] until that region lands.
     counters: HashMap<i32, Arc<AtomicI64>>,
+    /// Client counter registration id -> allocated counter id and owner.
+    client_counters: HashMap<i64, (i64, i32)>,
     /// Network publications created this cycle, drained by the driver into the Sender.
     new_network_publications: Vec<NetworkPublication>,
     /// Receive endpoints created this cycle, drained by the driver into the Receiver.
@@ -359,6 +375,7 @@ impl DriverConductor {
             subscriptions: HashMap::new(),
             log_buffers: HashMap::new(),
             counters: HashMap::new(),
+            client_counters: HashMap::new(),
             new_network_publications: Vec::new(),
             new_receive_endpoints: Vec::new(),
             removed_receive_channels: Vec::new(),
@@ -484,6 +501,29 @@ impl DriverConductor {
                 }
                 Ok(())
             }
+            Command::AddCounter {
+                client_id,
+                correlation_id,
+                type_id,
+                key,
+                label,
+            } => {
+                self.touch_client(client_id, now_ns);
+                let counter_id = self.next_counter_id();
+                self.counters
+                    .insert(counter_id, Arc::new(AtomicI64::new(0)));
+                self.publish_counter_with_registration_and_key(
+                    counter_id,
+                    type_id,
+                    correlation_id,
+                    0,
+                    &key,
+                    &label,
+                )?;
+                self.client_counters
+                    .insert(correlation_id, (client_id, counter_id));
+                self.on_counter_ready(correlation_id, counter_id)
+            }
             Command::RemovePublication {
                 correlation_id,
                 registration_id,
@@ -493,6 +533,7 @@ impl DriverConductor {
                         self.removed_network_publications.push(registration_id);
                     }
                     self.counters.remove(&entry.publication_limit_counter_id);
+                    self.cnc.free_counter(entry.publication_limit_counter_id)?;
                 }
                 self.log_buffers.remove(&registration_id);
                 self.on_operation_success(correlation_id)
@@ -510,14 +551,25 @@ impl DriverConductor {
                 }
                 self.on_operation_success(correlation_id)
             }
+            Command::RemoveCounter {
+                correlation_id,
+                registration_id,
+            } => {
+                if let Some((_client_id, counter_id)) =
+                    self.client_counters.remove(&registration_id)
+                {
+                    self.counters.remove(&counter_id);
+                    self.cnc.free_counter(counter_id)?;
+                    self.on_counter_unavailable(registration_id, counter_id)
+                } else {
+                    self.on_operation_success(correlation_id)
+                }
+            }
             Command::Keepalive { client_id } => {
                 self.touch_client(client_id, now_ns);
                 Ok(())
             }
-            Command::ClientClose { client_id } => {
-                self.remove_client(client_id, now_ns);
-                Ok(())
-            }
+            Command::ClientClose { client_id } => self.remove_client(client_id, now_ns),
             Command::TerminateDriver {
                 client_id,
                 correlation_id,
@@ -1376,14 +1428,45 @@ impl DriverConductor {
         value: i64,
         label: &str,
     ) -> Result<()> {
+        self.publish_counter_with_registration(counter_id, type_id, counter_id as i64, value, label)
+    }
+
+    fn publish_counter_with_registration(
+        &self,
+        counter_id: i32,
+        type_id: i32,
+        registration_id: i64,
+        value: i64,
+        label: &str,
+    ) -> Result<()> {
+        self.publish_counter_with_registration_and_key(
+            counter_id,
+            type_id,
+            registration_id,
+            value,
+            &[],
+            label,
+        )
+    }
+
+    fn publish_counter_with_registration_and_key(
+        &self,
+        counter_id: i32,
+        type_id: i32,
+        registration_id: i64,
+        value: i64,
+        key: &[u8],
+        label: &str,
+    ) -> Result<()> {
         if self.cnc.counters_metadata_length()
             >= aeron_client::cnc_file::COUNTER_METADATA_LENGTH * (counter_id as usize + 1)
         {
-            self.cnc.write_counter_metadata(
+            self.cnc.write_counter_metadata_with_key(
                 counter_id,
                 type_id,
-                counter_id as i64,
+                registration_id,
                 value,
+                key,
                 label,
             )?;
         }
@@ -1399,7 +1482,7 @@ impl DriverConductor {
         self.clients.insert(client_id, now_ns);
     }
 
-    fn remove_client(&mut self, client_id: i64, now_ns: i64) {
+    fn remove_client(&mut self, client_id: i64, now_ns: i64) -> Result<()> {
         self.clients.remove(&client_id);
         let removed: Vec<i64> = self
             .publications
@@ -1413,6 +1496,7 @@ impl DriverConductor {
                     self.removed_network_publications.push(registration_id);
                 }
                 self.counters.remove(&entry.publication_limit_counter_id);
+                self.cnc.free_counter(entry.publication_limit_counter_id)?;
             }
             self.log_buffers.remove(&registration_id);
         }
@@ -1429,6 +1513,19 @@ impl DriverConductor {
             }
             self.subscriptions.remove(&registration_id);
         }
+        let removed_counters: Vec<(i64, i32)> = self
+            .client_counters
+            .iter()
+            .filter(|(_, (owner, _))| *owner == client_id)
+            .map(|(&registration_id, &(_, counter_id))| (registration_id, counter_id))
+            .collect();
+        for (registration_id, counter_id) in removed_counters {
+            self.client_counters.remove(&registration_id);
+            self.counters.remove(&counter_id);
+            self.cnc.free_counter(counter_id)?;
+            self.on_counter_unavailable(registration_id, counter_id)?;
+        }
+        Ok(())
     }
 
     /// Detach all images linked to a removed subscription before its endpoint is removed.
@@ -1477,7 +1574,7 @@ impl DriverConductor {
             .collect();
         for client_id in &expired {
             self.on_client_timeout(*client_id)?;
-            self.remove_client(*client_id, now_ns);
+            self.remove_client(*client_id, now_ns)?;
         }
         Ok(expired.len())
     }
@@ -1653,6 +1750,28 @@ impl DriverConductor {
         self.transmit(ON_OPERATION_SUCCESS, &buf, len)
     }
 
+    fn on_counter_ready(&self, correlation_id: i64, counter_id: i32) -> Result<()> {
+        self.transmit_counter_update(ON_COUNTER_READY, correlation_id, counter_id)
+    }
+
+    fn on_counter_unavailable(&self, correlation_id: i64, counter_id: i32) -> Result<()> {
+        self.transmit_counter_update(ON_UNAVAILABLE_COUNTER, correlation_id, counter_id)
+    }
+
+    fn transmit_counter_update(
+        &self,
+        message_type: i32,
+        correlation_id: i64,
+        counter_id: i32,
+    ) -> Result<()> {
+        let mut scratch = [0u8; 12];
+        let len = scratch.len();
+        let buf = AtomicBuffer::new(&mut scratch);
+        buf.put_i64(0, correlation_id);
+        buf.put_i32(8, counter_id);
+        self.transmit(message_type, &buf, len)
+    }
+
     fn on_client_timeout(&self, client_id: i64) -> Result<()> {
         let mut scratch = [0u8; 8];
         let len = scratch.len();
@@ -1730,6 +1849,29 @@ fn decode_command(
                 channel: fw.channel(),
             })
         }
+        ADD_COUNTER if length >= aeron_client::command::KEY_BUFFER_OFFSET => {
+            let fw = CounterMessageFlyweight::new(*buffer, offset);
+            let key_length = fw.key_buffer_length();
+            let label_offset = fw.label_buffer_offset();
+            if label_offset + 4 > length {
+                return None;
+            }
+            let label_length = fw.label_buffer_length();
+            if aeron_client::command::KEY_BUFFER_OFFSET + key_length + 4 + label_length > length {
+                return None;
+            }
+            let mut key = vec![0u8; key_length];
+            buffer.get_bytes(offset + fw.key_buffer_offset(), &mut key);
+            let mut label_bytes = vec![0u8; label_length];
+            buffer.get_bytes(offset + label_offset + 4, &mut label_bytes);
+            Some(Command::AddCounter {
+                client_id: fw.client_id(),
+                correlation_id: fw.correlation_id(),
+                type_id: fw.type_id(),
+                key,
+                label: String::from_utf8_lossy(&label_bytes).into_owned(),
+            })
+        }
         REMOVE_PUBLICATION => {
             let fw = RemoveMessageFlyweight::new(*buffer, offset);
             Some(Command::RemovePublication {
@@ -1740,6 +1882,13 @@ fn decode_command(
         REMOVE_SUBSCRIPTION => {
             let fw = RemoveMessageFlyweight::new(*buffer, offset);
             Some(Command::RemoveSubscription {
+                correlation_id: fw.correlation_id(),
+                registration_id: fw.registration_id(),
+            })
+        }
+        REMOVE_COUNTER => {
+            let fw = RemoveMessageFlyweight::new(*buffer, offset);
+            Some(Command::RemoveCounter {
                 correlation_id: fw.correlation_id(),
                 registration_id: fw.registration_id(),
             })
@@ -1790,9 +1939,13 @@ fn error_code(error: &DriverError) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeron_client::cnc_file::{DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH};
+    use aeron_client::cnc_file::{
+        DEFAULT_COUNTER_METADATA_LENGTH, DEFAULT_COUNTER_VALUES_LENGTH, DEFAULT_ERROR_LOG_LENGTH,
+        DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH,
+    };
     use aeron_client::driver_events::{
-        ErrorResponseFlyweight, ON_CLIENT_TIMEOUT, ON_ERROR, ON_SUBSCRIPTION_READY,
+        CounterUpdateFlyweight, ErrorResponseFlyweight, ON_CLIENT_TIMEOUT, ON_COUNTER_READY,
+        ON_ERROR, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER,
     };
     use aeron_client::driver_proxy::DriverProxy;
     use agrona::BroadcastReceiver;
@@ -1836,10 +1989,13 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_file(&path);
-        let cnc = CncFile::create_new(
+        let cnc = CncFile::create_new_with_regions(
             &path,
             DEFAULT_TO_DRIVER_LENGTH,
             DEFAULT_TO_CLIENTS_LENGTH,
+            DEFAULT_COUNTER_METADATA_LENGTH,
+            DEFAULT_COUNTER_VALUES_LENGTH,
+            DEFAULT_ERROR_LOG_LENGTH,
             LIVENESS_TIMEOUT_NS,
         )
         .unwrap();
@@ -1903,6 +2059,66 @@ mod tests {
         assert!(got);
         assert_eq!(seen_type, ON_SUBSCRIPTION_READY);
         assert_eq!(seen_correlation, correlation_id);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn adds_and_removes_client_counters_through_the_cnc() {
+        let (cnc, path) = temp_cnc("client-counter");
+        let dir = temp_dir("client-counter");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+        let registration_id = client.add_counter(77, &[1, 2, 3], "test counter").unwrap();
+
+        assert_eq!(conductor.do_work(1_000).unwrap(), 1);
+        let mut ready_correlation = 0;
+        let mut counter_id = -1;
+        assert!(
+            events
+                .receive_next(|msg_type, buf, offset, _len| {
+                    assert_eq!(msg_type, ON_COUNTER_READY);
+                    let update = CounterUpdateFlyweight::wrap(*buf, offset);
+                    ready_correlation = update.correlation_id();
+                    counter_id = update.counter_id();
+                })
+                .unwrap()
+        );
+        assert_eq!(ready_correlation, registration_id);
+        assert!(conductor.counters().contains_key(&counter_id));
+        let metadata = conductor.cnc().counters_metadata_buffer();
+        let metadata_offset = counter_id as usize * aeron_client::cnc_file::COUNTER_METADATA_LENGTH;
+        assert_eq!(
+            metadata.get_i32(metadata_offset),
+            aeron_client::cnc_file::COUNTER_RECORD_ALLOCATED
+        );
+        assert_eq!(
+            metadata.get_i32(metadata_offset + aeron_client::cnc_file::COUNTER_TYPE_ID_OFFSET),
+            77
+        );
+
+        let remove_correlation = client.remove_counter(registration_id).unwrap();
+        assert_eq!(conductor.do_work(2_000).unwrap(), 1);
+        let mut unavailable_correlation = 0;
+        let mut unavailable_id = -1;
+        assert!(
+            events
+                .receive_next(|msg_type, buf, offset, _len| {
+                    assert_eq!(msg_type, ON_UNAVAILABLE_COUNTER);
+                    let update = CounterUpdateFlyweight::wrap(*buf, offset);
+                    unavailable_correlation = update.correlation_id();
+                    unavailable_id = update.counter_id();
+                })
+                .unwrap()
+        );
+        assert_eq!(unavailable_correlation, registration_id);
+        assert_eq!(unavailable_id, counter_id);
+        assert_ne!(remove_correlation, unavailable_correlation);
+        assert!(!conductor.counters().contains_key(&counter_id));
+        assert_eq!(metadata.get_i32(metadata_offset), 0);
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
@@ -2774,14 +2990,26 @@ mod tests {
         let client = proxy(&cnc);
 
         client.client_keepalive().unwrap();
+        let counter_registration = client.add_counter(88, &[9, 8], "timeout counter").unwrap();
         conductor.do_work(1_000).unwrap();
         assert_eq!(conductor.active_client_count(), 1);
+        let mut counter_id = -1;
+        assert!(
+            events
+                .receive_next(|msg_type, buf, offset, _len| {
+                    assert_eq!(msg_type, ON_COUNTER_READY);
+                    counter_id = CounterUpdateFlyweight::wrap(*buf, offset).counter_id();
+                })
+                .unwrap()
+        );
+        assert!(conductor.counters().contains_key(&counter_id));
 
         assert_eq!(
             conductor.do_work(1_000 + LIVENESS_TIMEOUT_NS + 1).unwrap(),
             1
         );
         assert_eq!(conductor.active_client_count(), 0);
+        assert!(!conductor.counters().contains_key(&counter_id));
 
         let mut seen_client_id = 0;
         assert!(
@@ -2793,6 +3021,20 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(seen_client_id, CLIENT_ID);
+        let mut unavailable_registration = 0;
+        let mut unavailable_id = -1;
+        assert!(
+            events
+                .receive_next(|msg_type, buf, offset, _len| {
+                    assert_eq!(msg_type, ON_UNAVAILABLE_COUNTER);
+                    let update = CounterUpdateFlyweight::wrap(*buf, offset);
+                    unavailable_registration = update.correlation_id();
+                    unavailable_id = update.counter_id();
+                })
+                .unwrap()
+        );
+        assert_eq!(unavailable_registration, counter_registration);
+        assert_eq!(unavailable_id, counter_id);
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
