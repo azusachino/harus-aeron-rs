@@ -3066,6 +3066,7 @@ mod tests {
         CounterUpdateFlyweight, ErrorResponseFlyweight, NextAvailableSessionIdFlyweight,
         ON_AVAILABLE_IMAGE, ON_CLIENT_TIMEOUT, ON_COUNTER_READY, ON_ERROR,
         ON_NEXT_AVAILABLE_SESSION_ID, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER,
+        ON_UNAVAILABLE_IMAGE,
     };
     use aeron_client::driver_proxy::DriverProxy;
     use agrona::BroadcastReceiver;
@@ -3670,7 +3671,7 @@ mod tests {
 
         client.add_subscription("aeron-spy:aeron:ipc", 7).unwrap();
         conductor.do_work(1_000).unwrap();
-        client.add_publication("aeron:ipc", 7).unwrap();
+        let publication = client.add_publication("aeron:ipc", 7).unwrap();
         conductor.do_work(2_000).unwrap();
 
         let mut event_types = Vec::new();
@@ -3680,6 +3681,17 @@ mod tests {
         {}
         assert!(event_types.contains(&ON_SUBSCRIPTION_READY));
         assert!(event_types.contains(&ON_AVAILABLE_IMAGE));
+
+        client.remove_publication(publication, false).unwrap();
+        conductor.do_work(3_000).unwrap();
+        let mut removed_spy_image = false;
+        while events
+            .receive_next(|message_type, _, _, _| {
+                removed_spy_image |= message_type == ON_UNAVAILABLE_IMAGE;
+            })
+            .unwrap()
+        {}
+        assert!(removed_spy_image);
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
