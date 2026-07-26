@@ -13,6 +13,7 @@ pub mod driver;
 pub mod error;
 pub mod ext;
 pub mod flow_control;
+pub mod log_factory;
 pub mod loss_detector;
 pub mod media;
 pub mod multicast_flow_control;

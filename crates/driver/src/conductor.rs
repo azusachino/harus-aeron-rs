@@ -62,6 +62,7 @@ use crate::error::{DriverError, Result};
 use crate::flow_control::{
     MULTICAST_RRWM_DEFAULT, UNICAST_RRWM_DEFAULT, retransmit_receiver_window_multiple,
 };
+use crate::log_factory::{FileStoreLogFactory, LogFactory};
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::udp_channel::UdpChannel;
@@ -1385,10 +1386,13 @@ impl DriverConductor {
         let dir = self.aeron_dir.join("publications");
         std::fs::create_dir_all(&dir)
             .map_err(|e| DriverError::IllegalState(format!("create publications dir: {e}")))?;
-        let path = dir.join(format!("{registration_id}.logbuffer"));
-
-        let buffers = LogBuffers::map_new(&path, term_length, DEFAULT_FILE_PAGE_SIZE)
-            .map_err(|e| DriverError::IllegalState(format!("map log buffer: {e}")))?;
+        let factory = FileStoreLogFactory::new(&dir, DEFAULT_FILE_PAGE_SIZE)?;
+        let path = factory.publication_path(registration_id);
+        let buffers = factory.new_publication(
+            registration_id,
+            term_length,
+            self.configuration.term_buffer_sparse_file,
+        )?;
 
         // Seed every partition and place the active tail at the requested replay position.
         // With no replay parameters this is the normal zero-position initialisation.

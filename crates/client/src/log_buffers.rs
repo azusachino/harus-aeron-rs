@@ -136,6 +136,29 @@ impl LogBuffers {
         Self::from_storage(BufferStorage::Bytes(bytes))
     }
 
+    /// Create a zeroed in-memory log and initialise its geometry metadata.
+    pub fn from_zeroed(term_length: i32, page_size: i32) -> Result<Self> {
+        if let Err(msg) = check_term_length(term_length) {
+            return Err(AeronError::IllegalState(msg));
+        }
+        if let Err(msg) = check_page_size(page_size) {
+            return Err(AeronError::IllegalState(msg));
+        }
+        let total_len = term_length as usize * PARTITION_COUNT as usize + LOG_META_DATA_LENGTH;
+        let storage = BufferStorage::Bytes(vec![0; total_len]);
+        let meta_offset = total_len - LOG_META_DATA_LENGTH;
+        let metadata = unsafe {
+            AtomicBuffer::from_raw_parts(
+                (storage.as_ptr() as *mut u8).add(meta_offset),
+                LOG_META_DATA_LENGTH,
+            )
+        };
+        set_term_length(&metadata, term_length);
+        set_page_size(&metadata, page_size);
+        set_end_of_stream_position(&metadata, NO_END_OF_STREAM_POSITION);
+        Self::from_storage(storage)
+    }
+
     fn from_storage(storage: BufferStorage) -> Result<Self> {
         let log_length = storage.len();
         if log_length < LOG_META_DATA_LENGTH {
