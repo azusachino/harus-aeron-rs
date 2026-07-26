@@ -97,9 +97,11 @@ type NetworkSessionKey = NetworkImageKey;
 /// Receive-side session states from Aeron's `DataPacketDispatcher`.
 ///
 /// Reference: `vendor/aeron/aeron-driver/src/main/java/io/aeron/driver/DataPacketDispatcher.java`
-/// (`SessionState`, `onDataPacket`, and `onSetupMessage`). This state is intentionally separate
-/// from `images`: DATA may arrive before SETUP, and cooldown/no-interest sessions must not create
-/// an image just because a later SETUP is received.
+/// (`SessionState`, `onDataPacket`, and `onSetupMessage`). This is the Rust equivalent of
+/// Aeron's `DataPacketDispatcher`; the dispatcher is intentionally kept in the conductor so
+/// endpoint ownership, image lifecycle, and CnC events share one state machine. This state is
+/// intentionally separate from `images`: DATA may arrive before SETUP, and cooldown/no-interest
+/// sessions must not create an image just because a later SETUP is received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NetworkSessionState {
     PendingSetupFrame,
