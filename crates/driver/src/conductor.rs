@@ -29,9 +29,10 @@ use aeron_client::counters::{
     SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION,
 };
 use aeron_client::driver_events::{
-    ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE, ON_EXCLUSIVE_PUBLICATION_READY,
-    ON_OPERATION_SUCCESS, ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_IMAGE,
-    OperationSucceededFlyweight, PublicationBuffersReadyFlyweight, SubscriptionReadyFlyweight,
+    ErrorResponseFlyweight, ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE, ON_ERROR,
+    ON_EXCLUSIVE_PUBLICATION_READY, ON_OPERATION_SUCCESS, ON_PUBLICATION_READY,
+    ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_IMAGE, OperationSucceededFlyweight,
+    PublicationBuffersReadyFlyweight, SubscriptionReadyFlyweight,
 };
 use aeron_client::driver_proxy::{
     ADD_EXCLUSIVE_PUBLICATION, ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE, CLIENT_KEEPALIVE,
@@ -198,6 +199,10 @@ enum Command {
         client_id: i64,
         correlation_id: i64,
     },
+    Unknown {
+        correlation_id: i64,
+        message_type: i32,
+    },
 }
 
 pub struct DriverConductor {
@@ -328,8 +333,8 @@ impl DriverConductor {
         // Decode records into owned commands first; the ring-buffer read borrow cannot be
         // held while we mutate conductor state.
         let mut commands: Vec<Command> = Vec::new();
-        let read = self.to_driver.read(|msg_type, buffer, offset, _length| {
-            if let Some(cmd) = decode_command(msg_type, buffer, offset) {
+        let read = self.to_driver.read(|msg_type, buffer, offset, length| {
+            if let Some(cmd) = decode_command(msg_type, buffer, offset, length) {
                 commands.push(cmd);
             }
         });
@@ -439,6 +444,14 @@ impl DriverConductor {
                     Ok(())
                 }
             }
+            Command::Unknown {
+                correlation_id,
+                message_type,
+            } => self.on_error(
+                correlation_id,
+                6,
+                format!("ERROR - command typeId={message_type}"),
+            ),
         }
     }
 
@@ -1537,6 +1550,17 @@ impl DriverConductor {
         self.transmit(ON_OPERATION_SUCCESS, &buf, len)
     }
 
+    fn on_error(&self, correlation_id: i64, code: i32, message: String) -> Result<()> {
+        let length = 12 + 4 + message.len();
+        let mut bytes = vec![0u8; length];
+        let buf = AtomicBuffer::new(&mut bytes);
+        let error = ErrorResponseFlyweight::wrap(buf, 0);
+        error.set_offending_command_correlation_id(correlation_id);
+        error.set_error_code(code);
+        error.set_error_message(&message);
+        self.transmit(ON_ERROR, &buf, length)
+    }
+
     fn transmit(&self, msg_type_id: i32, buffer: &AtomicBuffer, length: usize) -> Result<()> {
         self.to_clients
             .transmit(msg_type_id, buffer, 0, length)
@@ -1568,7 +1592,12 @@ impl DriverConductor {
     }
 }
 
-fn decode_command(msg_type: i32, buffer: &AtomicBuffer, offset: usize) -> Option<Command> {
+fn decode_command(
+    msg_type: i32,
+    buffer: &AtomicBuffer,
+    offset: usize,
+    length: usize,
+) -> Option<Command> {
     match msg_type {
         ADD_PUBLICATION | ADD_EXCLUSIVE_PUBLICATION => {
             let fw = PublicationMessageFlyweight::new(*buffer, offset);
@@ -1622,6 +1651,13 @@ fn decode_command(msg_type: i32, buffer: &AtomicBuffer, offset: usize) -> Option
                 correlation_id: fw.correlation_id(),
             })
         }
+        _ if length >= aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH => {
+            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
+            Some(Command::Unknown {
+                correlation_id: fw.correlation_id(),
+                message_type: msg_type,
+            })
+        }
         _ => None,
     }
 }
@@ -1630,7 +1666,7 @@ fn decode_command(msg_type: i32, buffer: &AtomicBuffer, offset: usize) -> Option
 mod tests {
     use super::*;
     use aeron_client::cnc_file::{DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH};
-    use aeron_client::driver_events::ON_SUBSCRIPTION_READY;
+    use aeron_client::driver_events::{ErrorResponseFlyweight, ON_ERROR, ON_SUBSCRIPTION_READY};
     use aeron_client::driver_proxy::DriverProxy;
     use agrona::BroadcastReceiver;
     use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
@@ -1740,6 +1776,57 @@ mod tests {
         assert!(got);
         assert_eq!(seen_type, ON_SUBSCRIPTION_READY);
         assert_eq!(seen_correlation, correlation_id);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reports_unknown_client_commands_to_the_originating_correlation() {
+        let (cnc, path) = temp_cnc("unknown-command");
+        let dir = temp_dir("unknown-command");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+
+        let mut command_bytes = [0u8; aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH];
+        let command = aeron_client::command::CorrelatedMessageFlyweight::new(
+            AtomicBuffer::new(&mut command_bytes),
+            0,
+        );
+        command.set_client_id(CLIENT_ID);
+        command.set_correlation_id(77);
+        let ring = ManyToOneRingBuffer::new(cnc.to_driver_buffer()).unwrap();
+        let command_length = command_bytes.len();
+        ring.write(
+            932_467_234,
+            &AtomicBuffer::new(&mut command_bytes),
+            0,
+            command_length,
+        )
+        .unwrap();
+
+        conductor.do_work(1_000).unwrap();
+
+        let mut seen_type = 0;
+        let mut seen_correlation = 0;
+        let mut seen_code = 0;
+        let mut seen_message = String::new();
+        assert!(
+            events
+                .receive_next(|msg_type, buf, offset, _len| {
+                    seen_type = msg_type;
+                    let error = ErrorResponseFlyweight::wrap(*buf, offset);
+                    seen_correlation = error.offending_command_correlation_id();
+                    seen_code = error.error_code();
+                    seen_message = error.error_message().unwrap();
+                })
+                .unwrap()
+        );
+        assert_eq!(seen_type, ON_ERROR);
+        assert_eq!(seen_correlation, 77);
+        assert_eq!(seen_code, 6);
+        assert_eq!(seen_message, "ERROR - command typeId=932467234");
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
