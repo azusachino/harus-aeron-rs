@@ -4,6 +4,10 @@
 
 use std::env;
 
+use aeron_client::logbuffer::{TERM_MAX_LENGTH, TERM_MIN_LENGTH};
+
+use crate::error::{DriverError, Result};
+
 pub const TERM_BUFFER_SPARSE_FILE_PROP_NAME: &str = "aeron.term.buffer.sparse.file";
 pub const TERM_BUFFER_LENGTH_PROP_NAME: &str = "aeron.term.buffer.length";
 pub const TERM_BUFFER_LENGTH_DEFAULT: usize = 16 * 1024 * 1024;
@@ -98,6 +102,66 @@ impl Default for Configuration {
 }
 
 impl Configuration {
+    /// Validate the settings that define log-buffer geometry and publication flow control.
+    ///
+    /// Keeping this check at driver construction makes invalid MediaDriver contexts fail before
+    /// a CnC file or transport endpoint is created.
+    pub fn validate(&self) -> Result<()> {
+        validate_term_length(
+            "publication-term-buffer-length",
+            self.publication_term_buffer_length,
+        )?;
+        validate_term_length("ipc-term-buffer-length", self.ipc_term_buffer_length)?;
+        validate_mtu("mtu-length", self.mtu_length)?;
+        validate_mtu("ipc-mtu-length", self.ipc_mtu_length)?;
+        validate_mtu_against_term(
+            "mtu-length",
+            self.mtu_length,
+            self.publication_term_buffer_length,
+        )?;
+        validate_mtu_against_term(
+            "ipc-mtu-length",
+            self.ipc_mtu_length,
+            self.ipc_term_buffer_length,
+        )?;
+        validate_window(
+            "publication-term-window-length",
+            self.publication_term_window_length,
+            self.mtu_length,
+            self.publication_term_buffer_length,
+        )?;
+        validate_window(
+            "ipc-publication-term-window-length",
+            self.ipc_publication_term_window_length,
+            self.ipc_mtu_length,
+            self.ipc_term_buffer_length,
+        )?;
+        if !(0..=MAX_RESEND_MAX).contains(&self.max_resend) {
+            return Err(DriverError::IllegalArgument(format!(
+                "max-resend must be between 0 and {MAX_RESEND_MAX}: value={}",
+                self.max_resend
+            )));
+        }
+        if self.client_liveness_timeout_ns <= 0 {
+            return Err(DriverError::IllegalArgument(format!(
+                "client-liveness-timeout must be positive: value={}",
+                self.client_liveness_timeout_ns
+            )));
+        }
+        if self.untethered_linger_timeout_ns < -1 {
+            return Err(DriverError::IllegalArgument(format!(
+                "untethered-linger-timeout must be -1 or non-negative: value={}",
+                self.untethered_linger_timeout_ns
+            )));
+        }
+        if self.stream_session_limit == 0 {
+            return Err(DriverError::IllegalArgument(
+                "stream-session-limit must be positive".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Create a new Configuration populated with values from environment variables or defaults.
     pub fn load() -> Self {
         Self::load_from_getter(|prop| env::var(prop).ok())
@@ -204,6 +268,48 @@ impl Configuration {
     }
 }
 
+fn validate_term_length(name: &str, value: usize) -> Result<()> {
+    let value_i32 = i32::try_from(value)
+        .map_err(|_| DriverError::IllegalArgument(format!("{name} is too large: value={value}")))?;
+    if !(TERM_MIN_LENGTH..=TERM_MAX_LENGTH).contains(&value_i32)
+        || !(value_i32 as u32).is_power_of_two()
+    {
+        return Err(DriverError::IllegalArgument(format!(
+            "{name} must be a power of two between {TERM_MIN_LENGTH} and {TERM_MAX_LENGTH}: value={value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_mtu(name: &str, value: usize) -> Result<()> {
+    if !(32..=65_504).contains(&value) || value % 32 != 0 {
+        return Err(DriverError::IllegalArgument(format!(
+            "{name} must be a multiple of 32 between 32 and 65504: value={value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_mtu_against_term(name: &str, mtu: usize, term_length: usize) -> Result<()> {
+    let max_message_length = (term_length / 8).min(16 * 1024 * 1024);
+    if mtu > max_message_length {
+        return Err(DriverError::IllegalArgument(format!(
+            "{name} exceeds max message length {max_message_length}: value={mtu}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_window(name: &str, window: usize, mtu: usize, term_length: usize) -> Result<()> {
+    if window != 0 && (window < mtu || window > term_length / 2) {
+        return Err(DriverError::IllegalArgument(format!(
+            "{name} must be zero or between MTU {mtu} and half term length {}: value={window}",
+            term_length / 2
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +395,62 @@ mod tests {
         });
 
         assert_eq!(config.client_liveness_timeout_ns, 123_456_789);
+    }
+
+    #[test]
+    fn should_validate_default_geometry() {
+        assert!(Configuration::default().validate().is_ok());
+    }
+
+    #[test]
+    fn should_reject_invalid_term_geometry() {
+        let config = Configuration {
+            ipc_term_buffer_length: 65_535,
+            ..Configuration::default()
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("ipc-term-buffer-length"));
+    }
+
+    #[test]
+    fn should_reject_invalid_mtu_and_window_geometry() {
+        let mtu_config = Configuration {
+            mtu_length: 1_500,
+            ..Configuration::default()
+        };
+        assert!(
+            mtu_config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("mtu-length")
+        );
+
+        let window_config = Configuration {
+            publication_term_window_length: 1_024,
+            ..Configuration::default()
+        };
+        assert!(
+            window_config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("publication-term-window-length")
+        );
+    }
+
+    #[test]
+    fn should_reject_non_positive_liveness_timeout() {
+        let config = Configuration {
+            client_liveness_timeout_ns: 0,
+            ..Configuration::default()
+        };
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("client-liveness-timeout")
+        );
     }
 }

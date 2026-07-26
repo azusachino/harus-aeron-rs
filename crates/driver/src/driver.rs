@@ -67,6 +67,7 @@ impl MediaDriver {
         aeron_dir: PathBuf,
         remove_aeron_dir_on_drop: bool,
     ) -> Result<Self> {
+        configuration.validate()?;
         std::fs::create_dir_all(&aeron_dir).map_err(|e| {
             crate::error::DriverError::IllegalState(format!("create aeron dir: {e}"))
         })?;
@@ -375,6 +376,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(driver.cnc().client_liveness_timeout_ns(), timeout_ns);
+    }
+
+    #[test]
+    fn should_reject_invalid_configuration_before_creating_cnc() {
+        let directory = std::env::temp_dir().join(format!(
+            "aeron-driver-invalid-config-{}",
+            DRIVER_INSTANCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = MediaDriver::launch_in(
+            Configuration {
+                mtu_length: 1_500,
+                ..Configuration::default()
+            },
+            &directory,
+        );
+        assert!(matches!(
+            result,
+            Err(crate::error::DriverError::IllegalArgument(message))
+                if message.contains("mtu-length")
+        ));
+        assert!(!directory.exists());
     }
 
     #[test]

@@ -109,7 +109,7 @@
 {"layer": "driver", "rust_equivalent": "crates/driver/src/flow_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/FlowControlTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/conductor.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/IpcPublicationTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/loss_detector.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/LossDetectorTest.java"}
-{"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/MediaDriverContextTest.java"}
+{"layer": "driver", "rust_equivalent": "crates/driver/src/configuration.rs::Configuration::validate plus crates/driver/src/driver.rs::tests", "status": "in-progress", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/MediaDriverContextTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/driver.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/MediaDriverTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/multicast_flow_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/MinMulticastFlowControlTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/network_publication.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/NetworkPublicationTest.java"}
