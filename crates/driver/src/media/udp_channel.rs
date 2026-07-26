@@ -421,7 +421,14 @@ fn get_multicast_control_address(endpoint_address: SocketAddr) -> Result<SocketA
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn assert_socket(channel: &UdpChannel, local: SocketAddr, remote: SocketAddr) {
+        assert_eq!(channel.local_data, local);
+        assert_eq!(channel.local_control, local);
+        assert_eq!(channel.remote_data, remote);
+        assert_eq!(channel.remote_control, remote);
+    }
 
     #[test]
     fn should_handle_explicit_local_address_and_port_format() {
@@ -471,6 +478,36 @@ mod tests {
     }
 
     #[test]
+    fn should_handle_explicit_local_control_address_and_port_format_ipv6() {
+        let channel = UdpChannel::parse(
+            "aeron:udp?control=[fe80::5246:5dff:fe73:df06]:40124|control-mode=dynamic",
+        )
+        .unwrap();
+
+        assert_socket(
+            &channel,
+            SocketAddr::new(
+                IpAddr::V6("fe80::5246:5dff:fe73:df06".parse::<Ipv6Addr>().unwrap()),
+                40124,
+            ),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        );
+    }
+
+    #[test]
+    fn should_handle_explicit_local_address_and_port_format_with_uri_ordering() {
+        let channel =
+            UdpChannel::parse("aeron:udp?endpoint=localhost:40124|interface=localhost:40123")
+                .unwrap();
+
+        assert_socket(
+            &channel,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40123),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40124),
+        );
+    }
+
+    #[test]
     fn should_not_allow_dynamic_control_mode_without_explicit_control() {
         let err = UdpChannel::parse("aeron:udp?control-mode=dynamic").unwrap_err();
         assert!(
@@ -499,6 +536,40 @@ mod tests {
             channel.remote_control,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40124)
         );
+    }
+
+    #[test]
+    fn should_handle_implied_local_port_format() {
+        let channel =
+            UdpChannel::parse("aeron:udp?interface=localhost|endpoint=localhost:40124").unwrap();
+        assert_socket(
+            &channel,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40124),
+        );
+    }
+
+    #[test]
+    fn should_handle_ipv4_and_ipv6_any_interface_addresses() {
+        let ipv4 =
+            UdpChannel::parse("aeron:udp?endpoint=localhost:40124|interface=0.0.0.0").unwrap();
+        assert_socket(
+            &ipv4,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40124),
+        );
+
+        let ipv6 = UdpChannel::parse("aeron:udp?endpoint=[::1]:40124|interface=[::]").unwrap();
+        assert_socket(
+            &ipv6,
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 40124),
+        );
+    }
+
+    #[test]
+    fn should_reject_endpoint_without_port() {
+        assert!(UdpChannel::parse("aeron:udp?endpoint=localhost").is_err());
     }
 
     #[test]
@@ -537,5 +608,96 @@ mod tests {
             channel.remote_data,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(224, 10, 9, 9)), 40124)
         );
+    }
+
+    #[test]
+    fn should_handle_unicast_canonical_forms() {
+        let default = UdpChannel::parse("aeron:udp?endpoint=192.168.0.1:40456").unwrap();
+        let local =
+            UdpChannel::parse("aeron:udp?interface=127.0.0.1|endpoint=192.168.0.1:40456").unwrap();
+        let local_port =
+            UdpChannel::parse("aeron:udp?interface=127.0.0.1:40455|endpoint=192.168.0.1:40456")
+                .unwrap();
+
+        assert_eq!(default.canonical_form, "UDP-0.0.0.0:0-192.168.0.1:40456");
+        assert_eq!(local.canonical_form, "UDP-127.0.0.1:0-192.168.0.1:40456");
+        assert_eq!(
+            local_port.canonical_form,
+            "UDP-127.0.0.1:40455-192.168.0.1:40456"
+        );
+    }
+
+    #[test]
+    fn should_handle_multicast_canonical_forms_and_tags() {
+        let channel =
+            UdpChannel::parse("aeron:udp?interface=127.0.0.1:40455|endpoint=224.0.1.1:40456")
+                .unwrap();
+        assert_eq!(
+            channel.canonical_form,
+            "UDP-127.0.0.1:40455-224.0.1.1:40456"
+        );
+
+        let manual = UdpChannel::parse("aeron:udp?control-mode=manual|tags=1001").unwrap();
+        assert_eq!(manual.canonical_form, "UDP-0.0.0.0:0-0.0.0.0:0#1001");
+        assert!(manual.is_manual_control_mode());
+        assert_eq!(manual.tag, 1001);
+    }
+
+    #[test]
+    fn should_parse_buffer_window_timestamp_and_control_parameters() {
+        let channel = UdpChannel::parse(
+            "aeron:udp?endpoint=127.0.0.1:9999|so-sndbuf=4096|so-rcvbuf=8192|rcv-wnd=16384|channel-rcv-ts-offset=reserved|channel-snd-ts-offset=8|gtag=1234|nak-delay=34ms|control-mode=response|control=127.0.0.1:10001",
+        )
+        .unwrap();
+
+        assert_eq!(channel.socket_sndbuf_length, 4096);
+        assert_eq!(channel.socket_rcvbuf_length, 8192);
+        assert_eq!(channel.receiver_window_length, 16384);
+        assert_eq!(
+            channel.channel_receive_timestamp_offset,
+            RESERVED_VALUE_MESSAGE_OFFSET
+        );
+        assert_eq!(channel.channel_send_timestamp_offset, 8);
+        assert_eq!(channel.group_tag, Some(1234));
+        assert_eq!(channel.nak_delay_ns, Some(34_000_000));
+        assert!(channel.is_response_control_mode());
+    }
+
+    #[test]
+    fn should_reject_invalid_group_tag_and_accept_control_modes() {
+        assert!(UdpChannel::parse("aeron:udp?endpoint=localhost:8080|gtag=foo").is_err());
+        assert_eq!(
+            UdpChannel::parse("aeron:udp?control=localhost:8080|control-mode=dynamic")
+                .unwrap()
+                .control_mode,
+            ControlMode::Dynamic
+        );
+        assert_eq!(
+            UdpChannel::parse("aeron:udp?control=localhost:8080|control-mode=manual")
+                .unwrap()
+                .control_mode,
+            ControlMode::Manual
+        );
+    }
+
+    #[test]
+    fn should_detect_multicast_destinations() {
+        let cases = [
+            ("aeron:udp?endpoint=192.168.0.1:5656", false),
+            ("aeron:udp?endpoint=224.0.0.1:5656", true),
+            ("aeron:udp?endpoint=239.255.255.251:1010", true),
+            (
+                "aeron:udp?endpoint=[fe80::ce81:b1c:bd2c:69e%utun3]:8080",
+                false,
+            ),
+        ];
+
+        for (uri, expected) in cases {
+            assert_eq!(
+                UdpChannel::parse(uri).unwrap().is_multicast,
+                expected,
+                "unexpected multicast result for {uri}"
+            );
+        }
     }
 }
