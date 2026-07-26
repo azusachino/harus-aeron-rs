@@ -35,6 +35,41 @@ pub struct StaticWindowCongestionControl {
     cc_outcome: u64,
 }
 
+/// Cubic congestion-control configuration surface used by the driver image setup.
+///
+/// The current Rust driver keeps the feedback algorithm static, but preserves Cubic's
+/// negotiated maximum congestion-window boundary: channel `rcv-wnd`, then context default,
+/// both clamped to half a term and expressed in MTUs.
+pub struct CubicCongestionControl {
+    max_congestion_window: i32,
+}
+
+impl CubicCongestionControl {
+    pub const CC_PARAM_VALUE: &'static str = "cubic";
+
+    pub fn new(
+        udp_channel: &UdpChannel,
+        term_length: i32,
+        mtu_length: i32,
+        context_initial_window_length: i32,
+    ) -> Self {
+        let channel_window = udp_channel.receiver_window_length as i32;
+        let initial_window_length = if channel_window != 0 {
+            channel_window
+        } else {
+            context_initial_window_length
+        };
+        let byte_window = flow_control::receiver_window_length(term_length, initial_window_length);
+        Self {
+            max_congestion_window: byte_window / mtu_length.max(1),
+        }
+    }
+
+    pub fn max_congestion_window(&self) -> i32 {
+        self.max_congestion_window
+    }
+}
+
 impl StaticWindowCongestionControl {
     /// URI `cc` value identifying this strategy (upstream `CC_PARAM_VALUE`).
     pub const CC_PARAM_VALUE: &'static str = "static";
@@ -123,5 +158,26 @@ mod tests {
             CONTEXT_INITIAL_WINDOW_LENGTH,
         );
         assert_eq!(cc.initial_window_length(), term_length / 2);
+    }
+
+    #[test]
+    fn cubic_should_set_window_length_from_channel() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|rcv-wnd=8192").unwrap();
+        let cc = CubicCongestionControl::new(&channel, 1_000_000, 1024, 65_536);
+        assert_eq!(cc.max_congestion_window(), 8192 / 1024);
+    }
+
+    #[test]
+    fn cubic_should_set_window_length_from_context() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999").unwrap();
+        let cc = CubicCongestionControl::new(&channel, 1_000_000, 1024, 65_536);
+        assert_eq!(cc.max_congestion_window(), 65_536 / 1024);
+    }
+
+    #[test]
+    fn cubic_should_set_window_length_from_term_length() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|rcv-wnd=8192").unwrap();
+        let cc = CubicCongestionControl::new(&channel, 8192, 1024, 65_536);
+        assert_eq!(cc.max_congestion_window(), 8192 / 2 / 1024);
     }
 }
