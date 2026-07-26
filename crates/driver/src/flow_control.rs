@@ -64,6 +64,13 @@ pub fn retransmit_receiver_window_multiple(
 mod tests {
     use super::*;
 
+    const MULTICAST_DEFAULT: i32 = MULTICAST_RRWM_DEFAULT;
+    const UNICAST_DEFAULT: i32 = UNICAST_RRWM_DEFAULT;
+
+    fn rrwm(uri: &str, default_value: i32) -> Result<i32> {
+        retransmit_receiver_window_multiple(&UdpChannel::parse(uri).unwrap(), default_value)
+    }
+
     #[test]
     fn should_use_resend_length_if_smallest() {
         assert_eq!(
@@ -103,5 +110,78 @@ mod tests {
             .unwrap();
             assert!(retransmit_receiver_window_multiple(&channel, 2).is_err());
         }
+    }
+
+    #[test]
+    fn should_use_default_multicast_rrwm_when_not_set_in_uri() {
+        for uri in [
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=max",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost",
+        ] {
+            assert_eq!(rrwm(uri, MULTICAST_DEFAULT).unwrap(), MULTICAST_DEFAULT);
+        }
+    }
+
+    #[test]
+    fn should_use_rrwm_from_uri_for_all_multicast_strategies() {
+        for uri in [
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=max,rrwm:8",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=max,foo:bar,rrwm:8,a:b",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=min,rrwm:8",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:100/10,t:100ms,rrwm:8",
+        ] {
+            assert_eq!(rrwm(uri, 2).unwrap(), 8);
+        }
+    }
+
+    #[test]
+    fn should_reject_invalid_rrwm_values() {
+        for value in ["a", "", " ", "foo", "0", "-1"] {
+            let uri = format!(
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=max,rrwm:{value}"
+            );
+            assert!(rrwm(&uri, 2).is_err(), "expected invalid rrwm: {value:?}");
+        }
+    }
+
+    #[test]
+    fn should_use_multicast_default_for_max_min_and_tagged() {
+        for strategy in ["max", "min", "tagged"] {
+            let uri =
+                format!("aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc={strategy}");
+            assert_eq!(rrwm(&uri, MULTICAST_DEFAULT).unwrap(), MULTICAST_DEFAULT);
+        }
+    }
+
+    #[test]
+    fn should_use_multicast_context_value_for_max_min_and_tagged() {
+        for strategy in ["max", "min", "tagged"] {
+            let uri =
+                format!("aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc={strategy}");
+            assert_eq!(rrwm(&uri, 2).unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn should_use_uri_value_for_max_min_and_tagged() {
+        for strategy in ["max", "min", "tagged"] {
+            let uri = format!(
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc={strategy},rrwm:8"
+            );
+            assert_eq!(rrwm(&uri, 2).unwrap(), 8);
+        }
+    }
+
+    #[test]
+    fn should_use_default_unicast_rrwm_when_not_set_in_context() {
+        assert_eq!(
+            rrwm("aeron:udp?endpoint=localhost:0", UNICAST_DEFAULT).unwrap(),
+            UNICAST_DEFAULT
+        );
+    }
+
+    #[test]
+    fn should_use_unicast_context_rrwm_when_set() {
+        assert_eq!(rrwm("aeron:udp?endpoint=localhost:0", 2).unwrap(), 2);
     }
 }
