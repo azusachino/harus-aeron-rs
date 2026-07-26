@@ -63,6 +63,7 @@ use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
 use crate::network_publication::NetworkPublication;
 use crate::publication_image::{ImageLifecycleEvent, PublicationImage};
+use crate::publication_params::{DummyPublicationLookup, PublicationParams};
 use crate::receiver::ReceiverStatus;
 
 /// Source identity reported for IPC images — matches upstream's `aeron:ipc` channel identity.
@@ -672,6 +673,15 @@ impl DriverConductor {
             )));
         }
         let (identity, requested_session_id) = publication_options(&channel)?;
+        let channel_uri = ChannelUri::parse(&channel)
+            .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
+        let params = PublicationParams::get_publication_params(
+            &channel_uri,
+            &self.configuration,
+            &DummyPublicationLookup,
+            stream_id,
+            &channel,
+        )?;
         let session_id = requested_session_id.unwrap_or_else(|| self.next_session_id());
         if let Some(existing) = self.publications.values().find(|publication| {
             publication.stream_id == stream_id
@@ -709,8 +719,8 @@ impl DriverConductor {
         )?;
 
         let log_file_name = if is_ipc {
-            let term_length = self.configuration.ipc_term_buffer_length as i32;
-            let mtu = self.configuration.ipc_mtu_length as i32;
+            let term_length = params.term_length as i32;
+            let mtu = params.mtu_length as i32;
             let (name, buffers) = self.allocate_log_buffers(
                 registration_id,
                 session_id,
@@ -721,8 +731,8 @@ impl DriverConductor {
             self.log_buffers.insert(registration_id, buffers);
             Some(name)
         } else if is_udp {
-            let term_length = self.configuration.publication_term_buffer_length as i32;
-            let mtu = self.configuration.mtu_length as i32;
+            let term_length = params.term_length as i32;
+            let mtu = params.mtu_length as i32;
             let (name, buffers) = self.allocate_log_buffers(
                 registration_id,
                 session_id,
@@ -2180,6 +2190,31 @@ mod tests {
         assert_eq!(
             conductor.publications().values().next().unwrap().session_id,
             4096
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn applies_publication_term_and_mtu_parameters_at_registration() {
+        let (cnc, path) = temp_cnc("publication-params");
+        let dir = temp_dir("publication-params");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        client
+            .add_publication("aeron:ipc?term-length=64k|mtu=4k", 7)
+            .unwrap();
+
+        conductor.do_work(1_000).unwrap();
+
+        let entry = conductor.publications().values().next().unwrap();
+        let buffers = LogBuffers::map_existing(entry.log_file_name.as_ref().unwrap()).unwrap();
+        assert_eq!(buffers.term_length(), 64 * 1024);
+        assert_eq!(
+            aeron_client::logbuffer::mtu_length(&buffers.meta_data_buffer()),
+            4 * 1024
         );
 
         drop(conductor);
