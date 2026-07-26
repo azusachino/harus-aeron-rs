@@ -135,6 +135,19 @@ fn is_ipc_channel(channel: &str) -> bool {
     channel == "aeron:ipc" || channel.starts_with("aeron:ipc?")
 }
 
+fn is_spy_channel(channel: &str) -> bool {
+    ChannelUri::parse(channel).is_ok_and(|uri| uri.prefix() == aeron_client::uri::SPY_QUALIFIER)
+}
+
+fn underlying_channel(channel: &str) -> Result<String> {
+    let mut uri = ChannelUri::parse(channel)
+        .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
+    if uri.prefix() == aeron_client::uri::SPY_QUALIFIER {
+        uri.set_prefix("");
+    }
+    Ok(uri.to_string())
+}
+
 /// Returns `true` for a UDP (network) channel.
 fn is_udp_channel(channel: &str) -> bool {
     channel.starts_with("aeron:udp")
@@ -147,7 +160,7 @@ fn is_udp_channel(channel: &str) -> bool {
 /// same-session reliability conflict without treating subscriptions for different sessions as
 /// conflicting.
 fn subscription_options(channel: &str) -> Result<(String, Option<i32>, bool, bool)> {
-    let mut uri = ChannelUri::parse(channel)
+    let mut uri = ChannelUri::parse(underlying_channel(channel)?.as_str())
         .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
     let session_id = uri
         .get(SESSION_ID_PARAM_NAME)
@@ -447,6 +460,8 @@ pub struct DriverConductor {
     subscriber_counters: HashMap<(i64, i64), i32>,
     /// IPC publication links, including untethered lifecycle state and their position counters.
     ipc_subscriptions: HashMap<(i64, i64), IpcSubscriptionState>,
+    /// Local spy subscriptions linked directly to a publication's log buffer.
+    spy_subscriptions: HashMap<(i64, i64), i64>,
     /// Network publications created this cycle, drained by the driver into the Sender.
     new_network_publications: Vec<NetworkPublication>,
     /// Receive endpoints created this cycle, drained by the driver into the Receiver.
@@ -533,6 +548,7 @@ impl DriverConductor {
             client_counters: HashMap::new(),
             subscriber_counters: HashMap::new(),
             ipc_subscriptions: HashMap::new(),
+            spy_subscriptions: HashMap::new(),
             new_network_publications: Vec::new(),
             new_receive_endpoints: Vec::new(),
             removed_receive_channels: Vec::new(),
@@ -640,7 +656,13 @@ impl DriverConductor {
                 channel,
             } => {
                 self.touch_client(client_id, now_ns);
-                if !is_ipc_channel(&channel) && !is_udp_channel(&channel) {
+                let parsed_channel = ChannelUri::parse(&channel).map_err(|error| {
+                    DriverError::InvalidChannel(format!("parse channel: {error}"))
+                })?;
+                let is_spy = parsed_channel.prefix() == aeron_client::uri::SPY_QUALIFIER;
+                let is_ipc = parsed_channel.is_ipc();
+                let is_udp = parsed_channel.is_udp();
+                if !is_ipc && !is_udp {
                     return Err(DriverError::InvalidChannel(format!(
                         "unsupported media in channel: {channel}"
                     )));
@@ -673,9 +695,11 @@ impl DriverConductor {
                 );
                 self.clear_no_interest_for_subscription(&channel, stream_id, session_id);
                 self.on_subscription_ready(correlation_id)?;
-                if is_ipc_channel(&channel) {
+                if is_spy {
+                    self.link_spy_subscription(registration_id, stream_id, session_id)?;
+                } else if is_ipc {
                     self.link_ipc_subscription(registration_id, stream_id, now_ns)?;
-                } else if is_udp_channel(&channel) {
+                } else if is_udp {
                     self.add_receive_endpoint(&channel)?;
                     self.link_network_subscription(registration_id, stream_id)?;
                 }
@@ -709,6 +733,7 @@ impl DriverConductor {
                 registration_id,
             } => {
                 self.remove_ipc_subscription_links_for_publication(registration_id)?;
+                self.remove_spy_subscription_links_for_publication(registration_id)?;
                 if let Some(entry) = self.publications.remove(&registration_id) {
                     if !entry.is_ipc {
                         self.removed_network_publications.push(registration_id);
@@ -724,6 +749,7 @@ impl DriverConductor {
                 registration_id,
             } => {
                 self.remove_ipc_subscription_links_for_subscription(registration_id)?;
+                self.remove_spy_subscription_links_for_subscription(registration_id)?;
                 if let Some(subscription) = self.subscriptions.remove(&registration_id) {
                     self.detach_images_for_subscription(registration_id, now_ns)?;
                     self.remove_receive_destination_aliases(&subscription.channel)?;
@@ -1043,6 +1069,7 @@ impl DriverConductor {
                     now_ns,
                 )?;
             }
+            self.link_spy_publication(registration_id, stream_id, session_id, &log_file_name)?;
         }
         Ok(())
     }
@@ -1759,6 +1786,136 @@ impl DriverConductor {
         Ok(())
     }
 
+    /// Link a local spy subscription to an existing publication without creating a second
+    /// transport endpoint. A spy consumes the publication's own log buffer, so it observes the
+    /// same data that the Sender or IPC publication is producing.
+    fn link_spy_subscription(
+        &mut self,
+        subscription_registration_id: i64,
+        stream_id: i32,
+        session_id: Option<i32>,
+    ) -> Result<()> {
+        let subscription_channel = self
+            .subscriptions
+            .get(&subscription_registration_id)
+            .map(|subscription| subscription.channel.clone())
+            .ok_or_else(|| {
+                DriverError::IllegalState(format!(
+                    "missing spy subscription {subscription_registration_id}"
+                ))
+            })?;
+        let (identity, _, _, _) = subscription_options(&subscription_channel)?;
+        let matches: Vec<i64> = self
+            .publications
+            .values()
+            .filter(|publication| {
+                publication.stream_id == stream_id
+                    && session_id.is_none_or(|id| id == publication.session_id)
+                    && publication_options(&publication.channel)
+                        .is_ok_and(|(publication_identity, _)| publication_identity == identity)
+                    && publication.log_file_name.is_some()
+            })
+            .map(|publication| publication.registration_id)
+            .collect();
+
+        for publication_registration_id in matches {
+            self.link_spy_pair(publication_registration_id, subscription_registration_id)?;
+        }
+        Ok(())
+    }
+
+    fn link_spy_publication(
+        &mut self,
+        publication_registration_id: i64,
+        stream_id: i32,
+        session_id: i32,
+        _log_file_name: &str,
+    ) -> Result<()> {
+        let publication_channel = self
+            .publications
+            .get(&publication_registration_id)
+            .map(|publication| publication.channel.clone())
+            .ok_or_else(|| {
+                DriverError::IllegalState(format!(
+                    "missing publication {publication_registration_id}"
+                ))
+            })?;
+        let publication_identity = publication_options(&publication_channel)?.0;
+        let subscriptions: Vec<i64> = self
+            .subscriptions
+            .values()
+            .filter(|subscription| {
+                is_spy_channel(&subscription.channel)
+                    && subscription.stream_id == stream_id
+                    && subscription.session_id.is_none_or(|id| id == session_id)
+                    && subscription_options(&subscription.channel)
+                        .is_ok_and(|(identity, _, _, _)| identity == publication_identity)
+            })
+            .map(|subscription| subscription.registration_id)
+            .collect();
+        for subscription_registration_id in subscriptions {
+            self.link_spy_pair(publication_registration_id, subscription_registration_id)?;
+        }
+        Ok(())
+    }
+
+    fn link_spy_pair(
+        &mut self,
+        publication_registration_id: i64,
+        subscription_registration_id: i64,
+    ) -> Result<()> {
+        if self
+            .spy_subscriptions
+            .contains_key(&(publication_registration_id, subscription_registration_id))
+        {
+            return Ok(());
+        }
+        let (log_file_name, session_id, stream_id, source_identity, is_ipc, limit_counter_id) =
+            self.publications
+                .get(&publication_registration_id)
+                .map(|publication| {
+                    (
+                        publication.log_file_name.clone(),
+                        publication.session_id,
+                        publication.stream_id,
+                        publication.channel.clone(),
+                        publication.is_ipc,
+                        publication.publication_limit_counter_id,
+                    )
+                })
+                .ok_or_else(|| {
+                    DriverError::IllegalState(format!(
+                        "missing publication {publication_registration_id}"
+                    ))
+                })?;
+        let log_file_name = log_file_name.ok_or_else(|| {
+            DriverError::IllegalState(format!(
+                "publication {publication_registration_id} has no log buffer"
+            ))
+        })?;
+        if is_ipc {
+            self.open_publication_window(
+                limit_counter_id,
+                self.configuration.ipc_term_buffer_length,
+            )?;
+            if let Some(buffers) = self.log_buffers.get(&publication_registration_id) {
+                aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
+            }
+        }
+        let correlation_id = self.on_available_image(
+            session_id,
+            stream_id,
+            subscription_registration_id,
+            &log_file_name,
+            &source_identity,
+        )?;
+        self.spy_subscriptions.insert(
+            (publication_registration_id, subscription_registration_id),
+            correlation_id,
+        );
+        Ok(())
+    }
+
     /// Link a newly registered UDP subscription to images already active for its stream.
     ///
     /// Aeron performs this link from the conductor; waiting for another SETUP packet would
@@ -2136,6 +2293,7 @@ impl DriverConductor {
             .collect();
         for registration_id in removed {
             self.remove_ipc_subscription_links_for_publication(registration_id)?;
+            self.remove_spy_subscription_links_for_publication(registration_id)?;
             if let Some(entry) = self.publications.remove(&registration_id) {
                 if !entry.is_ipc {
                     self.removed_network_publications.push(registration_id);
@@ -2153,6 +2311,7 @@ impl DriverConductor {
             .collect();
         for (registration_id, channel) in removed_subscriptions {
             self.remove_ipc_subscription_links_for_subscription(registration_id)?;
+            self.remove_spy_subscription_links_for_subscription(registration_id)?;
             self.detach_images_for_subscription(registration_id, now_ns)?;
             self.remove_receive_destination_aliases(&channel)?;
             if let Some(endpoint_key) = self.release_receive_endpoint(&channel) {
@@ -2247,6 +2406,44 @@ impl DriverConductor {
             if let Some(link) = self.ipc_subscriptions.remove(&key) {
                 self.on_unavailable_image(link.correlation_id, subscription_registration_id)?;
                 self.release_image_counter(subscription_registration_id, link.correlation_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_spy_subscription_links_for_publication(
+        &mut self,
+        publication_registration_id: i64,
+    ) -> Result<()> {
+        let keys: Vec<_> = self
+            .spy_subscriptions
+            .keys()
+            .filter(|(publication_id, _)| *publication_id == publication_registration_id)
+            .copied()
+            .collect();
+        for key @ (_, subscription_registration_id) in keys {
+            if let Some(correlation_id) = self.spy_subscriptions.remove(&key) {
+                self.on_unavailable_image(correlation_id, subscription_registration_id)?;
+                self.release_image_counter(subscription_registration_id, correlation_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_spy_subscription_links_for_subscription(
+        &mut self,
+        subscription_registration_id: i64,
+    ) -> Result<()> {
+        let keys: Vec<_> = self
+            .spy_subscriptions
+            .keys()
+            .filter(|(_, subscription_id)| *subscription_id == subscription_registration_id)
+            .copied()
+            .collect();
+        for key @ (_, subscription_id) in keys {
+            if let Some(correlation_id) = self.spy_subscriptions.remove(&key) {
+                self.on_unavailable_image(correlation_id, subscription_id)?;
+                self.release_image_counter(subscription_id, correlation_id)?;
             }
         }
         Ok(())
@@ -2867,8 +3064,8 @@ mod tests {
     };
     use aeron_client::driver_events::{
         CounterUpdateFlyweight, ErrorResponseFlyweight, NextAvailableSessionIdFlyweight,
-        ON_CLIENT_TIMEOUT, ON_COUNTER_READY, ON_ERROR, ON_NEXT_AVAILABLE_SESSION_ID,
-        ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER,
+        ON_AVAILABLE_IMAGE, ON_CLIENT_TIMEOUT, ON_COUNTER_READY, ON_ERROR,
+        ON_NEXT_AVAILABLE_SESSION_ID, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_COUNTER,
     };
     use aeron_client::driver_proxy::DriverProxy;
     use agrona::BroadcastReceiver;
@@ -3457,6 +3654,32 @@ mod tests {
         assert_eq!(seen_correlation, 77);
         assert_eq!(seen_code, 6);
         assert_eq!(seen_message, "ERROR - command typeId=932467234");
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn links_spy_subscription_to_an_existing_ipc_publication() {
+        let (cnc, path) = temp_cnc("spy-subscription");
+        let dir = temp_dir("spy-subscription");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+
+        client.add_subscription("aeron-spy:aeron:ipc", 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+        client.add_publication("aeron:ipc", 7).unwrap();
+        conductor.do_work(2_000).unwrap();
+
+        let mut event_types = Vec::new();
+        while events
+            .receive_next(|message_type, _, _, _| event_types.push(message_type))
+            .unwrap()
+        {}
+        assert!(event_types.contains(&ON_SUBSCRIPTION_READY));
+        assert!(event_types.contains(&ON_AVAILABLE_IMAGE));
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);

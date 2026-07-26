@@ -65,7 +65,10 @@ pub const LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT: u64 = TERM_BUFFER_LENGTH_DEF
 pub const CONDUCTOR_BUFFER_LENGTH_PROP_NAME: &str = "aeron.conductor.buffer.length";
 pub const TO_CLIENTS_BUFFER_LENGTH_PROP_NAME: &str = "aeron.clients.buffer.length";
 pub const COUNTERS_VALUES_BUFFER_LENGTH_PROP_NAME: &str = "aeron.counters.buffer.length";
+pub const COUNTERS_VALUES_BUFFER_LENGTH_MIN: usize = 1 << 20;
+pub const COUNTERS_VALUES_BUFFER_LENGTH_MAX: usize = 500 * 1024 * 1024;
 pub const ERROR_BUFFER_LENGTH_PROP_NAME: &str = "aeron.error.buffer.length";
+pub const ERROR_BUFFER_LENGTH_MIN: usize = DEFAULT_ERROR_LOG_LENGTH;
 pub const FILE_PAGE_SIZE_PROP_NAME: &str = "aeron.file.page.size";
 pub const NAK_MULTICAST_MAX_BACKOFF_PROP_NAME: &str = "aeron.nak.multicast.max.backoff";
 pub const NAK_UNICAST_DELAY_PROP_NAME: &str = "aeron.nak.unicast.delay";
@@ -176,13 +179,24 @@ impl Configuration {
                 self.to_clients_buffer_length
             )));
         }
-        if self.counters_metadata_buffer_length == 0
-            || self.counters_values_buffer_length == 0
-            || self.error_buffer_length == 0
+        if !(COUNTERS_VALUES_BUFFER_LENGTH_MIN..=COUNTERS_VALUES_BUFFER_LENGTH_MAX)
+            .contains(&self.counters_values_buffer_length)
         {
+            return Err(DriverError::IllegalArgument(format!(
+                "counters-buffer-length must be between {COUNTERS_VALUES_BUFFER_LENGTH_MIN} and {COUNTERS_VALUES_BUFFER_LENGTH_MAX}: value={}",
+                self.counters_values_buffer_length
+            )));
+        }
+        if self.counters_metadata_buffer_length == 0 {
             return Err(DriverError::IllegalArgument(
-                "counter and error buffer lengths must be positive".to_string(),
+                "counters-metadata-buffer-length must be positive".to_string(),
             ));
+        }
+        if self.error_buffer_length < ERROR_BUFFER_LENGTH_MIN {
+            return Err(DriverError::IllegalArgument(format!(
+                "error-buffer-length must be at least {ERROR_BUFFER_LENGTH_MIN}: value={}",
+                self.error_buffer_length
+            )));
         }
         check_page_size(self.file_page_size)
             .map_err(|message| DriverError::IllegalArgument(message.to_string()))?;
@@ -765,6 +779,38 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("publication-term-window-length")
+        );
+    }
+
+    #[test]
+    fn should_reject_invalid_counter_and_error_buffer_lengths() {
+        for length in [
+            COUNTERS_VALUES_BUFFER_LENGTH_MIN - 1,
+            COUNTERS_VALUES_BUFFER_LENGTH_MAX + 1,
+        ] {
+            let config = Configuration {
+                counters_values_buffer_length: length,
+                ..Configuration::default()
+            };
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("counters-buffer-length")
+            );
+        }
+
+        let config = Configuration {
+            error_buffer_length: ERROR_BUFFER_LENGTH_MIN - 1,
+            ..Configuration::default()
+        };
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("error-buffer-length")
         );
     }
 
