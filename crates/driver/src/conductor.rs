@@ -42,7 +42,9 @@ use aeron_client::driver_proxy::{
 };
 use aeron_client::log_buffers::LogBuffers;
 use aeron_client::logbuffer::{
-    FRAME_ALIGNMENT, align, set_initial_term_id, set_mtu_length, store_default_frame_header,
+    FRAME_ALIGNMENT, align, compute_position, initial_term_id, position_bits_to_shift,
+    raw_tail_volatile_active, set_initial_term_id, set_mtu_length, store_default_frame_header,
+    term_id, term_offset,
 };
 use aeron_client::protocol::{
     CURRENT_VERSION, DATA_HEADER_LENGTH, DATA_SESSION_ID_FIELD_OFFSET, DATA_STREAM_ID_FIELD_OFFSET,
@@ -50,7 +52,9 @@ use aeron_client::protocol::{
     FLAGS_FIELD_OFFSET, FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA, HDR_TYPE_SETUP, SetupFlyweight,
     TYPE_FIELD_OFFSET,
 };
-use aeron_client::uri::{ChannelUri, RELIABLE_PARAM_NAME, SESSION_ID_PARAM_NAME};
+use aeron_client::uri::{
+    ChannelUri, RELIABLE_PARAM_NAME, SESSION_ID_PARAM_NAME, TETHER_PARAM_NAME,
+};
 
 use crate::configuration::Configuration;
 use crate::error::{DriverError, Result};
@@ -132,7 +136,7 @@ fn is_udp_channel(channel: &str) -> bool {
 /// otherwise shared transport. Removing both from the identity lets the conductor reject the
 /// same-session reliability conflict without treating subscriptions for different sessions as
 /// conflicting.
-fn subscription_options(channel: &str) -> Result<(String, Option<i32>, bool)> {
+fn subscription_options(channel: &str) -> Result<(String, Option<i32>, bool, bool)> {
     let mut uri = ChannelUri::parse(channel)
         .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
     let session_id = uri
@@ -152,9 +156,19 @@ fn subscription_options(channel: &str) -> Result<(String, Option<i32>, bool)> {
         })
         .transpose()?
         .unwrap_or(true);
+    let tethered = uri
+        .get(TETHER_PARAM_NAME)
+        .map(|value| {
+            value.parse::<bool>().map_err(|_| {
+                DriverError::InvalidChannel(format!("invalid tether value in channel: {value}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(true);
     uri.remove(RELIABLE_PARAM_NAME);
     uri.remove(SESSION_ID_PARAM_NAME);
-    Ok((uri.to_string(), session_id, reliable))
+    uri.remove(TETHER_PARAM_NAME);
+    Ok((uri.to_string(), session_id, reliable, tethered))
 }
 
 fn subscription_conflicts(
@@ -165,7 +179,7 @@ fn subscription_conflicts(
     reliable: bool,
 ) -> bool {
     subscription_options(&existing.channel)
-        .is_ok_and(|(existing_identity, _, _)| existing_identity == identity)
+        .is_ok_and(|(existing_identity, _, _, _)| existing_identity == identity)
         && existing.stream_id == stream_id
         && existing.reliable != reliable
         && match (existing.session_id, session_id) {
@@ -264,6 +278,25 @@ pub struct SubscriptionEntry {
     /// Whether this subscription expects reliable delivery; defaults to true in Aeron URI
     /// semantics.
     pub reliable: bool,
+    /// Whether this subscription participates in local publication flow control.
+    pub tethered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpcSubscriptionStateKind {
+    Active,
+    Linger,
+    Resting,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IpcSubscriptionState {
+    publication_registration_id: i64,
+    correlation_id: i64,
+    subscriber_position_id: i32,
+    tethered: bool,
+    state: IpcSubscriptionStateKind,
+    time_of_last_update_ns: i64,
 }
 
 #[derive(Debug)]
@@ -371,6 +404,8 @@ pub struct DriverConductor {
     client_counters: HashMap<i64, (i64, i32)>,
     /// Subscriber-position counter id keyed by the subscription and image notification that own it.
     subscriber_counters: HashMap<(i64, i64), i32>,
+    /// IPC publication links, including untethered lifecycle state and their position counters.
+    ipc_subscriptions: HashMap<(i64, i64), IpcSubscriptionState>,
     /// Network publications created this cycle, drained by the driver into the Sender.
     new_network_publications: Vec<NetworkPublication>,
     /// Receive endpoints created this cycle, drained by the driver into the Receiver.
@@ -439,6 +474,7 @@ impl DriverConductor {
             counters: HashMap::new(),
             client_counters: HashMap::new(),
             subscriber_counters: HashMap::new(),
+            ipc_subscriptions: HashMap::new(),
             new_network_publications: Vec::new(),
             new_receive_endpoints: Vec::new(),
             removed_receive_channels: Vec::new(),
@@ -501,6 +537,7 @@ impl DriverConductor {
         }
 
         work += self.sweep_inactive_images(now_ns)?;
+        work += self.sweep_ipc_subscriptions(now_ns)?;
         work += self.sweep_timed_out_clients(now_ns)?;
         Ok(work)
     }
@@ -515,7 +552,14 @@ impl DriverConductor {
                 exclusive,
             } => {
                 self.touch_client(client_id, now_ns);
-                self.on_add_publication(client_id, correlation_id, stream_id, channel, exclusive)
+                self.on_add_publication(
+                    client_id,
+                    correlation_id,
+                    stream_id,
+                    channel,
+                    exclusive,
+                    now_ns,
+                )
             }
             Command::AddSubscription {
                 client_id,
@@ -529,7 +573,7 @@ impl DriverConductor {
                         "unsupported media in channel: {channel}"
                     )));
                 }
-                let (identity, session_id, reliable) = subscription_options(&channel)?;
+                let (identity, session_id, reliable, tethered) = subscription_options(&channel)?;
                 if is_udp_channel(&channel)
                     && self.subscriptions.values().any(|existing| {
                         subscription_conflicts(existing, &identity, stream_id, session_id, reliable)
@@ -552,12 +596,13 @@ impl DriverConductor {
                         channel: channel.clone(),
                         session_id,
                         reliable,
+                        tethered,
                     },
                 );
                 self.clear_no_interest_for_subscription(&channel, stream_id, session_id);
                 self.on_subscription_ready(correlation_id)?;
                 if is_ipc_channel(&channel) {
-                    self.link_ipc_subscription(registration_id, stream_id)?;
+                    self.link_ipc_subscription(registration_id, stream_id, now_ns)?;
                 } else if is_udp_channel(&channel) {
                     self.add_receive_endpoint(&channel)?;
                     self.link_network_subscription(registration_id, stream_id)?;
@@ -591,6 +636,7 @@ impl DriverConductor {
                 correlation_id,
                 registration_id,
             } => {
+                self.remove_ipc_subscription_links_for_publication(registration_id)?;
                 if let Some(entry) = self.publications.remove(&registration_id) {
                     if !entry.is_ipc {
                         self.removed_network_publications.push(registration_id);
@@ -605,6 +651,7 @@ impl DriverConductor {
                 correlation_id,
                 registration_id,
             } => {
+                self.remove_ipc_subscription_links_for_subscription(registration_id)?;
                 if let Some(subscription) = self.subscriptions.remove(&registration_id) {
                     self.detach_images_for_subscription(registration_id, now_ns)?;
                     if let Some(endpoint_key) = self.release_receive_endpoint(&subscription.channel)
@@ -695,6 +742,7 @@ impl DriverConductor {
         stream_id: i32,
         channel: String,
         exclusive: bool,
+        now_ns: i64,
     ) -> Result<()> {
         // The publication's registration id is the client's correlation id (single-publisher
         // path); the client keys its publication by the registration id echoed back here.
@@ -844,6 +892,7 @@ impl DriverConductor {
                     session_id,
                     publication_limit_counter_id,
                     &log_file_name,
+                    now_ns,
                 )?;
             }
         }
@@ -895,7 +944,7 @@ impl DriverConductor {
     fn add_receive_endpoint(&mut self, channel: &str) -> Result<()> {
         let udp_channel = UdpChannel::parse(channel)
             .map_err(|e| DriverError::InvalidChannel(format!("parse udp channel: {e}")))?;
-        let (endpoint_key, _, _) = subscription_options(channel)?;
+        let (endpoint_key, _, _, _) = subscription_options(channel)?;
         if let Some(reference) = self.receive_channel_references.get_mut(&endpoint_key) {
             reference.references += 1;
             return Ok(());
@@ -1401,6 +1450,7 @@ impl DriverConductor {
         &mut self,
         subscription_registration_id: i64,
         stream_id: i32,
+        now_ns: i64,
     ) -> Result<()> {
         let matches: Vec<(i64, i32, i32, String)> = self
             .publications
@@ -1431,12 +1481,18 @@ impl DriverConductor {
             if let Some(buffers) = self.log_buffers.get(&publication_registration_id) {
                 aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
             }
-            self.on_available_image(
+            let correlation_id = self.on_available_image(
                 session_id,
                 stream_id,
                 subscription_registration_id,
                 &log_file_name,
                 IPC_SOURCE_IDENTITY,
+            )?;
+            self.register_ipc_subscription(
+                publication_registration_id,
+                subscription_registration_id,
+                correlation_id,
+                now_ns,
             )?;
         }
         Ok(())
@@ -1494,6 +1550,7 @@ impl DriverConductor {
         session_id: i32,
         publication_limit_counter_id: i32,
         log_file_name: &str,
+        now_ns: i64,
     ) -> Result<()> {
         let subscribers: Vec<i64> = self
             .subscriptions
@@ -1509,15 +1566,220 @@ impl DriverConductor {
             if let Some(buffers) = self.log_buffers.get(&publication_registration_id) {
                 aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
             }
-            self.on_available_image(
+            let correlation_id = self.on_available_image(
                 session_id,
                 stream_id,
                 subscription_registration_id,
                 log_file_name,
                 IPC_SOURCE_IDENTITY,
             )?;
+            self.register_ipc_subscription(
+                publication_registration_id,
+                subscription_registration_id,
+                correlation_id,
+                now_ns,
+            )?;
         }
         Ok(())
+    }
+
+    fn register_ipc_subscription(
+        &mut self,
+        publication_registration_id: i64,
+        subscription_registration_id: i64,
+        correlation_id: i64,
+        now_ns: i64,
+    ) -> Result<()> {
+        let Some(subscription) = self.subscriptions.get(&subscription_registration_id) else {
+            return Ok(());
+        };
+        let subscriber_position_id = self
+            .subscriber_counters
+            .get(&(subscription_registration_id, correlation_id))
+            .copied()
+            .ok_or_else(|| {
+                DriverError::IllegalState(format!(
+                    "missing IPC subscriber position for subscription {subscription_registration_id}"
+                ))
+            })?;
+        self.ipc_subscriptions.insert(
+            (publication_registration_id, subscription_registration_id),
+            IpcSubscriptionState {
+                publication_registration_id,
+                correlation_id,
+                subscriber_position_id,
+                tethered: subscription.tethered,
+                state: IpcSubscriptionStateKind::Active,
+                time_of_last_update_ns: now_ns,
+            },
+        );
+        self.update_ipc_publication_limit(publication_registration_id)
+    }
+
+    fn publication_position(&self, publication_registration_id: i64) -> Option<i64> {
+        let buffers = self.log_buffers.get(&publication_registration_id)?;
+        let metadata = buffers.meta_data_buffer();
+        let raw_tail = raw_tail_volatile_active(&metadata);
+        Some(compute_position(
+            term_id(raw_tail),
+            term_offset(raw_tail, buffers.term_length()) as i32,
+            position_bits_to_shift(buffers.term_length()) as i32,
+            initial_term_id(&metadata),
+        ))
+    }
+
+    fn update_ipc_publication_limit(&mut self, publication_registration_id: i64) -> Result<()> {
+        let Some(publication) = self.publications.get(&publication_registration_id) else {
+            return Ok(());
+        };
+        let term_length = publication.term_length as i64;
+        let positions: Vec<i64> = self
+            .ipc_subscriptions
+            .values()
+            .filter(|link| {
+                link.publication_registration_id == publication_registration_id
+                    && link.state == IpcSubscriptionStateKind::Active
+            })
+            .filter_map(|link| self.counters.get(&link.subscriber_position_id))
+            .map(|position| position.load(Ordering::Acquire))
+            .collect();
+        let limit = positions
+            .into_iter()
+            .min()
+            .map(|position| position.saturating_add(term_length / 2))
+            .unwrap_or(0);
+        self.set_publication_limit(publication.publication_limit_counter_id, limit)
+    }
+
+    fn set_publication_limit(&self, counter_id: i32, value: i64) -> Result<()> {
+        if let Some(limit) = self.counters.get(&counter_id) {
+            limit.store(value, Ordering::Release);
+        }
+        if self.cnc.counters_values_length() > 0 {
+            self.cnc.set_counter_value(counter_id, value)?;
+        }
+        Ok(())
+    }
+
+    /// Run the IPC publication-side untethered subscription state machine.
+    ///
+    /// This mirrors `IpcPublication.checkUntetheredSubscriptions`: a lagging untethered
+    /// subscriber is removed from flow control after the window timeout, lingers while its
+    /// image is unavailable, then rests before it is rejoined with its previous position.
+    fn sweep_ipc_subscriptions(&mut self, now_ns: i64) -> Result<usize> {
+        let keys: Vec<(i64, i64)> = self.ipc_subscriptions.keys().copied().collect();
+        let mut work = 0;
+        let linger_timeout = if self.configuration.untethered_linger_timeout_ns < 0 {
+            self.configuration.untethered_window_limit_timeout_ns
+        } else {
+            self.configuration.untethered_linger_timeout_ns as u64
+        } as i64;
+
+        for key @ (publication_registration_id, subscription_registration_id) in keys {
+            let Some(link) = self.ipc_subscriptions.get(&key).copied() else {
+                continue;
+            };
+            if !self.publications.contains_key(&publication_registration_id)
+                || !self
+                    .subscriptions
+                    .contains_key(&subscription_registration_id)
+            {
+                self.ipc_subscriptions.remove(&key);
+                continue;
+            }
+
+            let mut next = link;
+            let mut notify_unavailable = false;
+            let publication_position = self
+                .publication_position(publication_registration_id)
+                .unwrap_or(0);
+            let term_length = self
+                .publications
+                .get(&publication_registration_id)
+                .map(|publication| publication.term_length as i64)
+                .unwrap_or(0);
+            let position = self
+                .counters
+                .get(&link.subscriber_position_id)
+                .map(|counter| counter.load(Ordering::Acquire))
+                .unwrap_or(0);
+
+            match link.state {
+                IpcSubscriptionStateKind::Active if !link.tethered => {
+                    let window_limit = publication_position
+                        .saturating_sub(term_length)
+                        .saturating_add(term_length / 4);
+                    if position > window_limit {
+                        next.time_of_last_update_ns = now_ns;
+                    } else if now_ns.saturating_sub(link.time_of_last_update_ns)
+                        >= self.configuration.untethered_window_limit_timeout_ns as i64
+                    {
+                        next.state = IpcSubscriptionStateKind::Linger;
+                        next.time_of_last_update_ns = now_ns;
+                        notify_unavailable = true;
+                    }
+                }
+                IpcSubscriptionStateKind::Linger
+                    if now_ns.saturating_sub(link.time_of_last_update_ns) >= linger_timeout =>
+                {
+                    next.state = IpcSubscriptionStateKind::Resting;
+                    next.time_of_last_update_ns = now_ns;
+                }
+                IpcSubscriptionStateKind::Resting
+                    if now_ns.saturating_sub(link.time_of_last_update_ns)
+                        >= self.configuration.untethered_resting_timeout_ns as i64 =>
+                {
+                    let Some((session_id, stream_id, log_file_name)) = self
+                        .publications
+                        .get(&publication_registration_id)
+                        .and_then(|publication| {
+                            publication.log_file_name.clone().map(|log_file_name| {
+                                (publication.session_id, publication.stream_id, log_file_name)
+                            })
+                        })
+                    else {
+                        continue;
+                    };
+                    let old_position = position;
+                    self.release_image_counter(subscription_registration_id, link.correlation_id)?;
+                    let correlation_id = self.on_available_image(
+                        session_id,
+                        stream_id,
+                        subscription_registration_id,
+                        &log_file_name,
+                        IPC_SOURCE_IDENTITY,
+                    )?;
+                    let Some(subscriber_position_id) = self
+                        .subscriber_counters
+                        .get(&(subscription_registration_id, correlation_id))
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    if let Some(counter) = self.counters.get(&subscriber_position_id) {
+                        counter.store(old_position, Ordering::Release);
+                    }
+                    self.cnc
+                        .set_counter_value(subscriber_position_id, old_position)?;
+                    next.correlation_id = correlation_id;
+                    next.subscriber_position_id = subscriber_position_id;
+                    next.state = IpcSubscriptionStateKind::Active;
+                    next.time_of_last_update_ns = now_ns;
+                }
+                _ => {}
+            }
+
+            if notify_unavailable {
+                self.on_unavailable_image(link.correlation_id, subscription_registration_id)?;
+                work += 1;
+            }
+            self.ipc_subscriptions.insert(key, next);
+            self.update_ipc_publication_limit(publication_registration_id)?;
+            if next.state != link.state {
+                work += 1;
+            }
+        }
+        Ok(work)
     }
 
     /// Open a publication's flow-control window to half a term (the initial window).
@@ -1607,6 +1869,7 @@ impl DriverConductor {
             .map(|p| p.registration_id)
             .collect();
         for registration_id in removed {
+            self.remove_ipc_subscription_links_for_publication(registration_id)?;
             if let Some(entry) = self.publications.remove(&registration_id) {
                 if !entry.is_ipc {
                     self.removed_network_publications.push(registration_id);
@@ -1623,6 +1886,7 @@ impl DriverConductor {
             .map(|(registration_id, subscription)| (*registration_id, subscription.channel.clone()))
             .collect();
         for (registration_id, channel) in removed_subscriptions {
+            self.remove_ipc_subscription_links_for_subscription(registration_id)?;
             self.detach_images_for_subscription(registration_id, now_ns)?;
             if let Some(endpoint_key) = self.release_receive_endpoint(&channel) {
                 self.removed_receive_channels.push(endpoint_key);
@@ -1680,6 +1944,44 @@ impl DriverConductor {
             }
         }
         self.release_subscriber_counters(subscription_registration_id)?;
+        Ok(())
+    }
+
+    fn remove_ipc_subscription_links_for_publication(
+        &mut self,
+        publication_registration_id: i64,
+    ) -> Result<()> {
+        let keys: Vec<_> = self
+            .ipc_subscriptions
+            .keys()
+            .filter(|(publication_id, _)| *publication_id == publication_registration_id)
+            .copied()
+            .collect();
+        for key @ (_, subscription_registration_id) in keys {
+            if let Some(link) = self.ipc_subscriptions.remove(&key) {
+                self.on_unavailable_image(link.correlation_id, subscription_registration_id)?;
+                self.release_image_counter(subscription_registration_id, link.correlation_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_ipc_subscription_links_for_subscription(
+        &mut self,
+        subscription_registration_id: i64,
+    ) -> Result<()> {
+        let keys: Vec<_> = self
+            .ipc_subscriptions
+            .keys()
+            .filter(|(_, subscription_id)| *subscription_id == subscription_registration_id)
+            .copied()
+            .collect();
+        for key in keys {
+            if let Some(link) = self.ipc_subscriptions.remove(&key) {
+                self.on_unavailable_image(link.correlation_id, subscription_registration_id)?;
+                self.release_image_counter(subscription_registration_id, link.correlation_id)?;
+            }
+        }
         Ok(())
     }
 
@@ -3509,6 +3811,106 @@ mod tests {
         assert_eq!(resolved_entry.session_id, tagged_entry.session_id);
         assert_eq!(resolved_entry.term_length, tagged_entry.term_length);
         assert_eq!(resolved_entry.mtu_length, tagged_entry.mtu_length);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn untethered_ipc_subscription_leaves_flow_control_and_rejoins() {
+        let (cnc, path) = temp_cnc("untethered-ipc");
+        let dir = temp_dir("untethered-ipc");
+        let mut config = small_config();
+        config.untethered_window_limit_timeout_ns = 100;
+        config.untethered_linger_timeout_ns = 100;
+        config.untethered_resting_timeout_ns = 100;
+        let mut conductor = DriverConductor::new(config, cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+
+        let publication = client.add_publication("aeron:ipc", 1012).unwrap();
+        let subscription = client
+            .add_subscription("aeron:ipc?tether=false", 1012)
+            .unwrap();
+        conductor.do_work(1_000).unwrap();
+
+        let publication_limit_id = conductor
+            .publications()
+            .get(&publication)
+            .unwrap()
+            .publication_limit_counter_id;
+        assert_eq!(conductor.ipc_subscriptions.len(), 1);
+        assert_eq!(
+            conductor
+                .counters()
+                .get(&publication_limit_id)
+                .unwrap()
+                .load(Ordering::Acquire),
+            (small_config().ipc_term_buffer_length / 2) as i64
+        );
+
+        let publication_log = conductor.log_buffers.get(&publication).unwrap();
+        let metadata = publication_log.meta_data_buffer();
+        aeron_client::logbuffer::set_raw_tail(
+            &metadata,
+            0,
+            aeron_client::logbuffer::pack_tail(1, 0),
+        );
+
+        conductor.do_work(1_101).unwrap();
+        assert_eq!(
+            conductor
+                .ipc_subscriptions
+                .get(&(publication, subscription))
+                .unwrap()
+                .state,
+            IpcSubscriptionStateKind::Linger
+        );
+        assert_eq!(
+            conductor
+                .counters()
+                .get(&publication_limit_id)
+                .unwrap()
+                .load(Ordering::Acquire),
+            0
+        );
+        let mut unavailable = false;
+        while events
+            .receive_next(|msg_type, buf, offset, _| {
+                if msg_type == ON_UNAVAILABLE_IMAGE && buf.get_i64(offset + 8) == subscription {
+                    unavailable = true;
+                }
+            })
+            .unwrap()
+        {}
+        assert!(unavailable);
+
+        conductor.do_work(1_201).unwrap();
+        assert_eq!(
+            conductor
+                .ipc_subscriptions
+                .get(&(publication, subscription))
+                .unwrap()
+                .state,
+            IpcSubscriptionStateKind::Resting
+        );
+        conductor.do_work(1_301).unwrap();
+        assert_eq!(
+            conductor
+                .ipc_subscriptions
+                .get(&(publication, subscription))
+                .unwrap()
+                .state,
+            IpcSubscriptionStateKind::Active
+        );
+        assert!(
+            conductor
+                .counters()
+                .get(&publication_limit_id)
+                .unwrap()
+                .load(Ordering::Acquire)
+                > 0
+        );
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
