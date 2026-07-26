@@ -16,6 +16,7 @@ pub mod loss_detector;
 pub mod media;
 pub mod multicast_flow_control;
 pub mod network_publication;
+pub mod optimal_multicast_delay;
 pub mod publication_image;
 pub mod publication_params;
 pub mod receiver;
