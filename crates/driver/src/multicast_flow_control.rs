@@ -6,7 +6,7 @@
 //! implementations land with their own parity units; this supplier resolves which one applies.
 
 use aeron_client::logbuffer::compute_position;
-use aeron_client::protocol::StatusMessageFlyweight;
+use aeron_client::protocol::{END_OF_STREAM_FLAG, ErrorFlyweight, StatusMessageFlyweight};
 use aeron_client::uri::FC_PARAM_NAME;
 
 use crate::error::{DriverError, Result};
@@ -15,6 +15,7 @@ use crate::publication_params::parse_duration;
 
 const DEFAULT_GROUP_MIN_SIZE: usize = 0;
 const DEFAULT_RECEIVER_TIMEOUT_NS: i64 = 5_000_000_000;
+const DEFAULT_FLOW_CONTROL_GROUP_TAG: i64 = -1;
 
 /// The multicast flow-control strategy a channel selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,8 @@ pub struct MinMulticastFlowControl {
     has_required_receivers: bool,
     last_setup_sender_limit: Option<i64>,
     time_of_last_setup_ns: i64,
+    group_tag: i64,
+    tag_aware: bool,
 }
 
 impl Default for MinMulticastFlowControl {
@@ -113,6 +116,8 @@ impl MinMulticastFlowControl {
             has_required_receivers: true,
             last_setup_sender_limit: None,
             time_of_last_setup_ns: 0,
+            group_tag: DEFAULT_FLOW_CONTROL_GROUP_TAG,
+            tag_aware: false,
         }
     }
 
@@ -123,11 +128,45 @@ impl MinMulticastFlowControl {
         context_group_min_size: usize,
         context_receiver_timeout_ns: i64,
     ) -> Result<()> {
+        self.initialize_mode(
+            udp_channel,
+            context_group_min_size,
+            context_receiver_timeout_ns,
+            false,
+            DEFAULT_FLOW_CONTROL_GROUP_TAG,
+        )
+    }
+
+    fn initialize_tagged(
+        &mut self,
+        udp_channel: &UdpChannel,
+        context_group_min_size: usize,
+        context_receiver_timeout_ns: i64,
+    ) -> Result<()> {
+        self.initialize_mode(
+            udp_channel,
+            context_group_min_size,
+            context_receiver_timeout_ns,
+            true,
+            DEFAULT_FLOW_CONTROL_GROUP_TAG,
+        )
+    }
+
+    fn initialize_mode(
+        &mut self,
+        udp_channel: &UdpChannel,
+        context_group_min_size: usize,
+        context_receiver_timeout_ns: i64,
+        tag_aware: bool,
+        default_group_tag: i64,
+    ) -> Result<()> {
         self.receivers.clear();
         self.group_min_size = context_group_min_size;
         self.receiver_timeout_ns = context_receiver_timeout_ns;
         self.last_setup_sender_limit = None;
         self.time_of_last_setup_ns = 0;
+        self.group_tag = default_group_tag;
+        self.tag_aware = tag_aware;
 
         if let Some(fc_value) = udp_channel.channel_uri.get(FC_PARAM_NAME) {
             for argument in fc_value.split(',') {
@@ -135,7 +174,25 @@ impl MinMulticastFlowControl {
                     self.receiver_timeout_ns =
                         parse_duration("fc receiver timeout", timeout)? as i64;
                 } else if let Some(group) = argument.strip_prefix("g:") {
-                    if let Some((_, min_size)) = group.split_once('/') {
+                    let (tag, min_size) = group.split_once('/').unwrap_or((group, ""));
+                    if self.tag_aware && !tag.is_empty() {
+                        self.group_tag = tag.parse::<i64>().map_err(|_| {
+                            DriverError::IllegalArgument(format!(
+                                "invalid flow control group tag: {tag}"
+                            ))
+                        })?;
+                    }
+                    if self.tag_aware && !group.contains('/') && tag.is_empty() {
+                        return Err(DriverError::IllegalArgument(
+                            "invalid flow control group tag".to_string(),
+                        ));
+                    }
+                    if group.contains('/') {
+                        if min_size.is_empty() {
+                            return Err(DriverError::IllegalArgument(
+                                "invalid flow control group minimum size".to_string(),
+                            ));
+                        }
                         self.group_min_size = min_size.parse::<usize>().map_err(|_| {
                             DriverError::IllegalArgument(format!(
                                 "invalid flow control group minimum size: {min_size}"
@@ -158,6 +215,10 @@ impl MinMulticastFlowControl {
         self.receiver_timeout_ns
     }
 
+    pub fn group_tag(&self) -> i64 {
+        self.group_tag
+    }
+
     pub fn has_required_receivers(&self) -> bool {
         self.has_required_receivers
     }
@@ -170,6 +231,25 @@ impl MinMulticastFlowControl {
         initial_term_id: i32,
         position_bits_to_shift: i32,
         time_ns: i64,
+    ) -> i64 {
+        self.on_status_message_if(
+            status_message,
+            sender_limit,
+            initial_term_id,
+            position_bits_to_shift,
+            time_ns,
+            true,
+        )
+    }
+
+    fn on_status_message_if(
+        &mut self,
+        status_message: StatusMessageFlyweight<'_>,
+        sender_limit: i64,
+        initial_term_id: i32,
+        position_bits_to_shift: i32,
+        time_ns: i64,
+        matches_tag: bool,
     ) -> i64 {
         let position = compute_position(
             status_message.consumption_term_id(),
@@ -184,16 +264,17 @@ impl MinMulticastFlowControl {
         let mut is_existing = false;
 
         for receiver in &mut self.receivers {
-            if receiver.receiver_id == receiver_id {
+            if matches_tag && receiver.receiver_id == receiver_id {
                 receiver.last_position_plus_window = last_position_plus_window;
                 receiver.time_of_last_status_message_ns = time_ns;
-                receiver.eos_flagged = false;
+                receiver.eos_flagged = status_message.flags() & END_OF_STREAM_FLAG != 0;
                 is_existing = true;
             }
             min_position = min_position.min(receiver.last_position_plus_window);
         }
 
-        if !is_existing
+        if matches_tag
+            && !is_existing
             && (self.receivers.is_empty()
                 || last_position_plus_window
                     >= min_position - i64::from(status_message.receiver_window_length()))
@@ -202,7 +283,7 @@ impl MinMulticastFlowControl {
                 receiver_id,
                 last_position_plus_window,
                 time_of_last_status_message_ns: time_ns,
-                eos_flagged: false,
+                eos_flagged: status_message.flags() & END_OF_STREAM_FLAG != 0,
             });
             self.has_required_receivers = self.receivers.len() >= self.group_min_size;
             min_position = min_position.min(last_position_plus_window);
@@ -214,6 +295,19 @@ impl MinMulticastFlowControl {
             sender_limit.max(last_position_plus_window)
         } else {
             sender_limit.max(min_position)
+        }
+    }
+
+    fn on_error(&mut self, error: ErrorFlyweight<'_>, matches_tag: bool) {
+        if self.tag_aware && !matches_tag {
+            return;
+        }
+        if let Some(receiver) = self
+            .receivers
+            .iter_mut()
+            .find(|receiver| receiver.receiver_id == error.receiver_id())
+        {
+            receiver.eos_flagged = true;
         }
     }
 
@@ -246,6 +340,74 @@ impl MinMulticastFlowControl {
             self.last_setup_sender_limit = None;
         }
         i64::MAX
+    }
+}
+
+/// Tagged multicast flow control, tracking only receivers carrying the configured group tag.
+#[derive(Debug, Default)]
+pub struct TaggedMulticastFlowControl {
+    inner: MinMulticastFlowControl,
+}
+
+impl TaggedMulticastFlowControl {
+    pub const FC_PARAM_VALUE: &'static str = "tagged";
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn initialize(
+        &mut self,
+        udp_channel: &UdpChannel,
+        context_group_min_size: usize,
+        context_receiver_timeout_ns: i64,
+    ) -> Result<()> {
+        self.inner.initialize_tagged(
+            udp_channel,
+            context_group_min_size,
+            context_receiver_timeout_ns,
+        )
+    }
+
+    pub fn group_tag(&self) -> i64 {
+        self.inner.group_tag()
+    }
+
+    pub fn group_min_size(&self) -> usize {
+        self.inner.group_min_size()
+    }
+
+    pub fn receiver_timeout_ns(&self) -> i64 {
+        self.inner.receiver_timeout_ns()
+    }
+
+    pub fn on_status_message(
+        &mut self,
+        status_message: StatusMessageFlyweight<'_>,
+        sender_limit: i64,
+        initial_term_id: i32,
+        position_bits_to_shift: i32,
+        time_ns: i64,
+    ) -> i64 {
+        let matches_tag =
+            status_message.has_group_tag() && status_message.group_tag() == self.group_tag();
+        self.inner.on_status_message_if(
+            status_message,
+            sender_limit,
+            initial_term_id,
+            position_bits_to_shift,
+            time_ns,
+            matches_tag,
+        )
+    }
+
+    pub fn on_idle(&mut self, time_ns: i64, sender_limit: i64) -> i64 {
+        self.inner.on_idle(time_ns, sender_limit)
+    }
+
+    pub fn on_error(&mut self, error: ErrorFlyweight<'_>) {
+        let matches_tag = error.has_group_tag() && error.group_tag() == self.group_tag();
+        self.inner.on_error(error, matches_tag);
     }
 }
 
@@ -452,5 +614,278 @@ mod min_flow_control_tests {
             ),
             i64::from(WINDOW_LENGTH * 2)
         );
+    }
+}
+
+#[cfg(test)]
+mod tagged_flow_control_tests {
+    //! Faithful port of
+    //! vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TaggedMulticastFlowControlTest.java
+
+    use super::*;
+    use agrona::AtomicBuffer;
+
+    const DEFAULT_GROUP_SIZE: usize = 0;
+    const DEFAULT_GROUP_TAG: i64 = -1;
+    const DEFAULT_TIMEOUT_NS: i64 = 5_000_000_000;
+    const WINDOW_LENGTH: i32 = 16 * 1024;
+
+    fn initialized(uri: &str) -> TaggedMulticastFlowControl {
+        let mut flow_control = TaggedMulticastFlowControl::new();
+        flow_control
+            .initialize(
+                &UdpChannel::parse(uri).unwrap(),
+                DEFAULT_GROUP_SIZE,
+                DEFAULT_TIMEOUT_NS,
+            )
+            .unwrap();
+        flow_control
+    }
+
+    fn status(
+        flow_control: &mut TaggedMulticastFlowControl,
+        receiver_id: i64,
+        term_offset: i32,
+        sender_limit: i64,
+        group_tag: Option<i64>,
+        eos: bool,
+    ) -> i64 {
+        let mut bytes = [0u8; 128];
+        let message = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        message
+            .set_receiver_id(receiver_id)
+            .set_consumption_term_id(0)
+            .set_consumption_term_offset(term_offset)
+            .set_receiver_window_length(WINDOW_LENGTH)
+            .set_flags(if eos { END_OF_STREAM_FLAG } else { 0 })
+            .set_group_tag(group_tag);
+        flow_control.on_status_message(message, sender_limit, 0, 0, 0)
+    }
+
+    #[test]
+    fn should_parse_valid_flow_control_configuration() {
+        for (uri, group_tag, group_size, timeout) in [
+            (
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged",
+                DEFAULT_GROUP_TAG,
+                DEFAULT_GROUP_SIZE,
+                DEFAULT_TIMEOUT_NS,
+            ),
+            (
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,t:100ms",
+                DEFAULT_GROUP_TAG,
+                DEFAULT_GROUP_SIZE,
+                100_000_000,
+            ),
+            (
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:123",
+                123,
+                DEFAULT_GROUP_SIZE,
+                DEFAULT_TIMEOUT_NS,
+            ),
+            (
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:3000000000",
+                3_000_000_000,
+                DEFAULT_GROUP_SIZE,
+                DEFAULT_TIMEOUT_NS,
+            ),
+            (
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:123,t:100ms",
+                123,
+                DEFAULT_GROUP_SIZE,
+                100_000_000,
+            ),
+            (
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:100/10",
+                100,
+                10,
+                DEFAULT_TIMEOUT_NS,
+            ),
+            (
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:/10",
+                DEFAULT_GROUP_TAG,
+                10,
+                DEFAULT_TIMEOUT_NS,
+            ),
+            (
+                "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:100/10,t:100ms",
+                100,
+                10,
+                100_000_000,
+            ),
+        ] {
+            let flow_control = initialized(uri);
+            assert_eq!(flow_control.group_tag(), group_tag);
+            assert_eq!(flow_control.group_min_size(), group_size);
+            assert_eq!(flow_control.receiver_timeout_ns(), timeout);
+        }
+    }
+
+    #[test]
+    fn should_fail_with_invalid_uris() {
+        for uri in [
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:100/",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:/",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,t:",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:100,t:",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,t:100ms,g:100/",
+        ] {
+            let result = TaggedMulticastFlowControl::new().initialize(
+                &UdpChannel::parse(uri).unwrap(),
+                DEFAULT_GROUP_SIZE,
+                DEFAULT_TIMEOUT_NS,
+            );
+            assert!(result.is_err(), "expected invalid URI: {uri}");
+        }
+    }
+
+    #[test]
+    fn should_clamp_to_sender_limit_until_minimum_group_size_is_met() {
+        let mut flow_control = initialized(
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:123/3",
+        );
+        for (receiver_id, group_tag) in [(0, None), (1, Some(123)), (2, Some(123)), (3, None)] {
+            assert_eq!(
+                status(
+                    &mut flow_control,
+                    receiver_id,
+                    10_000,
+                    5000,
+                    group_tag,
+                    false
+                ),
+                5000
+            );
+            assert_eq!(flow_control.on_idle(0, 5000), 5000);
+        }
+        assert_eq!(
+            status(&mut flow_control, 4, 10_000, 5000, Some(123), false),
+            26_384
+        );
+        assert_eq!(flow_control.on_idle(0, 5000), 26_384);
+    }
+
+    #[test]
+    fn should_return_last_window_when_receivers_are_in_group_with_no_min_size() {
+        let mut flow_control = initialized(
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:123",
+        );
+        assert_eq!(
+            status(&mut flow_control, 0, 10_000, 5000, None, false),
+            26_384
+        );
+        assert_eq!(
+            status(&mut flow_control, 1, 9_999, 5000, Some(123), false),
+            26_383
+        );
+        assert_eq!(
+            status(&mut flow_control, 0, 10_000, 5000, None, false),
+            26_383
+        );
+    }
+
+    #[test]
+    fn should_not_include_receiver_more_than_window_size_behind_min_position() {
+        let mut flow_control = initialized(
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:123/2",
+        );
+        assert_eq!(
+            status(
+                &mut flow_control,
+                1,
+                WINDOW_LENGTH * 2,
+                5000,
+                Some(123),
+                false
+            ),
+            5000
+        );
+        assert_eq!(
+            status(
+                &mut flow_control,
+                2,
+                WINDOW_LENGTH - 1,
+                5000,
+                Some(123),
+                false
+            ),
+            5000
+        );
+        assert_eq!(
+            status(&mut flow_control, 3, WINDOW_LENGTH, 5000, Some(123), false),
+            i64::from(WINDOW_LENGTH * 2)
+        );
+    }
+
+    #[test]
+    fn should_remove_entry_on_end_of_stream_and_error() {
+        let mut flow_control = initialized(
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:123/2",
+        );
+        assert_eq!(
+            status(&mut flow_control, 1, WINDOW_LENGTH, 5000, Some(123), false),
+            5000
+        );
+        assert_eq!(
+            status(
+                &mut flow_control,
+                2,
+                WINDOW_LENGTH + 1,
+                5000,
+                Some(123),
+                false
+            ),
+            32_768
+        );
+        assert_eq!(
+            status(
+                &mut flow_control,
+                3,
+                WINDOW_LENGTH + 2,
+                5000,
+                Some(123),
+                false
+            ),
+            32_768
+        );
+        assert_eq!(
+            status(&mut flow_control, 1, WINDOW_LENGTH, 5000, Some(123), true),
+            32_768
+        );
+        assert_eq!(flow_control.on_idle(0, 5000), 32_769);
+
+        let mut bytes = [0u8; 128];
+        let error = ErrorFlyweight::new(AtomicBuffer::new(&mut bytes));
+        let mut error_flow_control = initialized(
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=tagged,g:123/2",
+        );
+        status(
+            &mut error_flow_control,
+            1,
+            WINDOW_LENGTH,
+            5000,
+            Some(123),
+            false,
+        );
+        status(
+            &mut error_flow_control,
+            2,
+            WINDOW_LENGTH + 1,
+            5000,
+            Some(123),
+            false,
+        );
+        status(
+            &mut error_flow_control,
+            3,
+            WINDOW_LENGTH + 2,
+            5000,
+            Some(123),
+            false,
+        );
+        error.set_receiver_id(1).set_group_tag(Some(123));
+        error_flow_control.on_error(error);
+        assert_eq!(error_flow_control.on_idle(0, 5000), 32_769);
     }
 }

@@ -499,6 +499,10 @@ pub const STATUS_MESSAGE_HEADER_LENGTH: usize = 36;
 ///
 /// Matches `vendor/aeron/aeron-client/src/main/java/io/aeron/protocol/StatusMessageFlyweight.java`.
 pub const SEND_SETUP_FLAG: u8 = 0x80;
+/// Publisher should remove the receiver from flow control.
+pub const END_OF_STREAM_FLAG: u8 = 0x40;
+/// Optional group-tag feedback starts immediately after the fixed status header.
+pub const SM_GROUP_TAG_FIELD_OFFSET: usize = STATUS_MESSAGE_HEADER_LENGTH;
 
 /// Flyweight over a Status Message frame.
 #[derive(Copy, Clone)]
@@ -514,6 +518,15 @@ impl<'a> StatusMessageFlyweight<'a> {
     /// The base frame header (frame length / version / flags / type).
     pub fn header(&self) -> HeaderFlyweight<'a> {
         HeaderFlyweight::new(self.buffer)
+    }
+
+    pub fn flags(&self) -> u8 {
+        self.header().flags()
+    }
+
+    pub fn set_flags(&self, flags: u8) -> &Self {
+        self.header().set_flags(flags);
+        self
     }
 
     pub fn session_id(&self) -> i32 {
@@ -557,6 +570,31 @@ impl<'a> StatusMessageFlyweight<'a> {
     }
     pub fn set_receiver_id(&self, v: i64) -> &Self {
         self.buffer.put_i64(SM_RECEIVER_ID_FIELD_OFFSET, v);
+        self
+    }
+
+    /// Whether this status message carries an 8-byte group tag.
+    pub fn has_group_tag(&self) -> bool {
+        self.header().frame_length() > STATUS_MESSAGE_HEADER_LENGTH as i32
+    }
+
+    pub fn group_tag(&self) -> i64 {
+        self.buffer.get_i64(SM_GROUP_TAG_FIELD_OFFSET)
+    }
+
+    /// Set or clear the optional 8-byte group tag and update the frame length.
+    pub fn set_group_tag(&self, group_tag: Option<i64>) -> &Self {
+        match group_tag {
+            Some(group_tag) => {
+                self.buffer.put_i64(SM_GROUP_TAG_FIELD_OFFSET, group_tag);
+                self.header()
+                    .set_frame_length((STATUS_MESSAGE_HEADER_LENGTH + 8) as i32);
+            }
+            None => {
+                self.header()
+                    .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32);
+            }
+        }
         self
     }
 }
