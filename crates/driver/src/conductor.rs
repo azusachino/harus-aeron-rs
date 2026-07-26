@@ -29,9 +29,9 @@ use aeron_client::counters::{
     SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION,
 };
 use aeron_client::driver_events::{
-    ErrorResponseFlyweight, ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE, ON_ERROR,
-    ON_EXCLUSIVE_PUBLICATION_READY, ON_OPERATION_SUCCESS, ON_PUBLICATION_READY,
-    ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_IMAGE, OperationSucceededFlyweight,
+    ClientTimeoutFlyweight, ErrorResponseFlyweight, ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE,
+    ON_CLIENT_TIMEOUT, ON_ERROR, ON_EXCLUSIVE_PUBLICATION_READY, ON_OPERATION_SUCCESS,
+    ON_PUBLICATION_READY, ON_SUBSCRIPTION_READY, ON_UNAVAILABLE_IMAGE, OperationSucceededFlyweight,
     PublicationBuffersReadyFlyweight, SubscriptionReadyFlyweight,
 };
 use aeron_client::driver_proxy::{
@@ -421,7 +421,7 @@ impl DriverConductor {
         }
 
         work += self.sweep_inactive_images(now_ns)?;
-        work += self.sweep_timed_out_clients(now_ns);
+        work += self.sweep_timed_out_clients(now_ns)?;
         Ok(work)
     }
 
@@ -1464,10 +1464,10 @@ impl DriverConductor {
         }
     }
 
-    fn sweep_timed_out_clients(&mut self, now_ns: i64) -> usize {
+    fn sweep_timed_out_clients(&mut self, now_ns: i64) -> Result<usize> {
         let timeout = self.client_liveness_timeout_ns;
         if timeout <= 0 {
-            return 0;
+            return Ok(0);
         }
         let expired: Vec<i64> = self
             .clients
@@ -1476,9 +1476,10 @@ impl DriverConductor {
             .map(|(&id, _)| id)
             .collect();
         for client_id in &expired {
+            self.on_client_timeout(*client_id)?;
             self.remove_client(*client_id, now_ns);
         }
-        expired.len()
+        Ok(expired.len())
     }
 
     /// Drive every network image through its end-of-life state machine once per duty cycle.
@@ -1652,6 +1653,15 @@ impl DriverConductor {
         self.transmit(ON_OPERATION_SUCCESS, &buf, len)
     }
 
+    fn on_client_timeout(&self, client_id: i64) -> Result<()> {
+        let mut scratch = [0u8; 8];
+        let len = scratch.len();
+        let buf = AtomicBuffer::new(&mut scratch);
+        let flyweight = ClientTimeoutFlyweight::wrap(buf, 0);
+        flyweight.set_client_id(client_id);
+        self.transmit(ON_CLIENT_TIMEOUT, &buf, len)
+    }
+
     fn on_error(&self, correlation_id: i64, code: i32, message: String) -> Result<()> {
         let length = 12 + 4 + message.len();
         let mut bytes = vec![0u8; length];
@@ -1781,7 +1791,9 @@ fn error_code(error: &DriverError) -> i32 {
 mod tests {
     use super::*;
     use aeron_client::cnc_file::{DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH};
-    use aeron_client::driver_events::{ErrorResponseFlyweight, ON_ERROR, ON_SUBSCRIPTION_READY};
+    use aeron_client::driver_events::{
+        ErrorResponseFlyweight, ON_CLIENT_TIMEOUT, ON_ERROR, ON_SUBSCRIPTION_READY,
+    };
     use aeron_client::driver_proxy::DriverProxy;
     use agrona::BroadcastReceiver;
     use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
@@ -2747,6 +2759,40 @@ mod tests {
             0,
             "timed-out client's resources removed"
         );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reports_client_timeout_before_removing_client_resources() {
+        let (cnc, path) = temp_cnc("client-timeout-event");
+        let dir = temp_dir("client-timeout-event");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+
+        client.client_keepalive().unwrap();
+        conductor.do_work(1_000).unwrap();
+        assert_eq!(conductor.active_client_count(), 1);
+
+        assert_eq!(
+            conductor.do_work(1_000 + LIVENESS_TIMEOUT_NS + 1).unwrap(),
+            1
+        );
+        assert_eq!(conductor.active_client_count(), 0);
+
+        let mut seen_client_id = 0;
+        assert!(
+            events
+                .receive_next(|msg_type, buf, offset, _len| {
+                    assert_eq!(msg_type, ON_CLIENT_TIMEOUT);
+                    seen_client_id = ClientTimeoutFlyweight::wrap(*buf, offset).client_id();
+                })
+                .unwrap()
+        );
+        assert_eq!(seen_client_id, CLIENT_ID);
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
