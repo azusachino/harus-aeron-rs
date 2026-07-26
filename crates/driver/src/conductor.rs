@@ -1408,6 +1408,10 @@ impl DriverConductor {
             subscription_registration_id,
             correlation_id,
         );
+        image.set_unicast_loss_timing(
+            self.configuration.nak_unicast_delay_ns,
+            self.configuration.nak_unicast_retry_delay_ratio,
+        );
         image.touch(now_ns);
         image.activate(now_ns);
         for subscription_registration_id in links {

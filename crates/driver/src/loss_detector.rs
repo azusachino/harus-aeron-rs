@@ -17,9 +17,9 @@ pub struct Gap {
 }
 
 /// Upstream `Configuration.NAK_UNICAST_DELAY_DEFAULT_NS`: 1us feedback delay before the first NAK.
-const NAK_UNICAST_DELAY_NS: i64 = 1_000;
+pub const NAK_UNICAST_DELAY_NS: i64 = 1_000;
 /// Upstream `Configuration.NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT`: retry delay = delay * ratio.
-const NAK_UNICAST_RETRY_DELAY_RATIO: i64 = 100;
+pub const NAK_UNICAST_RETRY_DELAY_RATIO: i64 = 100;
 
 /// A fixed initial/retry delay pair (upstream `StaticDelayGenerator`).
 #[derive(Debug, Clone, Copy)]
@@ -115,6 +115,13 @@ impl LossDetector {
     /// A detector with the unicast delay defaults.
     pub fn unicast() -> Self {
         Self::new(StaticDelayGenerator::unicast())
+    }
+
+    pub fn with_unicast_timing(delay_ns: i64, retry_delay_ratio: i64) -> Self {
+        Self::new(StaticDelayGenerator::with_retry(
+            delay_ns,
+            delay_ns.saturating_mul(retry_delay_ratio),
+        ))
     }
 
     /// Scan for gaps between `rebuild_position` and `hwm_position` and NAK a due gap.
@@ -623,5 +630,24 @@ mod tests {
                 (TERM_ID, offset_of_message(3), 64),
             ]
         );
+    }
+
+    #[test]
+    fn should_apply_configured_unicast_nak_timing() {
+        let mut fixture = Fixture::with_delay(StaticDelayGenerator::with_retry(2_000, 7_000));
+        let rebuild = active_term_position();
+        let hwm = rebuild + (aligned_frame_length() as i64 * 3);
+        fixture.insert(offset_of_message(0));
+        fixture.insert(offset_of_message(2));
+
+        fixture.scan(rebuild, hwm, 0);
+        fixture.scan(rebuild, hwm, 1_999);
+        assert!(fixture.calls.is_empty());
+        fixture.scan(rebuild, hwm, 2_000);
+        assert_eq!(fixture.calls.len(), 1);
+        fixture.scan(rebuild, hwm, 8_999);
+        assert_eq!(fixture.calls.len(), 1);
+        fixture.scan(rebuild, hwm, 9_000);
+        assert_eq!(fixture.calls.len(), 2);
     }
 }

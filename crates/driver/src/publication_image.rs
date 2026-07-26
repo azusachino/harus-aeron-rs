@@ -176,6 +176,10 @@ impl PublicationImage {
         self.stream_id
     }
 
+    pub fn set_unicast_loss_timing(&mut self, delay_ns: i64, retry_delay_ratio: i64) {
+        self.loss_detector = LossDetector::with_unicast_timing(delay_ns, retry_delay_ratio);
+    }
+
     pub fn log_file_name(&self) -> &str {
         &self.log_file_name
     }

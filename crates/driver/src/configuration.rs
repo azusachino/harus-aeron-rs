@@ -67,6 +67,13 @@ pub const TO_CLIENTS_BUFFER_LENGTH_PROP_NAME: &str = "aeron.clients.buffer.lengt
 pub const COUNTERS_VALUES_BUFFER_LENGTH_PROP_NAME: &str = "aeron.counters.buffer.length";
 pub const ERROR_BUFFER_LENGTH_PROP_NAME: &str = "aeron.error.buffer.length";
 pub const FILE_PAGE_SIZE_PROP_NAME: &str = "aeron.file.page.size";
+pub const NAK_MULTICAST_MAX_BACKOFF_PROP_NAME: &str = "aeron.nak.multicast.max.backoff";
+pub const NAK_UNICAST_DELAY_PROP_NAME: &str = "aeron.nak.unicast.delay";
+pub const NAK_UNICAST_RETRY_DELAY_RATIO_PROP_NAME: &str = "aeron.nak.unicast.retry.delay.ratio";
+pub const NAK_MULTICAST_MAX_BACKOFF_DEFAULT_NS: i64 = 10_000_000;
+pub const NAK_UNICAST_DELAY_DEFAULT_NS: i64 = 1_000;
+pub const NAK_UNICAST_DELAY_MIN_NS: i64 = 1_000;
+pub const NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT: i64 = 100;
 
 /// Driver configuration settings, populated from environment variables or defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +108,12 @@ pub struct Configuration {
     pub perform_storage_checks: bool,
     /// Warn when usable file-store space falls at or below this threshold.
     pub low_file_store_warning_threshold: u64,
+    /// Maximum multicast NAK feedback backoff in nanoseconds.
+    pub nak_multicast_max_backoff_ns: i64,
+    /// Initial unicast NAK delay in nanoseconds.
+    pub nak_unicast_delay_ns: i64,
+    /// Multiplier applied to the unicast NAK delay for retries.
+    pub nak_unicast_retry_delay_ratio: i64,
 }
 
 impl Default for Configuration {
@@ -130,6 +143,9 @@ impl Default for Configuration {
             allow_termination: false,
             perform_storage_checks: true,
             low_file_store_warning_threshold: LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT,
+            nak_multicast_max_backoff_ns: NAK_MULTICAST_MAX_BACKOFF_DEFAULT_NS,
+            nak_unicast_delay_ns: NAK_UNICAST_DELAY_DEFAULT_NS,
+            nak_unicast_retry_delay_ratio: NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT,
         }
     }
 }
@@ -214,6 +230,24 @@ impl Configuration {
             return Err(DriverError::IllegalArgument(
                 "stream-session-limit must be positive".to_string(),
             ));
+        }
+        if self.nak_multicast_max_backoff_ns < 0 {
+            return Err(DriverError::IllegalArgument(format!(
+                "nak-multicast-max-backoff must be non-negative: value={}",
+                self.nak_multicast_max_backoff_ns
+            )));
+        }
+        if self.nak_unicast_delay_ns < NAK_UNICAST_DELAY_MIN_NS {
+            return Err(DriverError::IllegalArgument(format!(
+                "nak-unicast-delay must be at least {NAK_UNICAST_DELAY_MIN_NS}: value={}",
+                self.nak_unicast_delay_ns
+            )));
+        }
+        if self.nak_unicast_retry_delay_ratio < 1 {
+            return Err(DriverError::IllegalArgument(format!(
+                "nak-unicast-retry-delay-ratio must be positive: value={}",
+                self.nak_unicast_retry_delay_ratio
+            )));
         }
         Ok(())
     }
@@ -337,6 +371,21 @@ impl Configuration {
                 config.low_file_store_warning_threshold = v;
             }
         }
+        if let Some(val) = get_prop(NAK_MULTICAST_MAX_BACKOFF_PROP_NAME) {
+            if let Some(v) = parse_duration_ns(&val) {
+                config.nak_multicast_max_backoff_ns = v;
+            }
+        }
+        if let Some(val) = get_prop(NAK_UNICAST_DELAY_PROP_NAME) {
+            if let Some(v) = parse_duration_ns(&val) {
+                config.nak_unicast_delay_ns = v;
+            }
+        }
+        if let Some(val) = get_prop(NAK_UNICAST_RETRY_DELAY_RATIO_PROP_NAME) {
+            if let Ok(v) = val.parse::<i64>() {
+                config.nak_unicast_retry_delay_ratio = v;
+            }
+        }
 
         config
     }
@@ -355,6 +404,22 @@ impl Configuration {
     pub fn term_buffer_sparse_file() -> bool {
         Self::term_buffer_sparse_file_from(|prop| env::var(prop).ok())
     }
+}
+
+fn parse_duration_ns(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (number, multiplier) = if let Some(value) = value.strip_suffix("ns") {
+        (value, 1i64)
+    } else if let Some(value) = value.strip_suffix("us") {
+        (value, 1_000i64)
+    } else if let Some(value) = value.strip_suffix("ms") {
+        (value, 1_000_000i64)
+    } else if let Some(value) = value.strip_suffix('s') {
+        (value, 1_000_000_000i64)
+    } else {
+        (value, 1i64)
+    };
+    number.parse::<i64>().ok()?.checked_mul(multiplier)
 }
 
 fn validate_term_length(name: &str, value: usize) -> Result<()> {
@@ -487,6 +552,15 @@ mod tests {
             config.low_file_store_warning_threshold,
             LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT
         );
+        assert_eq!(
+            config.nak_multicast_max_backoff_ns,
+            NAK_MULTICAST_MAX_BACKOFF_DEFAULT_NS
+        );
+        assert_eq!(config.nak_unicast_delay_ns, NAK_UNICAST_DELAY_DEFAULT_NS);
+        assert_eq!(
+            config.nak_unicast_retry_delay_ratio,
+            NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT
+        );
     }
 
     #[test]
@@ -546,6 +620,48 @@ mod tests {
         });
 
         assert_eq!(config.client_liveness_timeout_ns, 123_456_789);
+    }
+
+    #[test]
+    fn should_load_nak_timing_from_properties() {
+        let config = Configuration::load_from_getter(|property| match property {
+            NAK_MULTICAST_MAX_BACKOFF_PROP_NAME => Some("12ms".to_string()),
+            NAK_UNICAST_DELAY_PROP_NAME => Some("2us".to_string()),
+            NAK_UNICAST_RETRY_DELAY_RATIO_PROP_NAME => Some("250".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(config.nak_multicast_max_backoff_ns, 12_000_000);
+        assert_eq!(config.nak_unicast_delay_ns, 2_000);
+        assert_eq!(config.nak_unicast_retry_delay_ratio, 250);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn should_reject_invalid_nak_timing() {
+        let delay = Configuration {
+            nak_unicast_delay_ns: NAK_UNICAST_DELAY_MIN_NS - 1,
+            ..Configuration::default()
+        };
+        assert!(
+            delay
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("nak-unicast-delay")
+        );
+
+        let ratio = Configuration {
+            nak_unicast_retry_delay_ratio: 0,
+            ..Configuration::default()
+        };
+        assert!(
+            ratio
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("nak-unicast-retry-delay-ratio")
+        );
     }
 
     #[test]
