@@ -231,9 +231,9 @@ impl Configuration {
                 "stream-session-limit must be positive".to_string(),
             ));
         }
-        if self.nak_multicast_max_backoff_ns < 0 {
+        if self.nak_multicast_max_backoff_ns <= 0 {
             return Err(DriverError::IllegalArgument(format!(
-                "nak-multicast-max-backoff must be non-negative: value={}",
+                "nak-multicast-max-backoff must be positive: value={}",
                 self.nak_multicast_max_backoff_ns
             )));
         }

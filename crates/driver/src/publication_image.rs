@@ -180,6 +180,10 @@ impl PublicationImage {
         self.loss_detector = LossDetector::with_unicast_timing(delay_ns, retry_delay_ratio);
     }
 
+    pub fn set_multicast_loss_timing(&mut self, max_backoff_ns: i64) {
+        self.loss_detector = LossDetector::multicast(max_backoff_ns);
+    }
+
     pub fn log_file_name(&self) -> &str {
         &self.log_file_name
     }

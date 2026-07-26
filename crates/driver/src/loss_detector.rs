@@ -8,6 +8,8 @@
 use aeron_client::logbuffer::TermGapScanner;
 use agrona::AtomicBuffer;
 
+use crate::optimal_multicast_delay::OptimalMulticastDelayGenerator;
+
 /// A contiguous run of missing frames at the front of the reconstructed stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gap {
@@ -26,6 +28,28 @@ pub const NAK_UNICAST_RETRY_DELAY_RATIO: i64 = 100;
 pub struct StaticDelayGenerator {
     delay_ns: i64,
     retry_delay_ns: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FeedbackDelayGenerator {
+    Static(StaticDelayGenerator),
+    Multicast(OptimalMulticastDelayGenerator),
+}
+
+impl FeedbackDelayGenerator {
+    fn generate_delay_ns(self) -> i64 {
+        match self {
+            Self::Static(generator) => generator.generate_delay_ns(),
+            Self::Multicast(generator) => generator.generate_delay_ns(),
+        }
+    }
+
+    fn retry_delay_ns(self) -> i64 {
+        match self {
+            Self::Static(generator) => generator.retry_delay_ns(),
+            Self::Multicast(generator) => generator.generate_delay_ns(),
+        }
+    }
 }
 
 impl StaticDelayGenerator {
@@ -87,7 +111,7 @@ pub fn rebuild_offset(scan_outcome: u64) -> i32 {
 /// run of a gap in a message stream").
 #[derive(Debug)]
 pub struct LossDetector {
-    delay_generator: StaticDelayGenerator,
+    delay_generator: FeedbackDelayGenerator,
     deadline_ns: i64,
     scanned_term_id: i32,
     scanned_term_offset: i32,
@@ -101,7 +125,7 @@ impl LossDetector {
     /// Build a detector with the given delay generator (upstream constructor).
     pub fn new(delay_generator: StaticDelayGenerator) -> Self {
         Self {
-            delay_generator,
+            delay_generator: FeedbackDelayGenerator::Static(delay_generator),
             deadline_ns: NULL_VALUE,
             scanned_term_id: 0,
             scanned_term_offset: -1,
@@ -122,6 +146,21 @@ impl LossDetector {
             delay_ns,
             delay_ns.saturating_mul(retry_delay_ratio),
         ))
+    }
+
+    pub fn multicast(max_backoff_ns: i64) -> Self {
+        Self {
+            delay_generator: FeedbackDelayGenerator::Multicast(
+                OptimalMulticastDelayGenerator::new(max_backoff_ns as f64, 10.0),
+            ),
+            deadline_ns: NULL_VALUE,
+            scanned_term_id: 0,
+            scanned_term_offset: -1,
+            scanned_length: 0,
+            active_term_id: 0,
+            active_term_offset: -1,
+            active_length: 0,
+        }
     }
 
     /// Scan for gaps between `rebuild_position` and `hwm_position` and NAK a due gap.
