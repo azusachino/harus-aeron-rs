@@ -332,6 +332,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(addr2.port(), 54321);
+
+        let addr3 = SocketAddressParser::parse(
+            "[fc07::789:1:0:0:3]:54321",
+            "endpoint",
+            false,
+            &DefaultNameResolver,
+        )
+        .unwrap();
+        assert_eq!(addr3.port(), 54321);
     }
 
     #[test]
@@ -409,9 +418,10 @@ mod tests {
     fn should_throw_illegal_argument_if_value_is_invalid() {
         let invalid = ["", "a", "1.2.3", "[x]", "[f0:xx]:5"];
         for s in invalid {
+            let error = SocketAddressParser::is_multicast_address(s).unwrap_err();
             assert!(
-                SocketAddressParser::is_multicast_address(s).is_err(),
-                "expected error for: '{s}'"
+                error.to_string().contains(s),
+                "error did not mention: '{s}'"
             );
         }
     }
