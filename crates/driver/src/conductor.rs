@@ -172,6 +172,24 @@ fn subscription_conflicts(
         }
 }
 
+/// Return the publication channel identity and an optional explicitly requested session id.
+/// Session ids are part of publication identity only for conflict validation; the transport
+/// channel itself remains reusable across sessions.
+fn publication_options(channel: &str) -> Result<(String, Option<i32>)> {
+    let mut uri = ChannelUri::parse(channel)
+        .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
+    let session_id = uri
+        .get(SESSION_ID_PARAM_NAME)
+        .map(|value| {
+            value.parse::<i32>().map_err(|_| {
+                DriverError::InvalidChannel(format!("invalid session-id in channel: {value}"))
+            })
+        })
+        .transpose()?;
+    uri.remove(SESSION_ID_PARAM_NAME);
+    Ok((uri.to_string(), session_id))
+}
+
 /// Round up to the next 4-byte boundary (variable-length command fields are SBE-aligned).
 fn align4(value: usize) -> usize {
     (value + 3) & !3
@@ -653,7 +671,31 @@ impl DriverConductor {
                 "unsupported media in channel: {channel}"
             )));
         }
-        let session_id = self.next_session_id();
+        let (identity, requested_session_id) = publication_options(&channel)?;
+        let session_id = requested_session_id.unwrap_or_else(|| self.next_session_id());
+        if let Some(existing) = self.publications.values().find(|publication| {
+            publication.stream_id == stream_id
+                && publication_options(&publication.channel)
+                    .is_ok_and(|(existing_identity, _)| existing_identity == identity)
+                && publication.session_id != session_id
+        }) {
+            return Err(DriverError::IllegalState(format!(
+                "publication session-id {} does not match existing session-id {}",
+                session_id, existing.session_id
+            )));
+        }
+        if exclusive
+            && self.publications.values().any(|publication| {
+                publication.stream_id == stream_id
+                    && publication.session_id == session_id
+                    && publication_options(&publication.channel)
+                        .is_ok_and(|(existing_identity, _)| existing_identity == identity)
+            })
+        {
+            return Err(DriverError::InvalidChannel(format!(
+                "exclusive publication session-id {session_id} is already in use"
+            )));
+        }
         let publication_limit_counter_id = self.next_counter_id();
         // Publication limit starts at 0 (no window). IPC opens it when a subscriber connects;
         // UDP opens it at creation (real Status-Message flow control lands with task-8).
@@ -2116,6 +2158,68 @@ mod tests {
         assert_eq!(pubs[0].stream_id, 1001);
         assert_eq!(pubs[0].channel, "aeron:ipc");
         assert_eq!(pubs[0].client_id, CLIENT_ID);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn honors_explicit_publication_session_id_through_the_cnc() {
+        let (cnc, path) = temp_cnc("publication-session");
+        let dir = temp_dir("publication-session");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        client
+            .add_publication("aeron:ipc?session-id=4096", 7)
+            .unwrap();
+
+        conductor.do_work(1_000).unwrap();
+
+        assert_eq!(conductor.publications().len(), 1);
+        assert_eq!(
+            conductor.publications().values().next().unwrap().session_id,
+            4096
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_a_publication_with_a_conflicting_explicit_session_id() {
+        let (cnc, path) = temp_cnc("publication-session-conflict");
+        let dir = temp_dir("publication-session-conflict");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+        client.add_publication("aeron:ipc", 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+        let correlation_id = client
+            .add_publication("aeron:ipc?session-id=4096", 7)
+            .unwrap();
+
+        conductor.do_work(2_000).unwrap();
+
+        assert_eq!(conductor.publications().len(), 1);
+        let mut error_correlation = None;
+        while events
+            .receive_next(|msg_type, buf, offset, _| {
+                if msg_type == ON_ERROR {
+                    error_correlation = Some(
+                        ErrorResponseFlyweight::wrap(*buf, offset)
+                            .offending_command_correlation_id(),
+                    );
+                }
+            })
+            .unwrap()
+        {
+            if error_correlation.is_some() {
+                break;
+            }
+        }
+        assert_eq!(error_correlation, Some(correlation_id));
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
