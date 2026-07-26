@@ -21,10 +21,34 @@ use aeron_client::protocol::{
 
 use crate::error::Result;
 use crate::flow_control::calculate_retransmission_length;
+use crate::loss_detector::StaticDelayGenerator;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
+use crate::retransmit_handler::{RetransmitFlowControl, RetransmitHandler};
 
 /// Interval between SETUP re-sends and idle heartbeats (100 ms), matching upstream defaults.
 const PUBLICATION_HEARTBEAT_NS: i64 = 100_000_000;
+const RETRANSMIT_UNICAST_LINGER_NS: i64 = 10_000_000;
+
+struct PublicationRetransmitFlowControl {
+    retransmit_receiver_window_multiple: i32,
+}
+
+impl RetransmitFlowControl for PublicationRetransmitFlowControl {
+    fn max_retransmission_length(
+        &self,
+        term_offset: i32,
+        resend_length: i32,
+        term_length: i32,
+        _mtu_length: i32,
+    ) -> i32 {
+        calculate_retransmission_length(
+            resend_length,
+            term_length,
+            term_offset,
+            self.retransmit_receiver_window_multiple,
+        )
+    }
+}
 
 fn term_id_and_offset(
     position: i64,
@@ -62,6 +86,7 @@ pub struct NetworkPublication {
     status_received: bool,
     publication_limit: Arc<AtomicI64>,
     retransmit_receiver_window_multiple: i32,
+    retransmit_handler: RetransmitHandler,
 }
 
 impl NetworkPublication {
@@ -79,6 +104,7 @@ impl NetworkPublication {
         retransmit_receiver_window_multiple: i32,
     ) -> Self {
         let term_length = log_buffers.term_length();
+        let has_group_semantics = endpoint.udp_channel().has_group_semantics();
         Self {
             registration_id,
             log_buffers,
@@ -98,6 +124,14 @@ impl NetworkPublication {
             status_received: false,
             publication_limit,
             retransmit_receiver_window_multiple,
+            retransmit_handler: RetransmitHandler::new(
+                Arc::new(AtomicI64::new(0)),
+                StaticDelayGenerator::new(0),
+                StaticDelayGenerator::new(RETRANSMIT_UNICAST_LINGER_NS),
+                has_group_semantics,
+                16,
+                Arc::new(AtomicI64::new(0)),
+            ),
         }
     }
 
@@ -118,7 +152,7 @@ impl NetworkPublication {
     }
 
     /// Drain SM/NAK control frames and apply them to this publication.
-    pub fn poll_control(&mut self) -> Result<usize> {
+    pub fn poll_control(&mut self, now_ns: i64) -> Result<usize> {
         let mut work = self.endpoint.poll_control()?;
         for status in self.endpoint.take_status_messages() {
             if status.session_id == self.session_id && status.stream_id == self.stream_id {
@@ -141,10 +175,79 @@ impl NetworkPublication {
         }
         for nak in self.endpoint.take_nak_messages() {
             if nak.session_id == self.session_id && nak.stream_id == self.stream_id {
-                work +=
-                    self.retransmit(nak.term_id, nak.term_offset, nak.length.max(0) as usize)?;
+                let flow_control = PublicationRetransmitFlowControl {
+                    retransmit_receiver_window_multiple: self.retransmit_receiver_window_multiple,
+                };
+                let mut retransmit_work = 0;
+                let mut retransmit_error = None;
+                let log_buffers = &self.log_buffers;
+                let endpoint = &self.endpoint;
+                let destination = self.destination;
+                let initial_term_id = self.initial_term_id;
+                let term_length = self.term_length;
+                let mtu_length = self.mtu_length;
+                let rrwm = self.retransmit_receiver_window_multiple;
+                self.retransmit_handler.on_nak(
+                    nak.term_id,
+                    nak.term_offset,
+                    nak.length,
+                    term_length.min(i32::MAX as usize) as i32,
+                    mtu_length.min(i32::MAX as usize) as i32,
+                    now_ns,
+                    &flow_control,
+                    &mut |term_id, term_offset, length| match Self::retransmit_range(
+                        log_buffers,
+                        endpoint,
+                        destination,
+                        initial_term_id,
+                        term_length,
+                        mtu_length,
+                        rrwm,
+                        term_id,
+                        term_offset,
+                        length,
+                    ) {
+                        Ok(count) => retransmit_work += count,
+                        Err(error) => retransmit_error = Some(error),
+                    },
+                );
+                if let Some(error) = retransmit_error {
+                    return Err(error);
+                }
+                work += retransmit_work;
             }
         }
+        let log_buffers = &self.log_buffers;
+        let endpoint = &self.endpoint;
+        let destination = self.destination;
+        let initial_term_id = self.initial_term_id;
+        let term_length = self.term_length;
+        let mtu_length = self.mtu_length;
+        let rrwm = self.retransmit_receiver_window_multiple;
+        let mut retransmit_work = 0;
+        let mut retransmit_error = None;
+        self.retransmit_handler
+            .process_timeouts(now_ns, &mut |term_id, term_offset, length| {
+                match Self::retransmit_range(
+                    log_buffers,
+                    endpoint,
+                    destination,
+                    initial_term_id,
+                    term_length,
+                    mtu_length,
+                    rrwm,
+                    term_id,
+                    term_offset,
+                    length,
+                ) {
+                    Ok(count) => retransmit_work += count,
+                    Err(error) => retransmit_error = Some(error),
+                }
+            });
+        if let Some(error) = retransmit_error {
+            return Err(error);
+        }
+        work += retransmit_work;
         let setup_requests = self.endpoint.take_setup_requests();
         if setup_requests.iter().any(|&(session_id, stream_id)| {
             session_id == self.session_id && stream_id == self.stream_id
@@ -256,29 +359,41 @@ impl NetworkPublication {
         self.update_publication_limit();
     }
 
-    fn retransmit(&self, term_id: i32, term_offset: i32, length: usize) -> Result<usize> {
-        if length == 0 || term_offset < 0 {
+    #[allow(clippy::too_many_arguments)]
+    fn retransmit_range(
+        log_buffers: &LogBuffers,
+        endpoint: &SendChannelEndpoint,
+        destination: SocketAddr,
+        initial_term_id: i32,
+        term_length: usize,
+        mtu_length: usize,
+        retransmit_receiver_window_multiple: i32,
+        term_id: i32,
+        term_offset: i32,
+        length: i32,
+    ) -> Result<usize> {
+        if length <= 0 || term_offset < 0 {
             return Ok(0);
         }
-        let term_count = term_id.wrapping_sub(self.initial_term_id);
+        let term_count = term_id.wrapping_sub(initial_term_id);
         if term_count < 0 || term_count as usize >= 3 {
             return Ok(0);
         }
 
-        let term_buffers = self.log_buffers.duplicate_term_buffers();
+        let term_buffers = log_buffers.duplicate_term_buffers();
         let term_buffer = term_buffers[term_count as usize];
         let mut offset = term_offset as usize;
         let length = calculate_retransmission_length(
-            length.min(i32::MAX as usize) as i32,
-            self.term_length.min(i32::MAX as usize) as i32,
+            length,
+            term_length.min(i32::MAX as usize) as i32,
             term_offset,
-            self.retransmit_receiver_window_multiple,
+            retransmit_receiver_window_multiple,
         )
         .max(0) as usize;
-        let end = offset.saturating_add(length).min(self.term_length);
+        let end = offset.saturating_add(length).min(term_length);
         let mut work = 0;
         while offset < end {
-            let scan = TermScanner::scan_for_availability(&term_buffer, offset, self.mtu_length);
+            let scan = TermScanner::scan_for_availability(&term_buffer, offset, mtu_length);
             let available = TermScanner::available(scan);
             if available <= 0 {
                 break;
@@ -286,7 +401,7 @@ impl NetworkPublication {
             let available = available as usize;
             let mut bytes = vec![0u8; available];
             term_buffer.get_bytes(offset, &mut bytes);
-            self.endpoint.send_data(&bytes, self.destination)?;
+            endpoint.send_data(&bytes, destination)?;
             offset += available + TermScanner::padding(scan) as usize;
             work += 1;
         }
