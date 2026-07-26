@@ -40,6 +40,7 @@ version = "0.0.1"
 dependencies = [
  "aeron-client",
  "agrona",
+ "libc",
  "proptest",
  "socket2 0.5.10",
  "thiserror",

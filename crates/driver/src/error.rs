@@ -12,6 +12,9 @@ pub enum DriverError {
 
     #[error("{0}")]
     IllegalArgument(String),
+
+    #[error("{0}")]
+    StorageSpace(String),
 }
 
 impl From<aeron_client::error::AeronError> for DriverError {

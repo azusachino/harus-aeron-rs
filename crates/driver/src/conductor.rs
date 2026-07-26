@@ -1357,10 +1357,18 @@ impl DriverConductor {
         std::fs::create_dir_all(&dir)
             .map_err(|e| DriverError::IllegalState(format!("create images dir: {e}")))?;
         let channel_tag = channel.map(stable_channel_tag).unwrap_or_default();
-        let path = dir.join(format!("{session_id}-{stream_id}-{channel_tag}.logbuffer"));
-
-        let buffers = LogBuffers::map_new(&path, term_length, DEFAULT_FILE_PAGE_SIZE)
-            .map_err(|e| DriverError::IllegalState(format!("map image log buffer: {e}")))?;
+        let file_name = format!("{session_id}-{stream_id}-{channel_tag}.logbuffer");
+        let factory = FileStoreLogFactory::from_configuration(
+            &dir,
+            DEFAULT_FILE_PAGE_SIZE,
+            &self.configuration,
+        )?;
+        let path = factory.image_path_named(&file_name);
+        let buffers = factory.new_image_at(
+            &file_name,
+            term_length,
+            self.configuration.term_buffer_sparse_file,
+        )?;
 
         let meta = buffers.meta_data_buffer();
         set_initial_term_id(&meta, initial_term_id);
@@ -1386,7 +1394,11 @@ impl DriverConductor {
         let dir = self.aeron_dir.join("publications");
         std::fs::create_dir_all(&dir)
             .map_err(|e| DriverError::IllegalState(format!("create publications dir: {e}")))?;
-        let factory = FileStoreLogFactory::new(&dir, DEFAULT_FILE_PAGE_SIZE)?;
+        let factory = FileStoreLogFactory::from_configuration(
+            &dir,
+            DEFAULT_FILE_PAGE_SIZE,
+            &self.configuration,
+        )?;
         let path = factory.publication_path(registration_id);
         let buffers = factory.new_publication(
             registration_id,
@@ -2535,6 +2547,7 @@ fn error_code(error: &DriverError) -> i32 {
         {
             12
         }
+        DriverError::StorageSpace(_) => 12,
         DriverError::IllegalState(_) | DriverError::IllegalArgument(_) => 11,
     }
 }

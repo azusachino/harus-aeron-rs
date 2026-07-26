@@ -3,8 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use aeron_client::log_buffers::LogBuffers;
-use aeron_client::logbuffer::PAGE_MIN_SIZE;
+use aeron_client::logbuffer::{
+    LOG_META_DATA_LENGTH, PAGE_MIN_SIZE, PARTITION_COUNT, check_page_size, check_term_length,
+};
 
+use crate::configuration::{Configuration, LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT};
 use crate::error::{DriverError, Result};
 
 pub trait LogFactory {
@@ -56,16 +59,47 @@ impl LogFactory for TestLogFactory {
 pub struct FileStoreLogFactory {
     data_dir: PathBuf,
     page_size: i32,
+    perform_storage_checks: bool,
+    low_storage_warning_threshold: u64,
 }
 
 impl FileStoreLogFactory {
     pub fn new(data_dir: impl Into<PathBuf>, page_size: i32) -> Result<Self> {
+        Self::new_with_storage_checks(
+            data_dir,
+            page_size,
+            true,
+            LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT,
+        )
+    }
+
+    pub fn from_configuration(
+        data_dir: impl Into<PathBuf>,
+        page_size: i32,
+        configuration: &Configuration,
+    ) -> Result<Self> {
+        Self::new_with_storage_checks(
+            data_dir,
+            page_size,
+            configuration.perform_storage_checks,
+            configuration.low_file_store_warning_threshold,
+        )
+    }
+
+    pub fn new_with_storage_checks(
+        data_dir: impl Into<PathBuf>,
+        page_size: i32,
+        perform_storage_checks: bool,
+        low_storage_warning_threshold: u64,
+    ) -> Result<Self> {
         let data_dir = data_dir.into();
         std::fs::create_dir_all(&data_dir)
             .map_err(|error| DriverError::IllegalState(format!("create log directory: {error}")))?;
         Ok(Self {
             data_dir,
             page_size,
+            perform_storage_checks,
+            low_storage_warning_threshold,
         })
     }
 
@@ -83,6 +117,24 @@ impl FileStoreLogFactory {
             .join(format!("image-{correlation_id}.logbuffer"))
     }
 
+    pub fn image_path_named(&self, file_name: &str) -> PathBuf {
+        self.data_dir.join(file_name)
+    }
+
+    /// Allocate an image log with a conductor-selected stable filename.
+    pub fn new_image_at(
+        &self,
+        file_name: &str,
+        term_buffer_length: i32,
+        use_sparse_files: bool,
+    ) -> Result<LogBuffers> {
+        self.new_log_at(
+            self.image_path_named(file_name),
+            term_buffer_length,
+            use_sparse_files,
+        )
+    }
+
     fn new_log(
         &self,
         prefix: &str,
@@ -97,8 +149,99 @@ impl FileStoreLogFactory {
                 .data_dir
                 .join(format!("{other}-{correlation_id}.logbuffer")),
         };
+        self.new_log_at(path, term_buffer_length, _use_sparse_files)
+    }
+
+    fn new_log_at(
+        &self,
+        path: PathBuf,
+        term_buffer_length: i32,
+        _use_sparse_files: bool,
+    ) -> Result<LogBuffers> {
+        check_term_length(term_buffer_length)
+            .map_err(|message| DriverError::IllegalArgument(message.to_string()))?;
+        check_page_size(self.page_size)
+            .map_err(|message| DriverError::IllegalArgument(message.to_string()))?;
+        let log_length = (term_buffer_length as u64)
+            .checked_mul(PARTITION_COUNT as u64)
+            .and_then(|length| length.checked_add(LOG_META_DATA_LENGTH as u64))
+            .ok_or_else(|| DriverError::IllegalArgument("log length overflow".to_string()))?;
+        self.check_storage(log_length)?;
         LogBuffers::map_new(path, term_buffer_length, self.page_size).map_err(Into::into)
     }
+
+    fn check_storage(&self, log_length: u64) -> Result<()> {
+        if !self.perform_storage_checks {
+            return Ok(());
+        }
+
+        let Some(usable_space) = usable_space(&self.data_dir)? else {
+            tracing::debug!(path = %self.data_dir.display(), "file-store capacity checks unavailable");
+            return Ok(());
+        };
+
+        if let Some(warning) = storage_capacity_check(
+            usable_space,
+            log_length,
+            self.low_storage_warning_threshold,
+            &self.data_dir,
+        )? {
+            tracing::warn!(message = %warning, "file-store space is running low");
+        }
+        Ok(())
+    }
+}
+
+/// Return a warning message when capacity is low, or an error when a new log cannot fit.
+pub fn storage_capacity_check(
+    usable_space: u64,
+    log_length: u64,
+    low_storage_warning_threshold: u64,
+    file_store: &Path,
+) -> Result<Option<String>> {
+    if usable_space < log_length {
+        return Err(DriverError::StorageSpace(format!(
+            "insufficient usable storage for new log of length={log_length} usable={usable_space} in {}",
+            file_store.display()
+        )));
+    }
+
+    if usable_space <= low_storage_warning_threshold {
+        return Ok(Some(format!(
+            "space is running low: threshold={low_storage_warning_threshold} usable={usable_space} in {}",
+            file_store.display()
+        )));
+    }
+
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn usable_space(path: &Path) -> Result<Option<u64>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_bytes = path.as_os_str().as_bytes();
+    let path = CString::new(path_bytes)
+        .map_err(|_| DriverError::IllegalArgument("log directory contains NUL".to_string()))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stats` points to writable storage of the expected
+    // platform type. libc initialises it when the call succeeds.
+    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(DriverError::IllegalState(format!(
+            "stat file-store capacity: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: statvfs returned success and therefore initialised every field.
+    let stats = unsafe { stats.assume_init() };
+    Ok(Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize)))
+}
+
+#[cfg(not(unix))]
+fn usable_space(_path: &Path) -> Result<Option<u64>> {
+    Ok(None)
 }
 
 impl LogFactory for FileStoreLogFactory {
@@ -168,5 +311,28 @@ mod tests {
         drop(publication);
         drop(image);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn storage_capacity_rejects_a_log_that_does_not_fit() {
+        let error = storage_capacity_check(117, 118, 1_000, Path::new("test-fs")).unwrap_err();
+        assert_eq!(
+            error,
+            DriverError::StorageSpace(
+                "insufficient usable storage for new log of length=118 usable=117 in test-fs"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn storage_capacity_reports_low_space_at_the_warning_threshold() {
+        let warning = storage_capacity_check(117, 64, 117, Path::new("test-fs"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            warning,
+            "space is running low: threshold=117 usable=117 in test-fs"
+        );
     }
 }

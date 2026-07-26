@@ -52,6 +52,10 @@ pub const STREAM_SESSION_LIMIT_DEFAULT: usize = i32::MAX as usize;
 /// Rust adaptation of Aeron's termination-validator boundary. The upstream default validator
 /// denies requests; applications may explicitly opt in until a pluggable validator API lands.
 pub const TERMINATION_ALLOW_PROP_NAME: &str = "aeron.driver.termination.allow";
+pub const PERFORM_STORAGE_CHECKS_PROP_NAME: &str = "aeron.perform.storage.checks";
+pub const LOW_FILE_STORE_WARNING_THRESHOLD_PROP_NAME: &str =
+    "aeron.low.file.store.warning.threshold";
+pub const LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT: u64 = TERM_BUFFER_LENGTH_DEFAULT as u64 * 10;
 
 /// Driver configuration settings, populated from environment variables or defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +80,10 @@ pub struct Configuration {
     /// Whether TERMINATE_DRIVER control messages are accepted. Defaults to false, matching
     /// Aeron's DefaultDenyTerminationValidator.
     pub allow_termination: bool,
+    /// Whether log allocation checks available file-store space before mapping a log.
+    pub perform_storage_checks: bool,
+    /// Warn when usable file-store space falls at or below this threshold.
+    pub low_file_store_warning_threshold: u64,
 }
 
 impl Default for Configuration {
@@ -97,6 +105,8 @@ impl Default for Configuration {
             max_resend: MAX_RESEND_DEFAULT,
             stream_session_limit: STREAM_SESSION_LIMIT_DEFAULT,
             allow_termination: false,
+            perform_storage_checks: true,
+            low_file_store_warning_threshold: LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT,
         }
     }
 }
@@ -248,6 +258,14 @@ impl Configuration {
         if let Some(val) = get_prop(TERMINATION_ALLOW_PROP_NAME) {
             config.allow_termination = val.parse::<bool>().unwrap_or(false);
         }
+        if let Some(val) = get_prop(PERFORM_STORAGE_CHECKS_PROP_NAME) {
+            config.perform_storage_checks = val.parse::<bool>().unwrap_or(true);
+        }
+        if let Some(val) = get_prop(LOW_FILE_STORE_WARNING_THRESHOLD_PROP_NAME) {
+            if let Ok(v) = val.parse::<u64>() {
+                config.low_file_store_warning_threshold = v;
+            }
+        }
 
         config
     }
@@ -377,6 +395,11 @@ mod tests {
         );
         assert_eq!(config.max_resend, MAX_RESEND_DEFAULT);
         assert!(!config.allow_termination);
+        assert!(config.perform_storage_checks);
+        assert_eq!(
+            config.low_file_store_warning_threshold,
+            LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT
+        );
     }
 
     #[test]
@@ -386,6 +409,18 @@ mod tests {
         });
 
         assert!(config.allow_termination);
+    }
+
+    #[test]
+    fn should_load_storage_policy_from_properties() {
+        let config = Configuration::load_from_getter(|property| match property {
+            PERFORM_STORAGE_CHECKS_PROP_NAME => Some("false".to_string()),
+            LOW_FILE_STORE_WARNING_THRESHOLD_PROP_NAME => Some("123".to_string()),
+            _ => None,
+        });
+
+        assert!(!config.perform_storage_checks);
+        assert_eq!(config.low_file_store_warning_threshold, 123);
     }
 
     #[test]
