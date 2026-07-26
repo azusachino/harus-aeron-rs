@@ -74,6 +74,8 @@ pub const NAK_MULTICAST_MAX_BACKOFF_DEFAULT_NS: i64 = 10_000_000;
 pub const NAK_UNICAST_DELAY_DEFAULT_NS: i64 = 1_000;
 pub const NAK_UNICAST_DELAY_MIN_NS: i64 = 1_000;
 pub const NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT: i64 = 100;
+pub const RESOLVER_NAME_PROP_NAME: &str = "aeron.resolver.name";
+pub const RESOLVER_INTERFACE_PROP_NAME: &str = "aeron.resolver.interface";
 
 /// Driver configuration settings, populated from environment variables or defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +116,10 @@ pub struct Configuration {
     pub nak_unicast_delay_ns: i64,
     /// Multiplier applied to the unicast NAK delay for retries.
     pub nak_unicast_retry_delay_ratio: i64,
+    /// Optional resolver implementation name. Rust currently supports the default resolver.
+    pub resolver_name: Option<String>,
+    /// Optional resolver control interface, requiring an explicit resolver name.
+    pub resolver_interface: Option<String>,
 }
 
 impl Default for Configuration {
@@ -146,6 +152,8 @@ impl Default for Configuration {
             nak_multicast_max_backoff_ns: NAK_MULTICAST_MAX_BACKOFF_DEFAULT_NS,
             nak_unicast_delay_ns: NAK_UNICAST_DELAY_DEFAULT_NS,
             nak_unicast_retry_delay_ratio: NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT,
+            resolver_name: None,
+            resolver_interface: None,
         }
     }
 }
@@ -248,6 +256,28 @@ impl Configuration {
                 "nak-unicast-retry-delay-ratio must be positive: value={}",
                 self.nak_unicast_retry_delay_ratio
             )));
+        }
+        if self
+            .resolver_interface
+            .as_deref()
+            .is_some_and(|interface| !interface.trim().is_empty())
+            && self
+                .resolver_name
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+        {
+            return Err(DriverError::IllegalArgument(
+                "resolver-name is required when resolver-interface is set".to_string(),
+            ));
+        }
+        if self
+            .resolver_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty() && name != "default")
+        {
+            return Err(DriverError::IllegalArgument(
+                "only the default resolver is supported by this Rust driver".to_string(),
+            ));
         }
         Ok(())
     }
@@ -385,6 +415,12 @@ impl Configuration {
             if let Ok(v) = val.parse::<i64>() {
                 config.nak_unicast_retry_delay_ratio = v;
             }
+        }
+        if let Some(val) = get_prop(RESOLVER_NAME_PROP_NAME) {
+            config.resolver_name = Some(val);
+        }
+        if let Some(val) = get_prop(RESOLVER_INTERFACE_PROP_NAME) {
+            config.resolver_interface = Some(val);
         }
 
         config
@@ -561,6 +597,8 @@ mod tests {
             config.nak_unicast_retry_delay_ratio,
             NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT
         );
+        assert!(config.resolver_name.is_none());
+        assert!(config.resolver_interface.is_none());
     }
 
     #[test]
@@ -661,6 +699,30 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("nak-unicast-retry-delay-ratio")
+        );
+    }
+
+    #[test]
+    fn should_load_and_validate_resolver_configuration() {
+        let config = Configuration::load_from_getter(|property| match property {
+            RESOLVER_NAME_PROP_NAME => Some("default".to_string()),
+            RESOLVER_INTERFACE_PROP_NAME => Some("127.0.0.1".to_string()),
+            _ => None,
+        });
+        assert_eq!(config.resolver_name.as_deref(), Some("default"));
+        assert_eq!(config.resolver_interface.as_deref(), Some("127.0.0.1"));
+        assert!(config.validate().is_ok());
+
+        let invalid = Configuration {
+            resolver_interface: Some("127.0.0.1".to_string()),
+            ..Configuration::default()
+        };
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("resolver-name")
         );
     }
 
