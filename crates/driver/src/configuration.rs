@@ -42,6 +42,10 @@ pub const MAX_RESEND_MAX: i32 = 256;
 pub const STREAM_SESSION_LIMIT_PROP_NAME: &str = "aeron.driver.stream.session.limit";
 pub const STREAM_SESSION_LIMIT_DEFAULT: usize = i32::MAX as usize;
 
+/// Rust adaptation of Aeron's termination-validator boundary. The upstream default validator
+/// denies requests; applications may explicitly opt in until a pluggable validator API lands.
+pub const TERMINATION_ALLOW_PROP_NAME: &str = "aeron.driver.termination.allow";
+
 /// Driver configuration settings, populated from environment variables or defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Configuration {
@@ -61,6 +65,9 @@ pub struct Configuration {
     /// Maximum number of active receive sessions allowed for one stream.
     /// Mirrors `Configuration.streamSessionLimit()` in vendored Aeron.
     pub stream_session_limit: usize,
+    /// Whether TERMINATE_DRIVER control messages are accepted. Defaults to false, matching
+    /// Aeron's DefaultDenyTerminationValidator.
+    pub allow_termination: bool,
 }
 
 impl Default for Configuration {
@@ -80,6 +87,7 @@ impl Default for Configuration {
             untethered_linger_timeout_ns: UNTETHERED_LINGER_TIMEOUT_DEFAULT_NS,
             max_resend: MAX_RESEND_DEFAULT,
             stream_session_limit: STREAM_SESSION_LIMIT_DEFAULT,
+            allow_termination: false,
         }
     }
 }
@@ -163,6 +171,9 @@ impl Configuration {
                 config.stream_session_limit = v;
             }
         }
+        if let Some(val) = get_prop(TERMINATION_ALLOW_PROP_NAME) {
+            config.allow_termination = val.parse::<bool>().unwrap_or(false);
+        }
 
         config
     }
@@ -245,5 +256,15 @@ mod tests {
             UNTETHERED_LINGER_TIMEOUT_DEFAULT_NS
         );
         assert_eq!(config.max_resend, MAX_RESEND_DEFAULT);
+        assert!(!config.allow_termination);
+    }
+
+    #[test]
+    fn should_load_termination_permission_from_property() {
+        let config = Configuration::load_from_getter(|property| {
+            (property == TERMINATION_ALLOW_PROP_NAME).then(|| "true".to_string())
+        });
+
+        assert!(config.allow_termination);
     }
 }

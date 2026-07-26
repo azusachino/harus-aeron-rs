@@ -148,6 +148,9 @@ impl MediaDriver {
                             Some(driver_error);
                         break;
                     }
+                    if driver.conductor().termination_requested() {
+                        thread_stop.store(true, Ordering::Release);
+                    }
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
             })
@@ -282,6 +285,12 @@ impl RunningMediaDriver {
 
     pub fn cnc_path(&self) -> PathBuf {
         self.aeron_dir.join(aeron_client::cnc_file::CNC_FILE)
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.join_handle
+            .as_ref()
+            .is_some_and(|join_handle| !join_handle.is_finished())
     }
 
     /// Stop the duty-cycle thread and return any error observed while it was running.
@@ -427,6 +436,38 @@ mod tests {
             Some(RegistrationState::Closed)
         );
         assert!(client.publication(second).is_some());
+        driver.stop().unwrap();
+    }
+
+    #[test]
+    fn should_stop_a_managed_driver_on_terminate_command() {
+        let mut driver = MediaDriver::start(Configuration {
+            allow_termination: true,
+            ..Configuration::default()
+        })
+        .unwrap();
+        let cnc = CncFile::map_existing(driver.cnc_path()).unwrap();
+        let ring = ManyToOneRingBuffer::new(cnc.to_driver_buffer()).unwrap();
+        DriverProxy::new(ring, 7).terminate_driver(&[]).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while driver.is_running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(!driver.is_running());
+        driver.stop().unwrap();
+    }
+
+    #[test]
+    fn should_deny_terminate_command_by_default() {
+        let mut driver = MediaDriver::start(Configuration::default()).unwrap();
+        let cnc = CncFile::map_existing(driver.cnc_path()).unwrap();
+        let ring = ManyToOneRingBuffer::new(cnc.to_driver_buffer()).unwrap();
+        DriverProxy::new(ring, 8).terminate_driver(&[]).unwrap();
+
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(driver.is_running());
         driver.stop().unwrap();
     }
 }

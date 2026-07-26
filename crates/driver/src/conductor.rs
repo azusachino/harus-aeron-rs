@@ -21,6 +21,7 @@ use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 use aeron_client::cnc_file::{CncFile, DEFAULT_FILE_PAGE_SIZE};
 use aeron_client::command::{
     PublicationMessageFlyweight, RemoveMessageFlyweight, SubscriptionMessageFlyweight,
+    TerminateDriverFlyweight,
 };
 use aeron_client::counters::{
     CONTROL_PROTOCOL_SEMANTIC_VERSION, DRIVER_PUBLISHER_LIMIT_TYPE_ID,
@@ -34,7 +35,7 @@ use aeron_client::driver_events::{
 };
 use aeron_client::driver_proxy::{
     ADD_EXCLUSIVE_PUBLICATION, ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE, CLIENT_KEEPALIVE,
-    REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION,
+    REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION, TERMINATE_DRIVER,
 };
 use aeron_client::log_buffers::LogBuffers;
 use aeron_client::logbuffer::{
@@ -193,6 +194,10 @@ enum Command {
     ClientClose {
         client_id: i64,
     },
+    TerminateDriver {
+        client_id: i64,
+        correlation_id: i64,
+    },
 }
 
 pub struct DriverConductor {
@@ -240,6 +245,7 @@ pub struct DriverConductor {
     setup_elicited: HashMap<NetworkSessionKey, i64>,
     /// client id -> last observed keepalive timestamp (ns).
     clients: HashMap<i64, i64>,
+    termination_requested: bool,
 }
 
 impl DriverConductor {
@@ -289,6 +295,7 @@ impl DriverConductor {
             session_states: HashMap::new(),
             setup_elicited: HashMap::new(),
             clients: HashMap::new(),
+            termination_requested: false,
         })
     }
 
@@ -416,6 +423,21 @@ impl DriverConductor {
             Command::ClientClose { client_id } => {
                 self.remove_client(client_id, now_ns);
                 Ok(())
+            }
+            Command::TerminateDriver {
+                client_id,
+                correlation_id,
+            } => {
+                self.touch_client(client_id, now_ns);
+                // The upstream default is DefaultDenyTerminationValidator. The boolean is an
+                // explicit Rust adaptation until a pluggable validator receives the same
+                // directory/token callback surface.
+                if self.configuration.allow_termination {
+                    self.termination_requested = true;
+                    self.on_operation_success(correlation_id)
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -1540,6 +1562,10 @@ impl DriverConductor {
     pub fn cnc(&self) -> &CncFile {
         &self.cnc
     }
+
+    pub fn termination_requested(&self) -> bool {
+        self.termination_requested
+    }
 }
 
 fn decode_command(msg_type: i32, buffer: &AtomicBuffer, offset: usize) -> Option<Command> {
@@ -1587,6 +1613,13 @@ fn decode_command(msg_type: i32, buffer: &AtomicBuffer, offset: usize) -> Option
             let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
             Some(Command::ClientClose {
                 client_id: fw.client_id(),
+            })
+        }
+        TERMINATE_DRIVER => {
+            let fw = TerminateDriverFlyweight::new(*buffer, offset);
+            Some(Command::TerminateDriver {
+                client_id: fw.client_id(),
+                correlation_id: fw.correlation_id(),
             })
         }
         _ => None,

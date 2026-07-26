@@ -100,7 +100,7 @@
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/service/ClusteredServiceContainerContextTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/service/ServiceSnapshotTakerTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ClientCommandAdapterTest.java"}
-{"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ConfigurationTest.java"}
+{"layer": "driver", "rust_equivalent": "crates/driver/src/configuration.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/ConfigurationTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/DataPacketDispatcherTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/multicast_flow_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/DefaultMulticastFlowControlSupplierTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/DefaultNameResolverTest.java"}
@@ -123,7 +123,7 @@
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/SenderTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/congestion_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/StaticWindowCongestionControlTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/multicast_flow_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TaggedMulticastFlowControlTest.java"}
-{"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TerminateDriverTest.java"}
+{"layer": "driver", "rust_equivalent": "crates/driver/src/driver.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TerminateDriverTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/TimeTrackingNameResolverTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/media/udp_channel.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/UdpChannelTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/UntetheredSubscriptionTest.java"}
