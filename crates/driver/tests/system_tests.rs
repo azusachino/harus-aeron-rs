@@ -143,6 +143,51 @@ fn ipc_publication_to_subscription_roundtrip_through_the_driver() {
 }
 
 #[test]
+fn network_spy_subscription_reads_the_publication_log() {
+    const STREAM_ID: i32 = 1101;
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    let channel = format!(
+        "aeron:udp?endpoint=127.0.0.1:{}",
+        receiver.local_addr().unwrap().port()
+    );
+    let spy_channel = format!("aeron-spy:{channel}");
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let mut spy = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    let spy_reg = spy.add_subscription(&spy_channel, STREAM_ID).unwrap();
+    driver.do_work().expect("register publication and spy");
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        spy.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    spy.do_work().expect("spy services events");
+
+    let mut payload = *b"hello-network-spy";
+    let payload_len = payload.len();
+    let src = AtomicBuffer::new(&mut payload);
+    let publication = publisher.publication(pub_reg).expect("publication ready");
+    assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+
+    let mut received = Vec::new();
+    let subscription = spy.subscription_mut(spy_reg).expect("spy ready");
+    assert_eq!(
+        subscription.poll(
+            |buffer, offset, length, _header| {
+                received.resize(length, 0);
+                buffer.get_bytes(offset, &mut received);
+            },
+            10,
+        ),
+        1
+    );
+    assert_eq!(received, b"hello-network-spy");
+}
+
+#[test]
 fn network_publication_sender_transmits_setup_and_data_frames() {
     const STREAM_ID: i32 = 2002;
 
