@@ -255,6 +255,25 @@ mod tests {
     }
 
     #[test]
+    fn default_name_resolver_resolves_localhost() {
+        assert_eq!(
+            DefaultNameResolver
+                .resolve("localhost", "control", true)
+                .unwrap(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn default_name_resolver_rejects_unknown_host() {
+        assert!(
+            DefaultNameResolver
+                .resolve("host-that-does-not-exist.invalid", "endpoint", false)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn should_reject_on_invalid_port() {
         assert!(
             SocketAddressParser::parse("192.168.1.20:aa", "endpoint", false, &DefaultNameResolver)
