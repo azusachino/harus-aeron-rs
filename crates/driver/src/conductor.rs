@@ -380,6 +380,18 @@ enum Command {
         registration_id: i64,
         channel: String,
     },
+    AddReceiveDestination {
+        client_id: i64,
+        correlation_id: i64,
+        registration_id: i64,
+        channel: String,
+    },
+    RemoveReceiveDestination {
+        client_id: i64,
+        correlation_id: i64,
+        registration_id: i64,
+        channel: String,
+    },
     Unknown {
         correlation_id: i64,
         message_type: i32,
@@ -399,6 +411,8 @@ impl Command {
             | Self::TerminateDriver { correlation_id, .. }
             | Self::AddDestination { correlation_id, .. }
             | Self::RemoveDestination { correlation_id, .. }
+            | Self::AddReceiveDestination { correlation_id, .. }
+            | Self::RemoveReceiveDestination { correlation_id, .. }
             | Self::Unknown { correlation_id, .. } => Some(*correlation_id),
             Self::Keepalive { .. } | Self::ClientClose { .. } => None,
         }
@@ -446,6 +460,7 @@ pub struct DriverConductor {
     /// Network publication registrations whose sender state must be removed this cycle.
     removed_network_publications: Vec<i64>,
     destination_updates: Vec<(i64, DestinationUpdate)>,
+    receive_destination_aliases: HashMap<String, String>,
     /// Reassembly state for network images, keyed by channel, session, stream, and source.
     ///
     /// The channel endpoint is part of Aeron's dispatcher identity. Stream/session alone is not
@@ -507,6 +522,7 @@ impl DriverConductor {
             receive_channel_references: HashMap::new(),
             removed_network_publications: Vec::new(),
             destination_updates: Vec::new(),
+            receive_destination_aliases: HashMap::new(),
             images: HashMap::new(),
             session_states: HashMap::new(),
             setup_elicited: HashMap::new(),
@@ -537,6 +553,14 @@ impl DriverConductor {
 
     pub fn take_destination_updates(&mut self) -> Vec<(i64, DestinationUpdate)> {
         std::mem::take(&mut self.destination_updates)
+    }
+
+    /// Normalize a receive destination endpoint back to the owning subscription channel before
+    /// image dispatch. Destination endpoints are transport aliases, not separate subscriptions.
+    pub fn resolve_receive_channel<'a>(&'a self, channel: &'a str) -> &'a str {
+        self.receive_destination_aliases
+            .get(channel)
+            .map_or(channel, String::as_str)
     }
 
     /// One conductor duty cycle: drain and dispatch client commands, then sweep liveness.
@@ -685,6 +709,7 @@ impl DriverConductor {
                 self.remove_ipc_subscription_links_for_subscription(registration_id)?;
                 if let Some(subscription) = self.subscriptions.remove(&registration_id) {
                     self.detach_images_for_subscription(registration_id, now_ns)?;
+                    self.remove_receive_destination_aliases(&subscription.channel)?;
                     if let Some(endpoint_key) = self.release_receive_endpoint(&subscription.channel)
                     {
                         self.removed_receive_channels.push(endpoint_key);
@@ -742,7 +767,7 @@ impl DriverConductor {
                 channel,
             } => {
                 self.touch_client(client_id, now_ns);
-                let destination = parse_destination(&channel)?;
+                let destination = parse_destination(&channel)?.remote_data;
                 let publication = self.publications.get(&registration_id).ok_or_else(|| {
                     DriverError::IllegalArgument(format!("unknown publication: {registration_id}"))
                 })?;
@@ -762,7 +787,7 @@ impl DriverConductor {
                 channel,
             } => {
                 self.touch_client(client_id, now_ns);
-                let destination = parse_destination(&channel)?;
+                let destination = parse_destination(&channel)?.remote_data;
                 let publication = self.publications.get(&registration_id).ok_or_else(|| {
                     DriverError::IllegalArgument(format!("unknown publication: {registration_id}"))
                 })?;
@@ -773,6 +798,26 @@ impl DriverConductor {
                 }
                 self.destination_updates
                     .push((registration_id, DestinationUpdate::Remove(destination)));
+                self.on_operation_success(correlation_id)
+            }
+            Command::AddReceiveDestination {
+                client_id,
+                correlation_id,
+                registration_id,
+                channel,
+            } => {
+                self.touch_client(client_id, now_ns);
+                self.add_receive_destination(registration_id, &channel)?;
+                self.on_operation_success(correlation_id)
+            }
+            Command::RemoveReceiveDestination {
+                client_id,
+                correlation_id,
+                registration_id,
+                channel,
+            } => {
+                self.touch_client(client_id, now_ns);
+                self.remove_receive_destination(registration_id, &channel)?;
                 self.on_operation_success(correlation_id)
             }
             Command::Unknown {
@@ -1053,6 +1098,71 @@ impl DriverConductor {
                 canonical_form,
             },
         );
+        Ok(())
+    }
+
+    fn add_receive_destination(&mut self, registration_id: i64, channel: &str) -> Result<()> {
+        let subscription = self.subscriptions.get(&registration_id).ok_or_else(|| {
+            DriverError::IllegalArgument(format!("unknown subscription: {registration_id}"))
+        })?;
+        if !is_udp_channel(&subscription.channel) {
+            return Err(DriverError::IllegalArgument(
+                "destinations may only be added to UDP subscriptions".into(),
+            ));
+        }
+        if self.receive_destination_aliases.contains_key(channel) {
+            return Err(DriverError::IllegalState(format!(
+                "receive destination already exists: {channel}"
+            )));
+        }
+        let udp_channel = parse_destination(channel)?;
+        let bind = udp_channel.remote_data;
+        let transport = UdpChannelTransport::bind(udp_channel.clone(), bind, None, 0, 0)?;
+        self.receive_destination_aliases
+            .insert(channel.to_owned(), subscription.channel.clone());
+        self.new_receive_endpoints
+            .push(ReceiveChannelEndpoint::new(udp_channel, transport));
+        Ok(())
+    }
+
+    fn remove_receive_destination(&mut self, registration_id: i64, channel: &str) -> Result<()> {
+        let subscription_channel = self
+            .subscriptions
+            .get(&registration_id)
+            .ok_or_else(|| {
+                DriverError::IllegalArgument(format!("unknown subscription: {registration_id}"))
+            })?
+            .channel
+            .clone();
+        if self
+            .receive_destination_aliases
+            .get(channel)
+            .is_none_or(|owner| owner != &subscription_channel)
+        {
+            return Err(DriverError::IllegalArgument(format!(
+                "unknown receive destination: {channel}"
+            )));
+        }
+        let udp_channel = parse_destination(channel)?;
+        self.receive_destination_aliases.remove(channel);
+        self.removed_receive_channels
+            .push(udp_channel.canonical_form.clone());
+        Ok(())
+    }
+
+    fn remove_receive_destination_aliases(&mut self, subscription_channel: &str) -> Result<()> {
+        let aliases: Vec<String> = self
+            .receive_destination_aliases
+            .iter()
+            .filter(|(_, owner)| owner.as_str() == subscription_channel)
+            .map(|(alias, _)| alias.clone())
+            .collect();
+        for alias in aliases {
+            let udp_channel = parse_destination(&alias)?;
+            self.receive_destination_aliases.remove(&alias);
+            self.removed_receive_channels
+                .push(udp_channel.canonical_form);
+        }
         Ok(())
     }
 
@@ -2012,6 +2122,7 @@ impl DriverConductor {
         for (registration_id, channel) in removed_subscriptions {
             self.remove_ipc_subscription_links_for_subscription(registration_id)?;
             self.detach_images_for_subscription(registration_id, now_ns)?;
+            self.remove_receive_destination_aliases(&channel)?;
             if let Some(endpoint_key) = self.release_receive_endpoint(&channel) {
                 self.removed_receive_channels.push(endpoint_key);
             }
@@ -2627,6 +2738,38 @@ fn decode_command(
             };
             Some(command)
         }
+        aeron_client::driver_proxy::ADD_RCV_DESTINATION
+        | aeron_client::driver_proxy::REMOVE_RCV_DESTINATION
+            if length >= aeron_client::command::DEST_CHANNEL_LENGTH_OFFSET + 4 =>
+        {
+            let channel_length =
+                buffer.get_i32(offset + aeron_client::command::DEST_CHANNEL_LENGTH_OFFSET);
+            let channel_offset = aeron_client::command::DEST_CHANNEL_OFFSET;
+            if channel_length < 0
+                || channel_offset
+                    .checked_add(channel_length as usize)
+                    .is_none_or(|end| end > length)
+            {
+                return malformed();
+            }
+            let fw = DestinationMessageFlyweight::new(*buffer, offset);
+            let command = if msg_type == aeron_client::driver_proxy::ADD_RCV_DESTINATION {
+                Command::AddReceiveDestination {
+                    client_id: fw.client_id(),
+                    correlation_id: fw.correlation_id(),
+                    registration_id: fw.registration_correlation_id(),
+                    channel: fw.channel(),
+                }
+            } else {
+                Command::RemoveReceiveDestination {
+                    client_id: fw.client_id(),
+                    correlation_id: fw.correlation_id(),
+                    registration_id: fw.registration_correlation_id(),
+                    channel: fw.channel(),
+                }
+            };
+            Some(command)
+        }
         _ if length >= aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH => {
             let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
             Some(Command::Unknown {
@@ -2638,7 +2781,7 @@ fn decode_command(
     }
 }
 
-fn parse_destination(channel: &str) -> Result<SocketAddr> {
+fn parse_destination(channel: &str) -> Result<UdpChannel> {
     let udp_channel = UdpChannel::parse_with_resolver(
         channel,
         &crate::media::socket_address_parser::DefaultNameResolver,
@@ -2663,7 +2806,7 @@ fn parse_destination(channel: &str) -> Result<SocketAddr> {
             "destination must specify endpoint".into(),
         ));
     }
-    Ok(udp_channel.remote_data)
+    Ok(udp_channel)
 }
 
 fn error_code(error: &DriverError) -> i32 {
@@ -2818,6 +2961,44 @@ mod tests {
         assert_eq!(pubs[0].stream_id, 1001);
         assert_eq!(pubs[0].channel, "aeron:ipc");
         assert_eq!(pubs[0].client_id, CLIENT_ID);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn adds_and_removes_receive_destination_alias_through_commands() {
+        let (cnc, path) = temp_cnc("receive-destination");
+        let dir = temp_dir("receive-destination");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let subscription = client
+            .add_subscription("aeron:udp?endpoint=127.0.0.1:0", 1001)
+            .unwrap();
+        conductor.do_work(1_000).unwrap();
+        assert_eq!(conductor.take_new_receive_endpoints().len(), 1);
+
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let destination = socket.local_addr().unwrap();
+        drop(socket);
+        let channel = format!("aeron:udp?endpoint={destination}");
+        client
+            .add_receive_destination(subscription, &channel)
+            .unwrap();
+        conductor.do_work(2_000).unwrap();
+        assert_eq!(conductor.take_new_receive_endpoints().len(), 1);
+        assert_eq!(
+            conductor.resolve_receive_channel(&channel),
+            "aeron:udp?endpoint=127.0.0.1:0"
+        );
+
+        client
+            .remove_receive_destination(subscription, &channel)
+            .unwrap();
+        conductor.do_work(3_000).unwrap();
+        assert_eq!(conductor.take_removed_receive_channels().len(), 1);
+        assert_eq!(conductor.resolve_receive_channel(&channel), channel);
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);

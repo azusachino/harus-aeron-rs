@@ -335,6 +335,48 @@ impl<'a> DriverProxy<'a> {
         Ok(correlation_id)
     }
 
+    pub fn add_receive_destination(
+        &self,
+        registration_id: i64,
+        endpoint_channel: &str,
+    ) -> Result<i64> {
+        self.write_destination_command(ADD_RCV_DESTINATION, registration_id, endpoint_channel)
+    }
+
+    pub fn remove_receive_destination(
+        &self,
+        registration_id: i64,
+        endpoint_channel: &str,
+    ) -> Result<i64> {
+        self.write_destination_command(REMOVE_RCV_DESTINATION, registration_id, endpoint_channel)
+    }
+
+    fn write_destination_command(
+        &self,
+        message_type: i32,
+        registration_id: i64,
+        endpoint_channel: &str,
+    ) -> Result<i64> {
+        let correlation_id = self.next_correlation_id();
+        let length = DestinationMessageFlyweight::compute_length(endpoint_channel.len());
+        let mut buf = vec![0u8; length];
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = DestinationMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(correlation_id);
+        flyweight.set_registration_correlation_id(registration_id);
+        flyweight.set_channel(endpoint_channel);
+        if !self
+            .to_driver_ring_buffer
+            .write(message_type, &atomic_buf, 0, length)?
+        {
+            return Err(AeronError::CommandWriteFailed(
+                "failed to write receive destination command".to_string(),
+            ));
+        }
+        Ok(correlation_id)
+    }
+
     pub fn terminate_driver(&self, token_bytes: &[u8]) -> Result<i64> {
         let correlation_id = self.next_correlation_id();
         let length = 20 + token_bytes.len();
