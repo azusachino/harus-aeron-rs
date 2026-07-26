@@ -2,6 +2,7 @@
 //!
 //! Mirrors `io.aeron.driver.Sender.java`.
 
+use crate::conductor::DestinationUpdate;
 use crate::error::Result;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::network_publication::NetworkPublication;
@@ -45,6 +46,20 @@ impl Sender {
             true
         } else {
             false
+        }
+    }
+
+    pub fn update_destination(&mut self, registration_id: i64, update: DestinationUpdate) -> bool {
+        let Some(publication) = self
+            .network_publications
+            .iter_mut()
+            .find(|publication| publication.registration_id() == registration_id)
+        else {
+            return false;
+        };
+        match update {
+            DestinationUpdate::Add(destination) => publication.add_destination(destination),
+            DestinationUpdate::Remove(destination) => publication.remove_destination(destination),
         }
     }
 

@@ -69,7 +69,7 @@ pub struct NetworkPublication {
     registration_id: i64,
     log_buffers: LogBuffers,
     endpoint: SendChannelEndpoint,
-    destination: SocketAddr,
+    destinations: Vec<SocketAddr>,
     session_id: i32,
     stream_id: i32,
     initial_term_id: i32,
@@ -138,7 +138,7 @@ impl NetworkPublication {
             registration_id,
             log_buffers,
             endpoint,
-            destination,
+            destinations: vec![destination],
             session_id,
             stream_id,
             initial_term_id,
@@ -180,6 +180,32 @@ impl NetworkPublication {
         self.clean_position
     }
 
+    pub fn add_destination(&mut self, destination: SocketAddr) -> bool {
+        if self.destinations.contains(&destination) {
+            false
+        } else {
+            self.destinations.push(destination);
+            self.setup_sent = false;
+            true
+        }
+    }
+
+    pub fn remove_destination(&mut self, destination: SocketAddr) -> bool {
+        let Some(index) = self
+            .destinations
+            .iter()
+            .position(|item| *item == destination)
+        else {
+            return false;
+        };
+        self.destinations.remove(index);
+        true
+    }
+
+    pub fn destinations(&self) -> &[SocketAddr] {
+        &self.destinations
+    }
+
     /// Drain SM/NAK control frames and apply them to this publication.
     pub fn poll_control(&mut self, now_ns: i64) -> Result<usize> {
         let mut work = self.endpoint.poll_control()?;
@@ -211,7 +237,7 @@ impl NetworkPublication {
                 let mut retransmit_error = None;
                 let log_buffers = &self.log_buffers;
                 let endpoint = &self.endpoint;
-                let destination = self.destination;
+                let destinations = self.destinations.clone();
                 let initial_term_id = self.initial_term_id;
                 let term_length = self.term_length;
                 let mtu_length = self.mtu_length;
@@ -227,7 +253,7 @@ impl NetworkPublication {
                     &mut |term_id, term_offset, length| match Self::retransmit_range(
                         log_buffers,
                         endpoint,
-                        destination,
+                        destinations.clone(),
                         initial_term_id,
                         term_length,
                         mtu_length,
@@ -248,7 +274,7 @@ impl NetworkPublication {
         }
         let log_buffers = &self.log_buffers;
         let endpoint = &self.endpoint;
-        let destination = self.destination;
+        let destinations = self.destinations.clone();
         let initial_term_id = self.initial_term_id;
         let term_length = self.term_length;
         let mtu_length = self.mtu_length;
@@ -260,7 +286,7 @@ impl NetworkPublication {
                 match Self::retransmit_range(
                     log_buffers,
                     endpoint,
-                    destination,
+                    destinations.clone(),
                     initial_term_id,
                     term_length,
                     mtu_length,
@@ -325,7 +351,9 @@ impl NetworkPublication {
         if available > 0 && self.sender_position + available as i64 <= self.receiver_limit {
             let mut bytes = vec![0u8; available as usize];
             term_buffer.get_bytes(term_offset, &mut bytes);
-            self.endpoint.send_data(&bytes, self.destination)?;
+            for destination in &self.destinations {
+                self.endpoint.send_data(&bytes, *destination)?;
+            }
             self.sender_position += (available + padding) as i64;
             self.clean_log_behind_sender();
             self.last_send_ns = now_ns;
@@ -392,7 +420,7 @@ impl NetworkPublication {
     fn retransmit_range(
         log_buffers: &LogBuffers,
         endpoint: &SendChannelEndpoint,
-        destination: SocketAddr,
+        destinations: Vec<SocketAddr>,
         initial_term_id: i32,
         term_length: usize,
         mtu_length: usize,
@@ -430,7 +458,9 @@ impl NetworkPublication {
             let available = available as usize;
             let mut bytes = vec![0u8; available];
             term_buffer.get_bytes(offset, &mut bytes);
-            endpoint.send_data(&bytes, destination)?;
+            for destination in &destinations {
+                endpoint.send_data(&bytes, *destination)?;
+            }
             offset += available + TermScanner::padding(scan) as usize;
             work += 1;
         }
@@ -459,7 +489,9 @@ impl NetworkPublication {
         setup.set_term_length(self.term_length as i32);
         setup.set_mtu_length(self.mtu_length as i32);
         setup.set_ttl(0);
-        self.endpoint.send_data(&bytes, self.destination)?;
+        for destination in &self.destinations {
+            self.endpoint.send_data(&bytes, *destination)?;
+        }
         Ok(1)
     }
 
@@ -480,7 +512,9 @@ impl NetworkPublication {
         data.set_session_id(self.session_id);
         data.set_stream_id(self.stream_id);
         data.set_term_id(term_id);
-        self.endpoint.send_data(&bytes, self.destination)?;
+        for destination in &self.destinations {
+            self.endpoint.send_data(&bytes, *destination)?;
+        }
         Ok(1)
     }
 }
@@ -506,6 +540,39 @@ mod tests {
         );
         assert_eq!(term_id, 102);
         assert_eq!(term_offset, 96);
+    }
+
+    #[test]
+    fn should_add_and_remove_dynamic_destinations() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        let endpoint = SendChannelEndpoint::new(channel, transport);
+        let path =
+            std::env::temp_dir().join(format!("aeron-destination-test-{}", std::process::id()));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, 4096).unwrap();
+        let first = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 21001);
+        let second = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 21002);
+        let mut publication = NetworkPublication::new(
+            42,
+            buffers,
+            endpoint,
+            first,
+            7,
+            11,
+            3,
+            1408,
+            Arc::new(AtomicI64::new(0)),
+            16,
+        );
+
+        assert!(publication.add_destination(second));
+        assert!(!publication.add_destination(second));
+        assert_eq!(publication.destinations(), &[first, second]);
+        assert!(publication.remove_destination(second));
+        assert!(!publication.remove_destination(second));
+        assert_eq!(publication.destinations(), &[first]);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

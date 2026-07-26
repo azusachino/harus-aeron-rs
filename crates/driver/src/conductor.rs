@@ -20,8 +20,8 @@ use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 
 use aeron_client::cnc_file::CncFile;
 use aeron_client::command::{
-    CounterMessageFlyweight, PublicationMessageFlyweight, RemoveMessageFlyweight,
-    SubscriptionMessageFlyweight, TerminateDriverFlyweight,
+    CounterMessageFlyweight, DestinationMessageFlyweight, PublicationMessageFlyweight,
+    RemoveMessageFlyweight, SubscriptionMessageFlyweight, TerminateDriverFlyweight,
 };
 use aeron_client::counters::{
     CONTROL_PROTOCOL_SEMANTIC_VERSION, DRIVER_PUBLISHER_LIMIT_TYPE_ID,
@@ -63,12 +63,14 @@ use crate::flow_control::{
     MULTICAST_RRWM_DEFAULT, UNICAST_RRWM_DEFAULT, retransmit_receiver_window_multiple,
 };
 use crate::log_factory::{FileStoreLogFactory, LogFactory};
+use crate::media::control_mode::ControlMode;
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::media::udp_channel::UdpChannel;
 use crate::media::udp_channel_transport::UdpChannelTransport;
 use crate::network_publication::NetworkPublication;
 use crate::publication_image::{ImageLifecycleEvent, PublicationImage};
+use crate::publication_params::RESPONSE_CORRELATION_ID_PARAM_NAME;
 use crate::publication_params::{
     PublicationParams, TaggedPublicationInfo, TaggedPublicationLookup,
 };
@@ -104,6 +106,12 @@ pub struct PendingNak {
     pub length: i32,
 }
 type NetworkSessionKey = NetworkImageKey;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationUpdate {
+    Add(SocketAddr),
+    Remove(SocketAddr),
+}
 
 /// Receive-side session states from Aeron's `DataPacketDispatcher`.
 ///
@@ -360,6 +368,18 @@ enum Command {
         client_id: i64,
         correlation_id: i64,
     },
+    AddDestination {
+        client_id: i64,
+        correlation_id: i64,
+        registration_id: i64,
+        channel: String,
+    },
+    RemoveDestination {
+        client_id: i64,
+        correlation_id: i64,
+        registration_id: i64,
+        channel: String,
+    },
     Unknown {
         correlation_id: i64,
         message_type: i32,
@@ -377,6 +397,8 @@ impl Command {
             | Self::RemoveCounter { correlation_id, .. }
             | Self::GetNextAvailableSessionId { correlation_id, .. }
             | Self::TerminateDriver { correlation_id, .. }
+            | Self::AddDestination { correlation_id, .. }
+            | Self::RemoveDestination { correlation_id, .. }
             | Self::Unknown { correlation_id, .. } => Some(*correlation_id),
             Self::Keepalive { .. } | Self::ClientClose { .. } => None,
         }
@@ -423,6 +445,7 @@ pub struct DriverConductor {
     receive_channel_references: HashMap<String, ReceiveChannelReference>,
     /// Network publication registrations whose sender state must be removed this cycle.
     removed_network_publications: Vec<i64>,
+    destination_updates: Vec<(i64, DestinationUpdate)>,
     /// Reassembly state for network images, keyed by channel, session, stream, and source.
     ///
     /// The channel endpoint is part of Aeron's dispatcher identity. Stream/session alone is not
@@ -483,6 +506,7 @@ impl DriverConductor {
             removed_receive_channels: Vec::new(),
             receive_channel_references: HashMap::new(),
             removed_network_publications: Vec::new(),
+            destination_updates: Vec::new(),
             images: HashMap::new(),
             session_states: HashMap::new(),
             setup_elicited: HashMap::new(),
@@ -509,6 +533,10 @@ impl DriverConductor {
     /// Drain network-publication removals for the Sender agent.
     pub fn take_removed_network_publications(&mut self) -> Vec<i64> {
         std::mem::take(&mut self.removed_network_publications)
+    }
+
+    pub fn take_destination_updates(&mut self) -> Vec<(i64, DestinationUpdate)> {
+        std::mem::take(&mut self.destination_updates)
     }
 
     /// One conductor duty cycle: drain and dispatch client commands, then sweep liveness.
@@ -706,6 +734,46 @@ impl DriverConductor {
                 } else {
                     Ok(())
                 }
+            }
+            Command::AddDestination {
+                client_id,
+                correlation_id,
+                registration_id,
+                channel,
+            } => {
+                self.touch_client(client_id, now_ns);
+                let destination = parse_destination(&channel)?;
+                let publication = self.publications.get(&registration_id).ok_or_else(|| {
+                    DriverError::IllegalArgument(format!("unknown publication: {registration_id}"))
+                })?;
+                if publication.is_ipc {
+                    return Err(DriverError::IllegalArgument(
+                        "destinations may only be added to network publications".into(),
+                    ));
+                }
+                self.destination_updates
+                    .push((registration_id, DestinationUpdate::Add(destination)));
+                self.on_operation_success(correlation_id)
+            }
+            Command::RemoveDestination {
+                client_id,
+                correlation_id,
+                registration_id,
+                channel,
+            } => {
+                self.touch_client(client_id, now_ns);
+                let destination = parse_destination(&channel)?;
+                let publication = self.publications.get(&registration_id).ok_or_else(|| {
+                    DriverError::IllegalArgument(format!("unknown publication: {registration_id}"))
+                })?;
+                if publication.is_ipc {
+                    return Err(DriverError::IllegalArgument(
+                        "destinations may only be removed from network publications".into(),
+                    ));
+                }
+                self.destination_updates
+                    .push((registration_id, DestinationUpdate::Remove(destination)));
+                self.on_operation_success(correlation_id)
             }
             Command::Unknown {
                 correlation_id,
@@ -2527,6 +2595,38 @@ fn decode_command(
                 correlation_id: fw.correlation_id(),
             })
         }
+        aeron_client::driver_proxy::ADD_DESTINATION
+        | aeron_client::driver_proxy::REMOVE_DESTINATION
+            if length >= aeron_client::command::DEST_CHANNEL_LENGTH_OFFSET + 4 =>
+        {
+            let channel_length =
+                buffer.get_i32(offset + aeron_client::command::DEST_CHANNEL_LENGTH_OFFSET);
+            let channel_offset = aeron_client::command::DEST_CHANNEL_OFFSET;
+            if channel_length < 0
+                || channel_offset
+                    .checked_add(channel_length as usize)
+                    .is_none_or(|end| end > length)
+            {
+                return malformed();
+            }
+            let fw = DestinationMessageFlyweight::new(*buffer, offset);
+            let command = if msg_type == aeron_client::driver_proxy::ADD_DESTINATION {
+                Command::AddDestination {
+                    client_id: fw.client_id(),
+                    correlation_id: fw.correlation_id(),
+                    registration_id: fw.registration_correlation_id(),
+                    channel: fw.channel(),
+                }
+            } else {
+                Command::RemoveDestination {
+                    client_id: fw.client_id(),
+                    correlation_id: fw.correlation_id(),
+                    registration_id: fw.registration_correlation_id(),
+                    channel: fw.channel(),
+                }
+            };
+            Some(command)
+        }
         _ if length >= aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH => {
             let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
             Some(Command::Unknown {
@@ -2536,6 +2636,34 @@ fn decode_command(
         }
         _ => None,
     }
+}
+
+fn parse_destination(channel: &str) -> Result<SocketAddr> {
+    let udp_channel = UdpChannel::parse_with_resolver(
+        channel,
+        &crate::media::socket_address_parser::DefaultNameResolver,
+        true,
+    )?;
+    if udp_channel.control_mode == ControlMode::Response {
+        return Err(DriverError::InvalidChannel(
+            "destinations may not specify control-mode=response".into(),
+        ));
+    }
+    if udp_channel
+        .channel_uri
+        .get(RESPONSE_CORRELATION_ID_PARAM_NAME)
+        .is_some()
+    {
+        return Err(DriverError::InvalidChannel(
+            "destinations must not contain response-correlation-id".into(),
+        ));
+    }
+    if !udp_channel.has_explicit_endpoint {
+        return Err(DriverError::InvalidChannel(
+            "destination must specify endpoint".into(),
+        ));
+    }
+    Ok(udp_channel.remote_data)
 }
 
 fn error_code(error: &DriverError) -> i32 {

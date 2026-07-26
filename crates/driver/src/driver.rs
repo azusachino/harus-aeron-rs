@@ -175,6 +175,12 @@ impl MediaDriver {
         for registration_id in self.conductor.take_removed_network_publications() {
             self.sender.remove_network_publication(registration_id);
         }
+        for (registration_id, update) in self.conductor.take_destination_updates() {
+            // The conductor validates the registration and channel before queuing this update.
+            // A publication can still disappear in the same duty cycle, so silently dropping a
+            // stale update matches the asynchronous Sender ownership boundary.
+            self.sender.update_destination(registration_id, update);
+        }
         let sender_work = self.sender.do_work(now_ns)?;
         let receiver_work = self.receiver.do_work_at(now_ns)?;
         // Hand received SETUP/DATA frames to the conductor for image creation + reassembly.
