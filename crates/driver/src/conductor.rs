@@ -309,6 +309,8 @@ pub struct DriverConductor {
     counters: HashMap<i32, Arc<AtomicI64>>,
     /// Client counter registration id -> allocated counter id and owner.
     client_counters: HashMap<i64, (i64, i32)>,
+    /// Subscriber-position counter id keyed by the subscription and image notification that own it.
+    subscriber_counters: HashMap<(i64, i64), i32>,
     /// Network publications created this cycle, drained by the driver into the Sender.
     new_network_publications: Vec<NetworkPublication>,
     /// Receive endpoints created this cycle, drained by the driver into the Receiver.
@@ -376,6 +378,7 @@ impl DriverConductor {
             log_buffers: HashMap::new(),
             counters: HashMap::new(),
             client_counters: HashMap::new(),
+            subscriber_counters: HashMap::new(),
             new_network_publications: Vec::new(),
             new_receive_endpoints: Vec::new(),
             removed_receive_channels: Vec::new(),
@@ -543,7 +546,7 @@ impl DriverConductor {
                 registration_id,
             } => {
                 if let Some(subscription) = self.subscriptions.remove(&registration_id) {
-                    self.detach_images_for_subscription(registration_id, now_ns);
+                    self.detach_images_for_subscription(registration_id, now_ns)?;
                     if let Some(endpoint_key) = self.release_receive_endpoint(&subscription.channel)
                     {
                         self.removed_receive_channels.push(endpoint_key);
@@ -1507,7 +1510,7 @@ impl DriverConductor {
             .map(|(registration_id, subscription)| (*registration_id, subscription.channel.clone()))
             .collect();
         for (registration_id, channel) in removed_subscriptions {
-            self.detach_images_for_subscription(registration_id, now_ns);
+            self.detach_images_for_subscription(registration_id, now_ns)?;
             if let Some(endpoint_key) = self.release_receive_endpoint(&channel) {
                 self.removed_receive_channels.push(endpoint_key);
             }
@@ -1532,7 +1535,11 @@ impl DriverConductor {
     ///
     /// A detached image must not continue rebuilding data into a client-owned log. Dropping the
     /// mapped buffers also releases the file so a later subscription can create a fresh image.
-    fn detach_images_for_subscription(&mut self, subscription_registration_id: i64, now_ns: i64) {
+    fn detach_images_for_subscription(
+        &mut self,
+        subscription_registration_id: i64,
+        now_ns: i64,
+    ) -> Result<()> {
         let keys: Vec<NetworkImageKey> = self
             .images
             .iter()
@@ -1559,6 +1566,39 @@ impl DriverConductor {
                 }
             }
         }
+        self.release_subscriber_counters(subscription_registration_id)?;
+        Ok(())
+    }
+
+    fn release_subscriber_counters(&mut self, subscription_registration_id: i64) -> Result<()> {
+        let keys: Vec<_> = self
+            .subscriber_counters
+            .keys()
+            .filter(|(subscription_id, _)| *subscription_id == subscription_registration_id)
+            .copied()
+            .collect();
+        for key in keys {
+            if let Some(counter_id) = self.subscriber_counters.remove(&key) {
+                self.counters.remove(&counter_id);
+                self.cnc.free_counter(counter_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn release_image_counter(
+        &mut self,
+        subscription_registration_id: i64,
+        correlation_id: i64,
+    ) -> Result<()> {
+        if let Some(counter_id) = self
+            .subscriber_counters
+            .remove(&(subscription_registration_id, correlation_id))
+        {
+            self.counters.remove(&counter_id);
+            self.cnc.free_counter(counter_id)?;
+        }
+        Ok(())
     }
 
     fn sweep_timed_out_clients(&mut self, now_ns: i64) -> Result<usize> {
@@ -1618,9 +1658,16 @@ impl DriverConductor {
                 }
                 ImageLifecycleEvent::ReachedEndOfLife => {
                     if let Some(image) = self.images.remove(&key) {
+                        let links: Vec<_> = image.image_links().collect();
                         let log_file_name = image.log_file_name().to_owned();
                         drop(image);
                         let _ = std::fs::remove_file(log_file_name);
+                        for (subscription_registration_id, correlation_id) in links {
+                            self.release_image_counter(
+                                subscription_registration_id,
+                                correlation_id,
+                            )?;
+                        }
                     }
                     work += 1;
                 }
@@ -1716,6 +1763,10 @@ impl DriverConductor {
         fw.set_log_file_name(log_file_name);
         fw.set_source_identity(source_identity);
         self.transmit(ON_AVAILABLE_IMAGE, &buf, len)?;
+        self.subscriber_counters.insert(
+            (subscription_registration_id, correlation_id),
+            subscriber_position_id,
+        );
         Ok(correlation_id)
     }
 
@@ -2439,10 +2490,35 @@ mod tests {
         conductor.do_work(3_000).unwrap();
 
         assert!(conductor.images.is_empty());
+        assert!(conductor.counters().is_empty());
         assert_eq!(
             conductor.take_removed_receive_channels(),
             vec![endpoint_key]
         );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn releases_ipc_subscriber_position_counter_when_subscription_is_removed() {
+        let (cnc, path) = temp_cnc("ipc-counter-release");
+        let dir = temp_dir("ipc-counter-release");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let publication = client.add_publication("aeron:ipc", 7).unwrap();
+        let subscription = client.add_subscription("aeron:ipc", 7).unwrap();
+        conductor.do_work(1_000).unwrap();
+        assert_eq!(conductor.counters().len(), 2);
+
+        client.remove_subscription(subscription).unwrap();
+        conductor.do_work(2_000).unwrap();
+        assert_eq!(conductor.counters().len(), 1);
+
+        client.remove_publication(publication, false).unwrap();
+        conductor.do_work(3_000).unwrap();
+        assert!(conductor.counters().is_empty());
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
