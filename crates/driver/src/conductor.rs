@@ -18,7 +18,7 @@ use agrona::AtomicBuffer;
 use agrona::BroadcastTransmitter;
 use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 
-use aeron_client::cnc_file::{CncFile, DEFAULT_FILE_PAGE_SIZE};
+use aeron_client::cnc_file::CncFile;
 use aeron_client::command::{
     CounterMessageFlyweight, PublicationMessageFlyweight, RemoveMessageFlyweight,
     SubscriptionMessageFlyweight, TerminateDriverFlyweight,
@@ -1360,7 +1360,7 @@ impl DriverConductor {
         let file_name = format!("{session_id}-{stream_id}-{channel_tag}.logbuffer");
         let factory = FileStoreLogFactory::from_configuration(
             &dir,
-            DEFAULT_FILE_PAGE_SIZE,
+            self.configuration.file_page_size,
             &self.configuration,
         )?;
         let path = factory.image_path_named(&file_name);
@@ -1396,7 +1396,7 @@ impl DriverConductor {
             .map_err(|e| DriverError::IllegalState(format!("create publications dir: {e}")))?;
         let factory = FileStoreLogFactory::from_configuration(
             &dir,
-            DEFAULT_FILE_PAGE_SIZE,
+            self.configuration.file_page_size,
             &self.configuration,
         )?;
         let path = factory.publication_path(registration_id);

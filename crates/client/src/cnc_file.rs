@@ -171,6 +171,30 @@ impl CncFile {
         error_log_length: usize,
         client_liveness_timeout_ns: i64,
     ) -> Result<Self> {
+        Self::create_new_with_regions_and_page_size(
+            path,
+            to_driver_length,
+            to_clients_length,
+            counters_metadata_length,
+            counters_values_length,
+            error_log_length,
+            client_liveness_timeout_ns,
+            DEFAULT_FILE_PAGE_SIZE,
+        )
+    }
+
+    /// Create a CnC file with explicit regions and the file page size recorded in metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_new_with_regions_and_page_size<P: AsRef<Path>>(
+        path: P,
+        to_driver_length: usize,
+        to_clients_length: usize,
+        counters_metadata_length: usize,
+        counters_values_length: usize,
+        error_log_length: usize,
+        client_liveness_timeout_ns: i64,
+        file_page_size: i32,
+    ) -> Result<Self> {
         let total_len = META_DATA_LENGTH
             + to_driver_length
             + to_clients_length
@@ -202,7 +226,7 @@ impl CncFile {
         meta.put_i64(CLIENT_LIVENESS_TIMEOUT_OFFSET, client_liveness_timeout_ns);
         meta.put_i64(START_TIMESTAMP_OFFSET, now_ms());
         meta.put_i64(PID_OFFSET, std::process::id() as i64);
-        meta.put_i32(FILE_PAGE_SIZE_OFFSET, DEFAULT_FILE_PAGE_SIZE);
+        meta.put_i32(FILE_PAGE_SIZE_OFFSET, file_page_size);
         // Publish version last so readers that see CNC_VERSION also see the fields above.
         meta.put_i32_ordered(CNC_VERSION_OFFSET, CNC_VERSION);
 
@@ -325,6 +349,11 @@ impl CncFile {
 
     pub fn error_log_length(&self) -> usize {
         self.0.error_log_length
+    }
+
+    pub fn file_page_size(&self) -> i32 {
+        self.view(0, META_DATA_LENGTH)
+            .get_i32(FILE_PAGE_SIZE_OFFSET)
     }
 
     /// Publish one counter record in the format consumed by Agrona's Java `CountersReader`.

@@ -4,7 +4,13 @@
 
 use std::env;
 
-use aeron_client::logbuffer::{TERM_MAX_LENGTH, TERM_MIN_LENGTH};
+use aeron_client::cnc_file::{
+    DEFAULT_COUNTER_METADATA_LENGTH, DEFAULT_COUNTER_VALUES_LENGTH, DEFAULT_ERROR_LOG_LENGTH,
+    DEFAULT_FILE_PAGE_SIZE, DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH,
+};
+use aeron_client::logbuffer::{TERM_MAX_LENGTH, TERM_MIN_LENGTH, check_page_size};
+use agrona::broadcast::TRAILER_LENGTH as BROADCAST_TRAILER_LENGTH;
+use agrona::ring_buffer::TRAILER_LENGTH as RING_TRAILER_LENGTH;
 
 use crate::error::{DriverError, Result};
 
@@ -56,10 +62,21 @@ pub const PERFORM_STORAGE_CHECKS_PROP_NAME: &str = "aeron.perform.storage.checks
 pub const LOW_FILE_STORE_WARNING_THRESHOLD_PROP_NAME: &str =
     "aeron.low.file.store.warning.threshold";
 pub const LOW_FILE_STORE_WARNING_THRESHOLD_DEFAULT: u64 = TERM_BUFFER_LENGTH_DEFAULT as u64 * 10;
+pub const CONDUCTOR_BUFFER_LENGTH_PROP_NAME: &str = "aeron.conductor.buffer.length";
+pub const TO_CLIENTS_BUFFER_LENGTH_PROP_NAME: &str = "aeron.clients.buffer.length";
+pub const COUNTERS_VALUES_BUFFER_LENGTH_PROP_NAME: &str = "aeron.counters.buffer.length";
+pub const ERROR_BUFFER_LENGTH_PROP_NAME: &str = "aeron.error.buffer.length";
+pub const FILE_PAGE_SIZE_PROP_NAME: &str = "aeron.file.page.size";
 
 /// Driver configuration settings, populated from environment variables or defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Configuration {
+    pub conductor_buffer_length: usize,
+    pub to_clients_buffer_length: usize,
+    pub counters_metadata_buffer_length: usize,
+    pub counters_values_buffer_length: usize,
+    pub error_buffer_length: usize,
+    pub file_page_size: i32,
     pub term_buffer_sparse_file: bool,
     pub publication_term_buffer_length: usize,
     pub ipc_term_buffer_length: usize,
@@ -89,6 +106,12 @@ pub struct Configuration {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
+            conductor_buffer_length: DEFAULT_TO_DRIVER_LENGTH,
+            to_clients_buffer_length: DEFAULT_TO_CLIENTS_LENGTH,
+            counters_metadata_buffer_length: DEFAULT_COUNTER_METADATA_LENGTH,
+            counters_values_buffer_length: DEFAULT_COUNTER_VALUES_LENGTH,
+            error_buffer_length: DEFAULT_ERROR_LOG_LENGTH,
+            file_page_size: DEFAULT_FILE_PAGE_SIZE,
             term_buffer_sparse_file: true,
             publication_term_buffer_length: TERM_BUFFER_LENGTH_DEFAULT,
             ipc_term_buffer_length: TERM_BUFFER_IPC_LENGTH_DEFAULT,
@@ -117,6 +140,29 @@ impl Configuration {
     /// Keeping this check at driver construction makes invalid MediaDriver contexts fail before
     /// a CnC file or transport endpoint is created.
     pub fn validate(&self) -> Result<()> {
+        if !valid_ring_buffer_length(self.conductor_buffer_length, RING_TRAILER_LENGTH) {
+            return Err(DriverError::IllegalArgument(format!(
+                "conductor-buffer-length must contain a power-of-two data region: value={}",
+                self.conductor_buffer_length
+            )));
+        }
+        if !valid_ring_buffer_length(self.to_clients_buffer_length, BROADCAST_TRAILER_LENGTH) {
+            return Err(DriverError::IllegalArgument(format!(
+                "to-clients-buffer-length must contain a power-of-two data region: value={}",
+                self.to_clients_buffer_length
+            )));
+        }
+        if self.counters_metadata_buffer_length == 0
+            || self.counters_values_buffer_length == 0
+            || self.error_buffer_length == 0
+        {
+            return Err(DriverError::IllegalArgument(
+                "counter and error buffer lengths must be positive".to_string(),
+            ));
+        }
+        check_page_size(self.file_page_size)
+            .map_err(|message| DriverError::IllegalArgument(message.to_string()))?;
+
         validate_term_length(
             "publication-term-buffer-length",
             self.publication_term_buffer_length,
@@ -186,6 +232,31 @@ impl Configuration {
 
         if let Some(val) = get_prop(TERM_BUFFER_SPARSE_FILE_PROP_NAME) {
             config.term_buffer_sparse_file = val.parse::<bool>().unwrap_or(true);
+        }
+        if let Some(val) = get_prop(CONDUCTOR_BUFFER_LENGTH_PROP_NAME) {
+            if let Ok(v) = val.parse::<usize>() {
+                config.conductor_buffer_length = v;
+            }
+        }
+        if let Some(val) = get_prop(TO_CLIENTS_BUFFER_LENGTH_PROP_NAME) {
+            if let Ok(v) = val.parse::<usize>() {
+                config.to_clients_buffer_length = v;
+            }
+        }
+        if let Some(val) = get_prop(COUNTERS_VALUES_BUFFER_LENGTH_PROP_NAME) {
+            if let Ok(v) = val.parse::<usize>() {
+                config.counters_values_buffer_length = v;
+            }
+        }
+        if let Some(val) = get_prop(ERROR_BUFFER_LENGTH_PROP_NAME) {
+            if let Ok(v) = val.parse::<usize>() {
+                config.error_buffer_length = v;
+            }
+        }
+        if let Some(val) = get_prop(FILE_PAGE_SIZE_PROP_NAME) {
+            if let Ok(v) = val.parse::<i32>() {
+                config.file_page_size = v;
+            }
         }
         if let Some(val) = get_prop(TERM_BUFFER_LENGTH_PROP_NAME) {
             if let Ok(v) = val.parse::<usize>() {
@@ -299,6 +370,10 @@ fn validate_term_length(name: &str, value: usize) -> Result<()> {
     Ok(())
 }
 
+fn valid_ring_buffer_length(length: usize, trailer_length: usize) -> bool {
+    length >= trailer_length && (length - trailer_length).is_power_of_two()
+}
+
 fn validate_mtu(name: &str, value: usize) -> Result<()> {
     if !(32..=65_504).contains(&value) || value % 32 != 0 {
         return Err(DriverError::IllegalArgument(format!(
@@ -359,6 +434,18 @@ mod tests {
     #[test]
     fn should_load_default_values() {
         let config = Configuration::default();
+        assert_eq!(config.conductor_buffer_length, DEFAULT_TO_DRIVER_LENGTH);
+        assert_eq!(config.to_clients_buffer_length, DEFAULT_TO_CLIENTS_LENGTH);
+        assert_eq!(
+            config.counters_metadata_buffer_length,
+            DEFAULT_COUNTER_METADATA_LENGTH
+        );
+        assert_eq!(
+            config.counters_values_buffer_length,
+            DEFAULT_COUNTER_VALUES_LENGTH
+        );
+        assert_eq!(config.error_buffer_length, DEFAULT_ERROR_LOG_LENGTH);
+        assert_eq!(config.file_page_size, DEFAULT_FILE_PAGE_SIZE);
         assert!(config.term_buffer_sparse_file);
         assert_eq!(
             config.publication_term_buffer_length,
@@ -421,6 +508,35 @@ mod tests {
 
         assert!(!config.perform_storage_checks);
         assert_eq!(config.low_file_store_warning_threshold, 123);
+    }
+
+    #[test]
+    fn should_load_cnc_geometry_from_properties() {
+        let config = Configuration::load_from_getter(|property| match property {
+            CONDUCTOR_BUFFER_LENGTH_PROP_NAME => {
+                Some((DEFAULT_TO_DRIVER_LENGTH + (1 << 20)).to_string())
+            }
+            TO_CLIENTS_BUFFER_LENGTH_PROP_NAME => {
+                Some((DEFAULT_TO_CLIENTS_LENGTH + (1 << 20)).to_string())
+            }
+            COUNTERS_VALUES_BUFFER_LENGTH_PROP_NAME => Some("2097152".to_string()),
+            ERROR_BUFFER_LENGTH_PROP_NAME => Some("2097152".to_string()),
+            FILE_PAGE_SIZE_PROP_NAME => Some("8192".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(
+            config.conductor_buffer_length,
+            DEFAULT_TO_DRIVER_LENGTH + (1 << 20)
+        );
+        assert_eq!(
+            config.to_clients_buffer_length,
+            DEFAULT_TO_CLIENTS_LENGTH + (1 << 20)
+        );
+        assert_eq!(config.counters_values_buffer_length, 2 * 1024 * 1024);
+        assert_eq!(config.error_buffer_length, 2 * 1024 * 1024);
+        assert_eq!(config.file_page_size, 8192);
+        assert!(config.validate().is_ok());
     }
 
     #[test]

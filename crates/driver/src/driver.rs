@@ -8,10 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aeron_client::cnc_file::{
-    CncFile, DEFAULT_COUNTER_METADATA_LENGTH, DEFAULT_COUNTER_VALUES_LENGTH,
-    DEFAULT_ERROR_LOG_LENGTH, DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH,
-};
+use aeron_client::cnc_file::CncFile;
 
 use crate::conductor::DriverConductor;
 use crate::configuration::Configuration;
@@ -79,14 +76,15 @@ impl MediaDriver {
             )));
         }
 
-        let cnc = CncFile::create_new_with_regions(
+        let cnc = CncFile::create_new_with_regions_and_page_size(
             &cnc_path,
-            DEFAULT_TO_DRIVER_LENGTH,
-            DEFAULT_TO_CLIENTS_LENGTH,
-            DEFAULT_COUNTER_METADATA_LENGTH,
-            DEFAULT_COUNTER_VALUES_LENGTH,
-            DEFAULT_ERROR_LOG_LENGTH,
+            configuration.conductor_buffer_length,
+            configuration.to_clients_buffer_length,
+            configuration.counters_metadata_buffer_length,
+            configuration.counters_values_buffer_length,
+            configuration.error_buffer_length,
             configuration.client_liveness_timeout_ns,
+            configuration.file_page_size,
         )?;
 
         let conductor = DriverConductor::new(configuration.clone(), cnc, aeron_dir.clone())?;
@@ -376,6 +374,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(driver.cnc().client_liveness_timeout_ns(), timeout_ns);
+    }
+
+    #[test]
+    fn should_publish_configured_cnc_geometry_and_file_page_size() {
+        let config = Configuration {
+            conductor_buffer_length: aeron_client::cnc_file::DEFAULT_TO_DRIVER_LENGTH + (1 << 20),
+            to_clients_buffer_length: aeron_client::cnc_file::DEFAULT_TO_CLIENTS_LENGTH + (1 << 20),
+            counters_values_buffer_length: 2 * 1024 * 1024,
+            error_buffer_length: 2 * 1024 * 1024,
+            file_page_size: 8192,
+            ..Configuration::default()
+        };
+        let driver = MediaDriver::launch(config.clone()).unwrap();
+
+        assert_eq!(
+            driver.cnc().to_driver_buffer().capacity(),
+            config.conductor_buffer_length
+        );
+        assert_eq!(
+            driver.cnc().to_clients_buffer().capacity(),
+            config.to_clients_buffer_length
+        );
+        assert_eq!(
+            driver.cnc().counters_values_length(),
+            config.counters_values_buffer_length
+        );
+        assert_eq!(driver.cnc().error_log_length(), config.error_buffer_length);
+        assert_eq!(driver.cnc().file_page_size(), config.file_page_size);
     }
 
     #[test]
