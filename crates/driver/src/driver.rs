@@ -322,8 +322,12 @@ fn now_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeron_client::cnc_file::CncFile;
+    use aeron_client::conductor::{ClientConductor, RegistrationState};
     use aeron_client::driver_proxy::DriverProxy;
     use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
+    use std::net::UdpSocket;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn should_launch_media_driver_and_process_a_client_command() {
@@ -385,5 +389,44 @@ mod tests {
             Err(crate::error::DriverError::IllegalState(message)) if message.contains("already in use")
         ));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn should_execute_async_commands_in_order_on_background_driver() {
+        // This ports the runtime portion of vendor MediaDriverTest. Duty-cycle tracker and
+        // print-configuration cases are Java Context APIs with no Rust equivalent yet.
+        let mut driver = MediaDriver::start(Configuration::default()).unwrap();
+        let cnc = CncFile::map_existing(driver.cnc_path()).unwrap();
+        let ring = ManyToOneRingBuffer::new(cnc.to_driver_buffer()).unwrap();
+        let mut client =
+            ClientConductor::with_cnc_file(DriverProxy::new(ring, 42), cnc.clone()).unwrap();
+        let endpoint_port = UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let channel = format!("aeron:udp?endpoint=127.0.0.1:{endpoint_port}");
+
+        let first = client.add_exclusive_publication(&channel, 1111).unwrap();
+        client.remove_publication(first).unwrap();
+        let second = client.add_exclusive_publication(&channel, 1111).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            client.do_work().unwrap();
+            if client.registration_state(first) == Some(RegistrationState::Closed)
+                && client.publication(second).is_some()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert_eq!(
+            client.registration_state(first),
+            Some(RegistrationState::Closed)
+        );
+        assert!(client.publication(second).is_some());
+        driver.stop().unwrap();
     }
 }

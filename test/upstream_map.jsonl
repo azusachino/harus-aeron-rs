@@ -110,7 +110,7 @@
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/IpcPublicationTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/loss_detector.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/LossDetectorTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/MediaDriverContextTest.java"}
-{"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/MediaDriverTest.java"}
+{"layer": "driver", "rust_equivalent": "crates/driver/src/driver.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/MediaDriverTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/multicast_flow_control.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/MinMulticastFlowControlTest.java"}
 {"layer": "driver", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/NetworkPublicationTest.java"}
 {"layer": "driver", "rust_equivalent": "crates/driver/src/optimal_multicast_delay.rs", "status": "done", "upstream": "vendor/aeron/aeron-driver/src/test/java/io/aeron/driver/OptimalMulticastDelayGeneratorTest.java"}
