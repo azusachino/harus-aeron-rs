@@ -48,7 +48,7 @@ use aeron_client::protocol::{
     FLAGS_FIELD_OFFSET, FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA, HDR_TYPE_SETUP, SetupFlyweight,
     TYPE_FIELD_OFFSET,
 };
-use aeron_client::uri::{ChannelUri, SESSION_ID_PARAM_NAME};
+use aeron_client::uri::{ChannelUri, RELIABLE_PARAM_NAME, SESSION_ID_PARAM_NAME};
 
 use crate::configuration::Configuration;
 use crate::error::{DriverError, Result};
@@ -121,12 +121,53 @@ fn is_udp_channel(channel: &str) -> bool {
     channel.starts_with("aeron:udp")
 }
 
-fn subscription_session_id(channel: &str) -> Option<i32> {
-    ChannelUri::parse(channel)
-        .ok()?
-        .get(SESSION_ID_PARAM_NAME)?
-        .parse()
-        .ok()
+/// Return the transport identity and options that affect subscription dispatch.
+///
+/// Reliability is a subscription property, while `session-id` narrows the interest within an
+/// otherwise shared transport. Removing both from the identity lets the conductor reject the
+/// same-session reliability conflict without treating subscriptions for different sessions as
+/// conflicting.
+fn subscription_options(channel: &str) -> Result<(String, Option<i32>, bool)> {
+    let mut uri = ChannelUri::parse(channel)
+        .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
+    let session_id = uri
+        .get(SESSION_ID_PARAM_NAME)
+        .map(|value| {
+            value.parse::<i32>().map_err(|_| {
+                DriverError::InvalidChannel(format!("invalid session-id in channel: {value}"))
+            })
+        })
+        .transpose()?;
+    let reliable = uri
+        .get(RELIABLE_PARAM_NAME)
+        .map(|value| {
+            value.parse::<bool>().map_err(|_| {
+                DriverError::InvalidChannel(format!("invalid reliable value in channel: {value}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(true);
+    uri.remove(RELIABLE_PARAM_NAME);
+    uri.remove(SESSION_ID_PARAM_NAME);
+    Ok((uri.to_string(), session_id, reliable))
+}
+
+fn subscription_conflicts(
+    existing: &SubscriptionEntry,
+    identity: &str,
+    stream_id: i32,
+    session_id: Option<i32>,
+    reliable: bool,
+) -> bool {
+    subscription_options(&existing.channel)
+        .is_ok_and(|(existing_identity, _, _)| existing_identity == identity)
+        && existing.stream_id == stream_id
+        && existing.reliable != reliable
+        && match (existing.session_id, session_id) {
+            (None, None) => true,
+            (Some(existing), Some(candidate)) => existing == candidate,
+            _ => false,
+        }
 }
 
 /// Round up to the next 4-byte boundary (variable-length command fields are SBE-aligned).
@@ -165,6 +206,9 @@ pub struct SubscriptionEntry {
     pub channel: String,
     /// Session-specific subscription interest, or `None` for wildcard/all sessions.
     pub session_id: Option<i32>,
+    /// Whether this subscription expects reliable delivery; defaults to true in Aeron URI
+    /// semantics.
+    pub reliable: bool,
 }
 
 /// A decoded client command, extracted from a ring-buffer record so it can be processed
@@ -397,6 +441,16 @@ impl DriverConductor {
                         "unsupported media in channel: {channel}"
                     )));
                 }
+                let (identity, session_id, reliable) = subscription_options(&channel)?;
+                if is_udp_channel(&channel)
+                    && self.subscriptions.values().any(|existing| {
+                        subscription_conflicts(existing, &identity, stream_id, session_id, reliable)
+                    })
+                {
+                    return Err(DriverError::IllegalState(format!(
+                        "conflicting reliable and unreliable subscriptions for channel {identity}, stream {stream_id}, session {session_id:?}"
+                    )));
+                }
                 // The subscription's registration id is the client's correlation id — that is
                 // the id the client keys its subscription by and the driver echoes back in
                 // AVAILABLE_IMAGE (upstream SubscriptionLink semantics).
@@ -408,14 +462,11 @@ impl DriverConductor {
                         client_id,
                         stream_id,
                         channel: channel.clone(),
-                        session_id: subscription_session_id(&channel),
+                        session_id,
+                        reliable,
                     },
                 );
-                self.clear_no_interest_for_subscription(
-                    &channel,
-                    stream_id,
-                    subscription_session_id(&channel),
-                );
+                self.clear_no_interest_for_subscription(&channel, stream_id, session_id);
                 self.on_subscription_ready(correlation_id)?;
                 if is_ipc_channel(&channel) {
                     self.link_ipc_subscription(registration_id, stream_id)?;
@@ -1823,6 +1874,126 @@ mod tests {
         assert!(got);
         assert_eq!(seen_type, ON_SUBSCRIPTION_READY);
         assert_eq!(seen_correlation, correlation_id);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn receive_event_type(events: &mut BroadcastReceiver<'_>) -> i32 {
+        let mut seen_type = 0;
+        assert!(
+            events
+                .receive_next(|msg_type, _, _, _| seen_type = msg_type)
+                .unwrap()
+        );
+        seen_type
+    }
+
+    #[test]
+    fn rejects_conflicting_reliable_and_unreliable_wildcard_subscriptions() {
+        let (cnc, path) = temp_cnc("reliability-conflict");
+        let dir = temp_dir("reliability-conflict");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+        let channel = "aeron:udp?endpoint=127.0.0.1:0";
+
+        client.add_subscription(channel, 7).unwrap();
+        assert_eq!(conductor.do_work(1_000).unwrap(), 1);
+        assert_eq!(receive_event_type(&mut events), ON_SUBSCRIPTION_READY);
+        client
+            .add_subscription("aeron:udp?endpoint=127.0.0.1:0|reliable=false", 7)
+            .unwrap();
+        assert_eq!(conductor.do_work(2_000).unwrap(), 2);
+        assert_eq!(conductor.subscriptions().len(), 1);
+        assert_eq!(receive_event_type(&mut events), ON_ERROR);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_conflicting_reliability_for_the_same_session_specific_subscription() {
+        let (cnc, path) = temp_cnc("session-reliability-conflict");
+        let dir = temp_dir("session-reliability-conflict");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+
+        client
+            .add_subscription("aeron:udp?endpoint=127.0.0.1:0|session-id=1024", 7)
+            .unwrap();
+        assert_eq!(conductor.do_work(1_000).unwrap(), 1);
+        assert_eq!(receive_event_type(&mut events), ON_SUBSCRIPTION_READY);
+
+        client
+            .add_subscription(
+                "aeron:udp?endpoint=127.0.0.1:0|session-id=1024|reliable=false",
+                7,
+            )
+            .unwrap();
+        assert_eq!(conductor.do_work(2_000).unwrap(), 2);
+        assert_eq!(conductor.subscriptions().len(), 1);
+        assert_eq!(receive_event_type(&mut events), ON_ERROR);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn allows_conflicting_reliability_for_different_session_specific_subscriptions() {
+        let (cnc, path) = temp_cnc("session-reliability");
+        let dir = temp_dir("session-reliability");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
+        let client = proxy(&cnc);
+
+        client
+            .add_subscription("aeron:udp?endpoint=127.0.0.1:0|session-id=1024", 7)
+            .unwrap();
+        client
+            .add_subscription(
+                "aeron:udp?endpoint=127.0.0.1:0|session-id=1025|reliable=false",
+                7,
+            )
+            .unwrap();
+        assert_eq!(conductor.do_work(1_000).unwrap(), 2);
+        assert_eq!(conductor.subscriptions().len(), 2);
+        assert_eq!(receive_event_type(&mut events), ON_SUBSCRIPTION_READY);
+        assert_eq!(receive_event_type(&mut events), ON_SUBSCRIPTION_READY);
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn allows_wildcard_and_different_session_reliability_subscriptions() {
+        let (cnc, path) = temp_cnc("wildcard-session-reliability");
+        let dir = temp_dir("wildcard-session-reliability");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+
+        client
+            .add_subscription(
+                "aeron:udp?endpoint=127.0.0.1:0|session-id=1024|reliable=false",
+                7,
+            )
+            .unwrap();
+        client
+            .add_subscription("aeron:udp?endpoint=127.0.0.1:0", 7)
+            .unwrap();
+        client
+            .add_subscription(
+                "aeron:udp?endpoint=127.0.0.1:0|session-id=1025|reliable=false",
+                7,
+            )
+            .unwrap();
+        assert_eq!(conductor.do_work(1_000).unwrap(), 3);
+        assert_eq!(conductor.subscriptions().len(), 3);
 
         drop(conductor);
         let _ = std::fs::remove_file(&path);
