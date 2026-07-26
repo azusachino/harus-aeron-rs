@@ -103,6 +103,35 @@ impl NetworkPublication {
         publication_limit: Arc<AtomicI64>,
         retransmit_receiver_window_multiple: i32,
     ) -> Self {
+        Self::new_with_position(
+            registration_id,
+            log_buffers,
+            endpoint,
+            destination,
+            session_id,
+            stream_id,
+            initial_term_id,
+            mtu_length,
+            0,
+            publication_limit,
+            retransmit_receiver_window_multiple,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_position(
+        registration_id: i64,
+        log_buffers: LogBuffers,
+        endpoint: SendChannelEndpoint,
+        destination: SocketAddr,
+        session_id: i32,
+        stream_id: i32,
+        initial_term_id: i32,
+        mtu_length: usize,
+        initial_position: i64,
+        publication_limit: Arc<AtomicI64>,
+        retransmit_receiver_window_multiple: i32,
+    ) -> Self {
         let term_length = log_buffers.term_length();
         let has_group_semantics = endpoint.udp_channel().has_group_semantics();
         Self {
@@ -116,8 +145,8 @@ impl NetworkPublication {
             term_length,
             mtu_length,
             position_bits_to_shift: position_bits_to_shift(term_length),
-            sender_position: 0,
-            clean_position: 0,
+            sender_position: initial_position,
+            clean_position: initial_position,
             setup_sent: false,
             last_send_ns: i64::MIN,
             receiver_limit: 0,

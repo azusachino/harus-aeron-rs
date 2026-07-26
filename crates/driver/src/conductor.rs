@@ -42,9 +42,10 @@ use aeron_client::driver_proxy::{
 };
 use aeron_client::log_buffers::LogBuffers;
 use aeron_client::logbuffer::{
-    FRAME_ALIGNMENT, align, compute_position, initial_term_id, position_bits_to_shift,
-    raw_tail_volatile_active, set_initial_term_id, set_mtu_length, store_default_frame_header,
-    term_id, term_offset,
+    FRAME_ALIGNMENT, align, compute_position, index_by_term_count, initial_term_id,
+    initialise_tail_with_term_id, pack_tail, position_bits_to_shift, raw_tail_volatile_active,
+    set_active_term_count, set_initial_term_id, set_mtu_length, set_raw_tail,
+    store_default_frame_header, term_id, term_offset,
 };
 use aeron_client::protocol::{
     CURRENT_VERSION, DATA_HEADER_LENGTH, DATA_SESSION_ID_FIELD_OFFSET, DATA_STREAM_ID_FIELD_OFFSET,
@@ -227,6 +228,7 @@ pub struct PublicationEntry {
     pub entity_tag: i64,
     pub term_length: usize,
     pub mtu_length: usize,
+    pub initial_term_id: i32,
     /// Counter id of the publication limit position (driver-assigned).
     pub publication_limit_counter_id: i32,
     /// Absolute path of the shared log file backing this publication; `None` until a log
@@ -817,6 +819,9 @@ impl DriverConductor {
                 stream_id,
                 term_length,
                 mtu,
+                params.initial_term_id,
+                params.term_id,
+                params.term_offset,
             )?;
             self.log_buffers.insert(registration_id, buffers);
             Some(name)
@@ -829,7 +834,16 @@ impl DriverConductor {
                 stream_id,
                 term_length,
                 mtu,
+                params.initial_term_id,
+                params.term_id,
+                params.term_offset,
             )?;
+            let initial_position = compute_position(
+                params.term_id,
+                params.term_offset as i32,
+                position_bits_to_shift(params.term_length) as i32,
+                params.initial_term_id,
+            );
             self.log_buffers.insert(registration_id, buffers.clone());
             self.create_network_publication(
                 registration_id,
@@ -838,6 +852,8 @@ impl DriverConductor {
                 &channel,
                 buffers,
                 mtu,
+                params.initial_term_id,
+                initial_position,
                 self.counters
                     .get(&publication_limit_counter_id)
                     .cloned()
@@ -870,6 +886,7 @@ impl DriverConductor {
                 entity_tag: params.entity_tag,
                 term_length: params.term_length,
                 mtu_length: params.mtu_length,
+                initial_term_id: params.initial_term_id,
                 publication_limit_counter_id,
                 log_file_name: log_file_name.clone(),
             },
@@ -910,6 +927,8 @@ impl DriverConductor {
         channel: &str,
         buffers: LogBuffers,
         mtu: i32,
+        initial_term_id: i32,
+        initial_position: i64,
         publication_limit: Arc<AtomicI64>,
     ) -> Result<()> {
         let udp_channel = UdpChannel::parse(channel)
@@ -925,18 +944,20 @@ impl DriverConductor {
         let transport =
             UdpChannelTransport::bind(udp_channel.clone(), udp_channel.local_data, None, 0, 0)?;
         let endpoint = SendChannelEndpoint::new(udp_channel, transport);
-        self.new_network_publications.push(NetworkPublication::new(
-            registration_id,
-            buffers,
-            endpoint,
-            destination,
-            session_id,
-            stream_id,
-            0,
-            mtu as usize,
-            publication_limit,
-            retransmit_receiver_window_multiple,
-        ));
+        self.new_network_publications
+            .push(NetworkPublication::new_with_position(
+                registration_id,
+                buffers,
+                endpoint,
+                destination,
+                session_id,
+                stream_id,
+                initial_term_id,
+                mtu as usize,
+                initial_position,
+                publication_limit,
+                retransmit_receiver_window_multiple,
+            ));
         Ok(())
     }
 
@@ -1349,6 +1370,7 @@ impl DriverConductor {
 
     /// Create and map a fresh IPC log file under `aeron_dir/publications/`, initialising its
     /// metadata so publishers and subscribers see a valid, shared log.
+    #[allow(clippy::too_many_arguments)]
     fn allocate_log_buffers(
         &self,
         registration_id: i64,
@@ -1356,6 +1378,9 @@ impl DriverConductor {
         stream_id: i32,
         term_length: i32,
         mtu_length: i32,
+        initial_term_id: i32,
+        term_id: i32,
+        term_offset: usize,
     ) -> Result<(String, LogBuffers)> {
         let dir = self.aeron_dir.join("publications");
         std::fs::create_dir_all(&dir)
@@ -1365,10 +1390,25 @@ impl DriverConductor {
         let buffers = LogBuffers::map_new(&path, term_length, DEFAULT_FILE_PAGE_SIZE)
             .map_err(|e| DriverError::IllegalState(format!("map log buffer: {e}")))?;
 
-        // Fresh logs start at initial term id 0; record the negotiated MTU so appenders frame
-        // consistently with what the client (and the network wire) will read.
+        // Seed every partition and place the active tail at the requested replay position.
+        // With no replay parameters this is the normal zero-position initialisation.
         let meta = buffers.meta_data_buffer();
-        set_initial_term_id(&meta, 0);
+        let term_count = term_id.wrapping_sub(initial_term_id);
+        let active_partition = index_by_term_count(term_count as i64) as usize;
+        for partition in 0..3 {
+            initialise_tail_with_term_id(
+                &meta,
+                partition,
+                initial_term_id.wrapping_add(partition as i32),
+            );
+        }
+        set_initial_term_id(&meta, initial_term_id);
+        set_active_term_count(&meta, term_count);
+        set_raw_tail(
+            &meta,
+            active_partition,
+            pack_tail(term_id, term_offset as i32),
+        );
         set_mtu_length(&meta, mtu_length);
 
         // Seed the default frame header (DATA type + session/stream ids) so the publisher's
@@ -2562,6 +2602,41 @@ mod tests {
         assert_eq!(
             aeron_client::logbuffer::mtu_length(&buffers.meta_data_buffer()),
             4 * 1024
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn positions_ipc_publication_at_replay_term_triple() {
+        let (cnc, path) = temp_cnc("publication-replay");
+        let dir = temp_dir("publication-replay");
+        let mut conductor =
+            DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
+        let client = proxy(&cnc);
+        let registration_id = client
+            .add_publication("aeron:ipc?initial-term-id=7|term-id=11|term-offset=64", 7)
+            .unwrap();
+
+        conductor.do_work(1_000).unwrap();
+
+        let entry = conductor.publications().get(&registration_id).unwrap();
+        assert_eq!(entry.initial_term_id, 7);
+        let metadata = conductor
+            .log_buffers
+            .get(&registration_id)
+            .unwrap()
+            .meta_data_buffer();
+        assert_eq!(aeron_client::logbuffer::initial_term_id(&metadata), 7);
+        assert_eq!(aeron_client::logbuffer::active_term_count(&metadata), 4);
+        let active_partition = aeron_client::logbuffer::index_by_term_count(4) as usize;
+        let tail = aeron_client::logbuffer::raw_tail(&metadata, active_partition);
+        assert_eq!(aeron_client::logbuffer::term_id(tail), 11);
+        assert_eq!(aeron_client::logbuffer::term_offset(tail, 64 * 1024), 64);
+        assert_eq!(
+            aeron_client::logbuffer::compute_position(11, 64, 16, 7),
+            4 * 64 * 1024 + 64
         );
 
         drop(conductor);
@@ -3851,10 +3926,15 @@ mod tests {
 
         let publication_log = conductor.log_buffers.get(&publication).unwrap();
         let metadata = publication_log.meta_data_buffer();
+        let initial_term_id = conductor
+            .publications()
+            .get(&publication)
+            .unwrap()
+            .initial_term_id;
         aeron_client::logbuffer::set_raw_tail(
             &metadata,
             0,
-            aeron_client::logbuffer::pack_tail(1, 0),
+            aeron_client::logbuffer::pack_tail(initial_term_id.wrapping_add(1), 0),
         );
 
         conductor.do_work(1_101).unwrap();
