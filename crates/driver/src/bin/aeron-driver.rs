@@ -2,7 +2,6 @@
 
 use std::io::{Read, Write};
 use std::sync::mpsc;
-use std::time::Duration;
 
 use aeron_driver::configuration::Configuration;
 use aeron_driver::driver::MediaDriver;
@@ -14,16 +13,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     tracing::info!("Starting aeron-driver");
 
-    let config = Configuration::default();
-    let mut driver = MediaDriver::launch(config)?;
+    if std::env::args().any(|arg| arg == "--once") {
+        let mut driver = MediaDriver::launch(Configuration::default())?;
+        tracing::info!("Media driver launched successfully for one duty cycle");
+        let _ = driver.do_work()?;
+        return Ok(());
+    }
 
-    tracing::info!("Media driver launched successfully");
+    let mut driver = MediaDriver::start(Configuration::default())?;
+    tracing::info!(aeron_dir = %driver.aeron_dir().display(), "Media driver started");
+    println!("{}", driver.cnc_path().display());
 
-    // Single step verification for driver binary start
-    let _ = driver.do_work()?;
-
-    if std::env::args().any(|arg| arg == "--hold") {
-        println!("{}", driver.cnc_path().display());
+    {
         std::io::stdout().flush()?;
         let (release_sender, release_receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -32,10 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = release_sender.send(());
         });
         while release_receiver.try_recv().is_err() {
-            let _ = driver.do_work()?;
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::park_timeout(std::time::Duration::from_millis(50));
         }
     }
+
+    driver.stop()?;
 
     Ok(())
 }

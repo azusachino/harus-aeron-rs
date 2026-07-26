@@ -3,7 +3,9 @@
 //! Mirrors `io.aeron.driver.MediaDriver.java`.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aeron_client::cnc_file::{
@@ -31,6 +33,15 @@ pub struct MediaDriver {
     conductor: DriverConductor,
     sender: Sender,
     receiver: Receiver,
+    remove_aeron_dir_on_drop: bool,
+}
+
+/// A MediaDriver running its conductor, sender, and receiver duty cycle on a dedicated thread.
+pub struct RunningMediaDriver {
+    aeron_dir: PathBuf,
+    stop: Arc<AtomicBool>,
+    error: Arc<Mutex<Option<crate::error::DriverError>>>,
+    join_handle: Option<JoinHandle<()>>,
 }
 
 impl MediaDriver {
@@ -44,10 +55,33 @@ impl MediaDriver {
         let instance = DRIVER_INSTANCE.fetch_add(1, Ordering::Relaxed);
         let aeron_dir =
             std::env::temp_dir().join(format!("aeron-driver-{}-{}", std::process::id(), instance));
+        Self::launch_in_with_cleanup(configuration, aeron_dir, true)
+    }
+
+    /// Launch a driver in an explicitly managed Aeron directory.
+    ///
+    /// The directory must not already contain `cnc.dat`; this prevents one driver from
+    /// silently taking over another driver's shared-memory control plane. The caller owns
+    /// cleanup of an explicitly supplied directory.
+    pub fn launch_in(configuration: Configuration, aeron_dir: impl Into<PathBuf>) -> Result<Self> {
+        Self::launch_in_with_cleanup(configuration, aeron_dir.into(), false)
+    }
+
+    fn launch_in_with_cleanup(
+        configuration: Configuration,
+        aeron_dir: PathBuf,
+        remove_aeron_dir_on_drop: bool,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&aeron_dir).map_err(|e| {
             crate::error::DriverError::IllegalState(format!("create aeron dir: {e}"))
         })?;
         let cnc_path = aeron_dir.join(aeron_client::cnc_file::CNC_FILE);
+        if cnc_path.exists() {
+            return Err(crate::error::DriverError::IllegalState(format!(
+                "aeron directory is already in use: {}",
+                aeron_dir.display()
+            )));
+        }
 
         let cnc = CncFile::create_new_with_regions(
             &cnc_path,
@@ -70,6 +104,60 @@ impl MediaDriver {
             conductor,
             sender,
             receiver,
+            remove_aeron_dir_on_drop,
+        })
+    }
+
+    /// Start a temporary-directory driver on a dedicated duty-cycle thread.
+    pub fn start(configuration: Configuration) -> Result<RunningMediaDriver> {
+        let instance = DRIVER_INSTANCE.fetch_add(1, Ordering::Relaxed);
+        let aeron_dir =
+            std::env::temp_dir().join(format!("aeron-driver-{}-{}", std::process::id(), instance));
+        Self::start_in_with_cleanup(configuration, aeron_dir, true)
+    }
+
+    /// Start a driver on a dedicated duty-cycle thread in an explicit directory.
+    pub fn start_in(
+        configuration: Configuration,
+        aeron_dir: impl Into<PathBuf>,
+    ) -> Result<RunningMediaDriver> {
+        Self::start_in_with_cleanup(configuration, aeron_dir.into(), false)
+    }
+
+    fn start_in_with_cleanup(
+        configuration: Configuration,
+        aeron_dir: PathBuf,
+        remove_aeron_dir_on_drop: bool,
+    ) -> Result<RunningMediaDriver> {
+        let driver = Self::launch_in_with_cleanup(
+            configuration,
+            aeron_dir.clone(),
+            remove_aeron_dir_on_drop,
+        )?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let error = Arc::new(Mutex::new(None));
+        let thread_stop = Arc::clone(&stop);
+        let thread_error = Arc::clone(&error);
+        let join_handle = thread::Builder::new()
+            .name("aeron-driver".to_string())
+            .spawn(move || {
+                let mut driver = driver;
+                while !thread_stop.load(Ordering::Acquire) {
+                    if let Err(driver_error) = driver.do_work() {
+                        *thread_error.lock().expect("driver error lock poisoned") =
+                            Some(driver_error);
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+            .map_err(|e| crate::error::DriverError::IllegalState(format!("start driver: {e}")))?;
+
+        Ok(RunningMediaDriver {
+            aeron_dir,
+            stop,
+            error,
+            join_handle: Some(join_handle),
         })
     }
 
@@ -181,7 +269,46 @@ impl MediaDriver {
 
 impl Drop for MediaDriver {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.aeron_dir);
+        if self.remove_aeron_dir_on_drop {
+            let _ = std::fs::remove_dir_all(&self.aeron_dir);
+        }
+    }
+}
+
+impl RunningMediaDriver {
+    pub fn aeron_dir(&self) -> &std::path::Path {
+        &self.aeron_dir
+    }
+
+    pub fn cnc_path(&self) -> PathBuf {
+        self.aeron_dir.join(aeron_client::cnc_file::CNC_FILE)
+    }
+
+    /// Stop the duty-cycle thread and return any error observed while it was running.
+    pub fn stop(&mut self) -> Result<()> {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle.join().map_err(|_| {
+                crate::error::DriverError::IllegalState("driver thread panicked".to_string())
+            })?;
+        }
+
+        if let Some(error) = self
+            .error
+            .lock()
+            .expect("driver error lock poisoned")
+            .take()
+        {
+            return Err(error);
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for RunningMediaDriver {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -228,5 +355,35 @@ mod tests {
         let work = driver.do_work().unwrap();
         assert_eq!(work, 1);
         assert_eq!(driver.conductor().subscriptions().len(), 1);
+    }
+
+    #[test]
+    fn should_start_and_stop_a_managed_driver_thread() {
+        let mut driver = MediaDriver::start(Configuration::default()).unwrap();
+        assert!(
+            driver
+                .aeron_dir()
+                .join(aeron_client::cnc_file::CNC_FILE)
+                .exists()
+        );
+        driver.stop().unwrap();
+        assert!(!driver.aeron_dir().exists());
+    }
+
+    #[test]
+    fn should_reject_launch_in_a_directory_with_existing_cnc() {
+        let directory = std::env::temp_dir().join(format!(
+            "aeron-driver-existing-cnc-{}",
+            DRIVER_INSTANCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(aeron_client::cnc_file::CNC_FILE), []).unwrap();
+
+        let result = MediaDriver::launch_in(Configuration::default(), &directory);
+        assert!(matches!(
+            result,
+            Err(crate::error::DriverError::IllegalState(message)) if message.contains("already in use")
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
