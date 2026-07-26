@@ -26,7 +26,7 @@ use aeron_client::command::{
 use aeron_client::counters::{
     CONTROL_PROTOCOL_SEMANTIC_VERSION, DRIVER_PUBLISHER_LIMIT_TYPE_ID,
     DRIVER_SUBSCRIBER_POSITION_TYPE_ID, DRIVER_SYSTEM_COUNTER_TYPE_ID,
-    SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION,
+    SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION, SYSTEM_COUNTER_ID_DRIVER_EXCEPTIONS,
 };
 use aeron_client::driver_events::{
     ClientTimeoutFlyweight, ErrorResponseFlyweight, ImageBuffersReadyFlyweight, ON_AVAILABLE_IMAGE,
@@ -439,6 +439,8 @@ pub struct DriverConductor {
     /// in for the shared CnC counters region (not yet laid out); an in-process client shares
     /// these `Arc`s via [`DriverConductor::counters`] until that region lands.
     counters: HashMap<i32, Arc<AtomicI64>>,
+    /// Counted driver errors, published through the standard Aeron system-counter slot.
+    errors: Arc<AtomicI64>,
     /// Client counter registration id -> allocated counter id and owner.
     client_counters: HashMap<i64, (i64, i32)>,
     /// Subscriber-position counter id keyed by the subscription and image notification that own it.
@@ -499,6 +501,20 @@ impl DriverConductor {
             )?;
         }
 
+        let errors = Arc::new(AtomicI64::new(0));
+        if cnc.counters_metadata_length()
+            >= aeron_client::cnc_file::COUNTER_METADATA_LENGTH
+                * (SYSTEM_COUNTER_ID_DRIVER_EXCEPTIONS as usize + 1)
+        {
+            cnc.write_counter_metadata(
+                SYSTEM_COUNTER_ID_DRIVER_EXCEPTIONS,
+                DRIVER_SYSTEM_COUNTER_TYPE_ID,
+                SYSTEM_COUNTER_ID_DRIVER_EXCEPTIONS as i64,
+                0,
+                "Errors",
+            )?;
+        }
+
         Ok(Self {
             cnc,
             to_driver,
@@ -513,6 +529,7 @@ impl DriverConductor {
             subscriptions: HashMap::new(),
             log_buffers: HashMap::new(),
             counters: HashMap::new(),
+            errors,
             client_counters: HashMap::new(),
             subscriber_counters: HashMap::new(),
             ipc_subscriptions: HashMap::new(),
@@ -2100,6 +2117,11 @@ impl DriverConductor {
         &self.counters
     }
 
+    /// Number of errors reported through the driver control plane.
+    pub fn error_count(&self) -> i64 {
+        self.errors.load(Ordering::Relaxed)
+    }
+
     fn touch_client(&mut self, client_id: i64, now_ns: i64) {
         self.clients.insert(client_id, now_ns);
     }
@@ -2502,6 +2524,9 @@ impl DriverConductor {
     }
 
     fn on_error(&self, correlation_id: i64, code: i32, message: String) -> Result<()> {
+        let error_count = self.errors.fetch_add(1, Ordering::Relaxed) + 1;
+        self.cnc
+            .set_counter_value(SYSTEM_COUNTER_ID_DRIVER_EXCEPTIONS, error_count)?;
         let length = 12 + 4 + message.len();
         let mut bytes = vec![0u8; length];
         let buf = AtomicBuffer::new(&mut bytes);
@@ -3404,6 +3429,14 @@ mod tests {
         .unwrap();
 
         conductor.do_work(1_000).unwrap();
+        assert_eq!(conductor.error_count(), 1);
+        assert_eq!(
+            cnc.counters_values_buffer().get_i64(
+                SYSTEM_COUNTER_ID_DRIVER_EXCEPTIONS as usize
+                    * aeron_client::cnc_file::COUNTER_VALUE_LENGTH,
+            ),
+            1
+        );
 
         let mut seen_type = 0;
         let mut seen_correlation = 0;
