@@ -680,6 +680,217 @@ fn udp_receiver_gap_generates_nak_and_sender_retransmits() {
 }
 
 #[test]
+fn udp_receiver_recovers_from_two_independent_gaps_in_one_stream() {
+    const STREAM_ID: i32 = 4005;
+    const PAYLOADS: [&[u8]; 4] = [&[0x11; 700], &[0x22; 700], &[0x33; 700], &[0x44; 700]];
+
+    // Same relay technique as the single-gap test, but this time two separate frames are
+    // withheld (the 1st and 3rd of four), each one only revealed as missing once a later frame
+    // that did arrive shows the receiver it skipped ahead. Real Receiver gap detection, not an
+    // injected NAK.
+    let relay = UdpSocket::bind("127.0.0.1:0").expect("bind relay");
+    relay.set_nonblocking(true).unwrap();
+    let relay_address = relay.local_addr().unwrap();
+
+    let subscriber_socket = UdpSocket::bind("127.0.0.1:0").expect("reserve subscriber port");
+    let subscriber_port = subscriber_socket.local_addr().unwrap().port();
+    drop(subscriber_socket);
+    let subscriber_address = format!("127.0.0.1:{subscriber_port}");
+    let subscriber_channel = format!("aeron:udp?endpoint={subscriber_address}");
+    let publisher_channel = format!("aeron:udp?endpoint={relay_address}");
+
+    let mut publisher_driver = MediaDriver::launch(small_udp_config()).expect("publisher launch");
+    let mut subscriber_driver = MediaDriver::launch(small_udp_config()).expect("subscriber launch");
+    let mut publisher = client_conductor(&publisher_driver, 1);
+    let mut subscriber = client_conductor(&subscriber_driver, 2);
+    let pub_reg = publisher
+        .add_publication(&publisher_channel, STREAM_ID)
+        .unwrap();
+    let sub_reg = subscriber
+        .add_subscription(&subscriber_channel, STREAM_ID)
+        .unwrap();
+
+    subscriber_driver
+        .do_work()
+        .expect("bind subscriber endpoint");
+    subscriber.do_work().expect("resolve subscription");
+    publisher_driver
+        .do_work()
+        .expect("register publication and send setup");
+    for (id, counter) in publisher_driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("resolve publication");
+
+    let mut datagram = [0u8; 2048];
+    let publisher_address = loop {
+        publisher_driver.do_work().expect("send setup");
+        if let Ok((length, source)) = relay.recv_from(&mut datagram) {
+            let header = HeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+            if header.header_type() == HDR_TYPE_SETUP {
+                let setup = datagram[..length].to_vec();
+                relay
+                    .send_to(&setup, subscriber_address.as_str())
+                    .expect("forward setup");
+                break source;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+
+    subscriber_driver
+        .do_work()
+        .expect("create publication image");
+    for (id, counter) in subscriber_driver.conductor().counters() {
+        subscriber.register_counter(*id, counter.clone());
+    }
+    subscriber.do_work().expect("resolve available image");
+
+    let mut control = [0u8; 256];
+    let status = loop {
+        if let Ok((length, _source)) = relay.recv_from(&mut control) {
+            let header = HeaderFlyweight::new(AtomicBuffer::new(&mut control[..length]));
+            if header.header_type() == aeron_client::protocol::HDR_TYPE_SM {
+                break control[..length].to_vec();
+            }
+        }
+        subscriber_driver
+            .do_work()
+            .expect("send initial status message");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    relay
+        .send_to(&status, publisher_address)
+        .expect("forward status");
+
+    for _ in 0..20 {
+        publisher_driver.do_work().expect("process status");
+        if publisher_driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let mut last_position = 0;
+    for payload in PAYLOADS {
+        let mut bytes = payload.to_vec();
+        let len = bytes.len();
+        let position = publisher
+            .publication(pub_reg)
+            .expect("publication ready")
+            .offer(&AtomicBuffer::new(&mut bytes), 0, len)
+            .unwrap();
+        assert!(position > last_position);
+        last_position = position;
+    }
+
+    let mut data_frames = Vec::new();
+    for _ in 0..40 {
+        publisher_driver.do_work().expect("send data frames");
+        while let Ok((length, source)) = relay.recv_from(&mut datagram) {
+            let header = HeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+            if header.header_type() == HDR_TYPE_DATA && header.frame_length() > 0 {
+                let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+                data_frames.push((data.term_offset(), datagram[..length].to_vec(), source));
+            }
+        }
+        if data_frames.len() >= PAYLOADS.len() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    data_frames.sort_by_key(|(term_offset, _, _)| *term_offset);
+    assert_eq!(
+        data_frames.len(),
+        PAYLOADS.len(),
+        "four DATA datagrams should be emitted"
+    );
+
+    // Withhold frames 0 and 2 (two separate gaps). The real loss detector only tracks the
+    // earliest outstanding gap at a time (it advances the rebuild position gap by gap), so each
+    // gap is resolved -- NAK, retransmit, rebuild -- before the next one is even revealed to the
+    // receiver by delivering the frame that exposes it.
+    for &(missing_index, revealing_index) in &[(0usize, 1usize), (2usize, 3usize)] {
+        relay
+            .send_to(&data_frames[revealing_index].1, subscriber_address.as_str())
+            .expect("forward out-of-order data");
+        subscriber_driver.do_work().expect("detect gap");
+
+        let missing_offset = data_frames[missing_index].0;
+        let nak = loop {
+            if let Ok((length, _source)) = relay.recv_from(&mut control) {
+                let header = HeaderFlyweight::new(AtomicBuffer::new(&mut control[..length]));
+                if header.header_type() == aeron_client::protocol::HDR_TYPE_NAK {
+                    let candidate = NakFlyweight::new(AtomicBuffer::new(&mut control[..length]));
+                    if candidate.term_offset() == missing_offset {
+                        break control[..length].to_vec();
+                    }
+                }
+            }
+            subscriber_driver.do_work().expect("poll receiver gap");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        relay
+            .send_to(&nak, publisher_address)
+            .expect("forward receiver NAK");
+
+        let retransmitted = loop {
+            publisher_driver.do_work().expect("process receiver NAK");
+            let mut found = None;
+            while let Ok((length, _source)) = relay.recv_from(&mut datagram) {
+                let header = HeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+                if header.header_type() == HDR_TYPE_DATA && header.frame_length() > 0 {
+                    let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+                    if data.term_offset() == missing_offset {
+                        found = Some(datagram[..length].to_vec());
+                    }
+                }
+            }
+            if let Some(frame) = found {
+                break frame;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        relay
+            .send_to(&retransmitted, subscriber_address.as_str())
+            .expect("forward retransmitted data");
+        subscriber_driver
+            .do_work()
+            .expect("rebuild past resolved gap");
+    }
+
+    let mut received = Vec::new();
+    for _ in 0..100 {
+        subscriber_driver
+            .do_work()
+            .expect("rebuild recovered stream");
+        for (id, counter) in subscriber_driver.conductor().counters() {
+            subscriber.register_counter(*id, counter.clone());
+        }
+        subscriber.do_work().expect("service image events");
+        if let Some(subscription) = subscriber.subscription_mut(sub_reg) {
+            subscription.poll(
+                |buffer, offset, length, _header| {
+                    let mut fragment = vec![0u8; length];
+                    buffer.get_bytes(offset, &mut fragment);
+                    received.push(fragment);
+                },
+                10,
+            );
+        }
+        if received.len() >= PAYLOADS.len() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        received,
+        PAYLOADS.iter().map(|p| p.to_vec()).collect::<Vec<_>>(),
+        "all four messages must be delivered, in order, after both gaps recover"
+    );
+}
+
+#[test]
 fn manual_add_destination_casts_data_to_a_second_receiver() {
     const STREAM_ID: i32 = 8008;
 
