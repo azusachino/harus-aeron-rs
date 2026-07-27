@@ -680,6 +680,120 @@ fn udp_receiver_gap_generates_nak_and_sender_retransmits() {
 }
 
 #[test]
+fn manual_add_destination_casts_data_to_a_second_receiver() {
+    const STREAM_ID: i32 = 8008;
+
+    // Two independent receiver sockets stand in for two remote subscribers: one reachable via
+    // the publication's original channel endpoint, one added later as a manual MDC destination.
+    let first_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind first receiver");
+    let second_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind second receiver");
+    for socket in [&first_receiver, &second_receiver] {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+    }
+    let first_port = first_receiver.local_addr().unwrap().port();
+    let second_port = second_receiver.local_addr().unwrap().port();
+    let channel = format!("aeron:udp?endpoint=127.0.0.1:{first_port}");
+    let second_destination = format!("aeron:udp?endpoint=127.0.0.1:{second_port}");
+
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    driver
+        .do_work()
+        .expect("register publication and send setup");
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+
+    // send_data() stays gated until a receiver's Status Message is seen, exactly like the
+    // single-destination case: capture the SETUP the original endpoint announced and answer it,
+    // so the publication's flow-control window actually opens before we add a second cast target.
+    let mut buf = [0u8; 2048];
+    let (n, source) = first_receiver.recv_from(&mut buf).expect("receive setup");
+    let setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+    let mut status_bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+    let status = StatusMessageFlyweight::new(AtomicBuffer::new(&mut status_bytes));
+    status
+        .header()
+        .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+        .set_version(aeron_client::protocol::CURRENT_VERSION)
+        .set_flags(0)
+        .set_header_type(aeron_client::protocol::HDR_TYPE_SM);
+    status
+        .set_session_id(setup.session_id())
+        .set_stream_id(setup.stream_id())
+        .set_consumption_term_id(setup.initial_term_id())
+        .set_consumption_term_offset(0)
+        .set_receiver_window_length(TERM_MIN_LENGTH)
+        .set_receiver_id(0);
+    first_receiver.send_to(&status_bytes, source).unwrap();
+    for _ in 0..20 {
+        driver.do_work().expect("process status message");
+        if driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        driver.sender().network_publications()[0].receiver_limit() > 0,
+        "flow-control window must open before adding a second destination"
+    );
+
+    // ADD_DESTINATION goes through the same to-driver ring as every other client command; the
+    // driver applies it to the Sender's live NetworkPublication on the next duty cycle.
+    publisher
+        .driver_proxy()
+        .add_destination(pub_reg, &second_destination)
+        .expect("add manual MDC destination");
+    driver.do_work().expect("apply destination update");
+    assert_eq!(
+        driver.sender().network_publications()[0]
+            .destinations()
+            .len(),
+        2,
+        "publication should now cast to both receivers"
+    );
+
+    let mut payload = *b"hello-mdc";
+    let payload_len = payload.len();
+    let src = AtomicBuffer::new(&mut payload);
+    let publication = publisher.publication(pub_reg).expect("publication ready");
+    assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+    for _ in 0..20 {
+        driver.do_work().expect("flush data to both destinations");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    for receiver in [&first_receiver, &second_receiver] {
+        let mut buf = [0u8; 2048];
+        let mut data_payload = None;
+        for _ in 0..8 {
+            let n = match receiver.recv(&mut buf) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            let (frame_type, frame_length) = {
+                let header = HeaderFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+                (header.header_type(), header.frame_length() as usize)
+            };
+            if frame_type == HDR_TYPE_DATA && frame_length > DATA_HEADER_LENGTH {
+                data_payload = Some(buf[DATA_HEADER_LENGTH..frame_length].to_vec());
+                break;
+            }
+        }
+        assert_eq!(
+            data_payload.as_deref(),
+            Some(&b"hello-mdc"[..]),
+            "each destination should independently receive the DATA frame"
+        );
+    }
+}
+
+#[test]
 fn fragmented_ipc_message_reassembles_into_one_callback() {
     const STREAM_ID: i32 = 6006;
     let mut driver = MediaDriver::launch(small_mtu_ipc_config()).expect("launch");
