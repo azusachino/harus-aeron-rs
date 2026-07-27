@@ -6,8 +6,11 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 use aeron_client::conductor::ClientConductor;
-use aeron_client::driver_events::{ON_OPERATION_SUCCESS, OperationSucceededFlyweight};
+use aeron_client::driver_events::{
+    ErrorResponseFlyweight, ON_ERROR, ON_OPERATION_SUCCESS, OperationSucceededFlyweight,
+};
 use aeron_client::driver_proxy::DriverProxy;
+use aeron_client::fragment_assembler::FragmentAssembler;
 use aeron_client::logbuffer::TERM_MIN_LENGTH;
 use aeron_client::protocol::{
     DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP, HeaderFlyweight,
@@ -46,6 +49,15 @@ fn small_ipc_config() -> Configuration {
 fn small_udp_config() -> Configuration {
     Configuration {
         publication_term_buffer_length: TERM_MIN_LENGTH as usize,
+        ..Configuration::default()
+    }
+}
+
+/// Small-term, small-MTU IPC config so a modest payload spans multiple fragments.
+fn small_mtu_ipc_config() -> Configuration {
+    Configuration {
+        ipc_term_buffer_length: TERM_MIN_LENGTH as usize,
+        ipc_mtu_length: 64,
         ..Configuration::default()
     }
 }
@@ -666,5 +678,700 @@ fn udp_receiver_gap_generates_nak_and_sender_retransmits() {
     assert_eq!(
         received,
         vec![FIRST_PAYLOAD.to_vec(), SECOND_PAYLOAD.to_vec()]
+    );
+}
+
+#[test]
+fn udp_receiver_recovers_from_two_independent_gaps_in_one_stream() {
+    const STREAM_ID: i32 = 4005;
+    const PAYLOADS: [&[u8]; 4] = [&[0x11; 700], &[0x22; 700], &[0x33; 700], &[0x44; 700]];
+
+    // Same relay technique as the single-gap test, but this time two separate frames are
+    // withheld (the 1st and 3rd of four), each one only revealed as missing once a later frame
+    // that did arrive shows the receiver it skipped ahead. Real Receiver gap detection, not an
+    // injected NAK.
+    let relay = UdpSocket::bind("127.0.0.1:0").expect("bind relay");
+    relay.set_nonblocking(true).unwrap();
+    let relay_address = relay.local_addr().unwrap();
+
+    let subscriber_socket = UdpSocket::bind("127.0.0.1:0").expect("reserve subscriber port");
+    let subscriber_port = subscriber_socket.local_addr().unwrap().port();
+    drop(subscriber_socket);
+    let subscriber_address = format!("127.0.0.1:{subscriber_port}");
+    let subscriber_channel = format!("aeron:udp?endpoint={subscriber_address}");
+    let publisher_channel = format!("aeron:udp?endpoint={relay_address}");
+
+    let mut publisher_driver = MediaDriver::launch(small_udp_config()).expect("publisher launch");
+    let mut subscriber_driver = MediaDriver::launch(small_udp_config()).expect("subscriber launch");
+    let mut publisher = client_conductor(&publisher_driver, 1);
+    let mut subscriber = client_conductor(&subscriber_driver, 2);
+    let pub_reg = publisher
+        .add_publication(&publisher_channel, STREAM_ID)
+        .unwrap();
+    let sub_reg = subscriber
+        .add_subscription(&subscriber_channel, STREAM_ID)
+        .unwrap();
+
+    subscriber_driver
+        .do_work()
+        .expect("bind subscriber endpoint");
+    subscriber.do_work().expect("resolve subscription");
+    publisher_driver
+        .do_work()
+        .expect("register publication and send setup");
+    for (id, counter) in publisher_driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("resolve publication");
+
+    let mut datagram = [0u8; 2048];
+    let publisher_address = loop {
+        publisher_driver.do_work().expect("send setup");
+        if let Ok((length, source)) = relay.recv_from(&mut datagram) {
+            let header = HeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+            if header.header_type() == HDR_TYPE_SETUP {
+                let setup = datagram[..length].to_vec();
+                relay
+                    .send_to(&setup, subscriber_address.as_str())
+                    .expect("forward setup");
+                break source;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+
+    subscriber_driver
+        .do_work()
+        .expect("create publication image");
+    for (id, counter) in subscriber_driver.conductor().counters() {
+        subscriber.register_counter(*id, counter.clone());
+    }
+    subscriber.do_work().expect("resolve available image");
+
+    let mut control = [0u8; 256];
+    let status = loop {
+        if let Ok((length, _source)) = relay.recv_from(&mut control) {
+            let header = HeaderFlyweight::new(AtomicBuffer::new(&mut control[..length]));
+            if header.header_type() == aeron_client::protocol::HDR_TYPE_SM {
+                break control[..length].to_vec();
+            }
+        }
+        subscriber_driver
+            .do_work()
+            .expect("send initial status message");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    relay
+        .send_to(&status, publisher_address)
+        .expect("forward status");
+
+    for _ in 0..20 {
+        publisher_driver.do_work().expect("process status");
+        if publisher_driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let mut last_position = 0;
+    for payload in PAYLOADS {
+        let mut bytes = payload.to_vec();
+        let len = bytes.len();
+        let position = publisher
+            .publication(pub_reg)
+            .expect("publication ready")
+            .offer(&AtomicBuffer::new(&mut bytes), 0, len)
+            .unwrap();
+        assert!(position > last_position);
+        last_position = position;
+    }
+
+    let mut data_frames = Vec::new();
+    for _ in 0..40 {
+        publisher_driver.do_work().expect("send data frames");
+        while let Ok((length, source)) = relay.recv_from(&mut datagram) {
+            let header = HeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+            if header.header_type() == HDR_TYPE_DATA && header.frame_length() > 0 {
+                let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+                data_frames.push((data.term_offset(), datagram[..length].to_vec(), source));
+            }
+        }
+        if data_frames.len() >= PAYLOADS.len() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    data_frames.sort_by_key(|(term_offset, _, _)| *term_offset);
+    assert_eq!(
+        data_frames.len(),
+        PAYLOADS.len(),
+        "four DATA datagrams should be emitted"
+    );
+
+    // Withhold frames 0 and 2 (two separate gaps). The real loss detector only tracks the
+    // earliest outstanding gap at a time (it advances the rebuild position gap by gap), so each
+    // gap is resolved -- NAK, retransmit, rebuild -- before the next one is even revealed to the
+    // receiver by delivering the frame that exposes it.
+    for &(missing_index, revealing_index) in &[(0usize, 1usize), (2usize, 3usize)] {
+        relay
+            .send_to(&data_frames[revealing_index].1, subscriber_address.as_str())
+            .expect("forward out-of-order data");
+        subscriber_driver.do_work().expect("detect gap");
+
+        let missing_offset = data_frames[missing_index].0;
+        let nak = loop {
+            if let Ok((length, _source)) = relay.recv_from(&mut control) {
+                let header = HeaderFlyweight::new(AtomicBuffer::new(&mut control[..length]));
+                if header.header_type() == aeron_client::protocol::HDR_TYPE_NAK {
+                    let candidate = NakFlyweight::new(AtomicBuffer::new(&mut control[..length]));
+                    if candidate.term_offset() == missing_offset {
+                        break control[..length].to_vec();
+                    }
+                }
+            }
+            subscriber_driver.do_work().expect("poll receiver gap");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        relay
+            .send_to(&nak, publisher_address)
+            .expect("forward receiver NAK");
+
+        let retransmitted = loop {
+            publisher_driver.do_work().expect("process receiver NAK");
+            let mut found = None;
+            while let Ok((length, _source)) = relay.recv_from(&mut datagram) {
+                let header = HeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+                if header.header_type() == HDR_TYPE_DATA && header.frame_length() > 0 {
+                    let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut datagram[..length]));
+                    if data.term_offset() == missing_offset {
+                        found = Some(datagram[..length].to_vec());
+                    }
+                }
+            }
+            if let Some(frame) = found {
+                break frame;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        relay
+            .send_to(&retransmitted, subscriber_address.as_str())
+            .expect("forward retransmitted data");
+        subscriber_driver
+            .do_work()
+            .expect("rebuild past resolved gap");
+    }
+
+    let mut received = Vec::new();
+    for _ in 0..100 {
+        subscriber_driver
+            .do_work()
+            .expect("rebuild recovered stream");
+        for (id, counter) in subscriber_driver.conductor().counters() {
+            subscriber.register_counter(*id, counter.clone());
+        }
+        subscriber.do_work().expect("service image events");
+        if let Some(subscription) = subscriber.subscription_mut(sub_reg) {
+            subscription.poll(
+                |buffer, offset, length, _header| {
+                    let mut fragment = vec![0u8; length];
+                    buffer.get_bytes(offset, &mut fragment);
+                    received.push(fragment);
+                },
+                10,
+            );
+        }
+        if received.len() >= PAYLOADS.len() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        received,
+        PAYLOADS.iter().map(|p| p.to_vec()).collect::<Vec<_>>(),
+        "all four messages must be delivered, in order, after both gaps recover"
+    );
+}
+
+#[test]
+fn manual_add_destination_casts_data_to_a_second_receiver() {
+    const STREAM_ID: i32 = 8008;
+
+    // Two independent receiver sockets stand in for two remote subscribers: one reachable via
+    // the publication's original channel endpoint, one added later as a manual MDC destination.
+    let first_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind first receiver");
+    let second_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind second receiver");
+    for socket in [&first_receiver, &second_receiver] {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+    }
+    let first_port = first_receiver.local_addr().unwrap().port();
+    let second_port = second_receiver.local_addr().unwrap().port();
+    let channel = format!("aeron:udp?endpoint=127.0.0.1:{first_port}");
+    let second_destination = format!("aeron:udp?endpoint=127.0.0.1:{second_port}");
+
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    driver
+        .do_work()
+        .expect("register publication and send setup");
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+
+    // send_data() stays gated until a receiver's Status Message is seen, exactly like the
+    // single-destination case: capture the SETUP the original endpoint announced and answer it,
+    // so the publication's flow-control window actually opens before we add a second cast target.
+    let mut buf = [0u8; 2048];
+    let (n, source) = first_receiver.recv_from(&mut buf).expect("receive setup");
+    let setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+    let mut status_bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+    let status = StatusMessageFlyweight::new(AtomicBuffer::new(&mut status_bytes));
+    status
+        .header()
+        .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+        .set_version(aeron_client::protocol::CURRENT_VERSION)
+        .set_flags(0)
+        .set_header_type(aeron_client::protocol::HDR_TYPE_SM);
+    status
+        .set_session_id(setup.session_id())
+        .set_stream_id(setup.stream_id())
+        .set_consumption_term_id(setup.initial_term_id())
+        .set_consumption_term_offset(0)
+        .set_receiver_window_length(TERM_MIN_LENGTH)
+        .set_receiver_id(0);
+    first_receiver.send_to(&status_bytes, source).unwrap();
+    for _ in 0..20 {
+        driver.do_work().expect("process status message");
+        if driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        driver.sender().network_publications()[0].receiver_limit() > 0,
+        "flow-control window must open before adding a second destination"
+    );
+
+    // ADD_DESTINATION goes through the same to-driver ring as every other client command; the
+    // driver applies it to the Sender's live NetworkPublication on the next duty cycle.
+    publisher
+        .driver_proxy()
+        .add_destination(pub_reg, &second_destination)
+        .expect("add manual MDC destination");
+    driver.do_work().expect("apply destination update");
+    assert_eq!(
+        driver.sender().network_publications()[0]
+            .destinations()
+            .len(),
+        2,
+        "publication should now cast to both receivers"
+    );
+
+    let mut payload = *b"hello-mdc";
+    let payload_len = payload.len();
+    let src = AtomicBuffer::new(&mut payload);
+    let publication = publisher.publication(pub_reg).expect("publication ready");
+    assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+    for _ in 0..20 {
+        driver.do_work().expect("flush data to both destinations");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    for receiver in [&first_receiver, &second_receiver] {
+        let mut buf = [0u8; 2048];
+        let mut data_payload = None;
+        for _ in 0..8 {
+            let n = match receiver.recv(&mut buf) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            let (frame_type, frame_length) = {
+                let header = HeaderFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+                (header.header_type(), header.frame_length() as usize)
+            };
+            if frame_type == HDR_TYPE_DATA && frame_length > DATA_HEADER_LENGTH {
+                data_payload = Some(buf[DATA_HEADER_LENGTH..frame_length].to_vec());
+                break;
+            }
+        }
+        assert_eq!(
+            data_payload.as_deref(),
+            Some(&b"hello-mdc"[..]),
+            "each destination should independently receive the DATA frame"
+        );
+    }
+}
+
+#[test]
+fn fragmented_ipc_message_reassembles_into_one_callback() {
+    const STREAM_ID: i32 = 6006;
+    let mut driver = MediaDriver::launch(small_mtu_ipc_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+    driver.do_work().expect("driver duty cycle");
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    subscriber.do_work().expect("subscriber services events");
+
+    // Payload well beyond the 32-byte-per-frame MTU limit configured above, forcing offer() to
+    // split it into BEGIN/middle/END fragments across separate term frames.
+    let mut payload: Vec<u8> = (0..100u8).collect();
+    let payload_len = payload.len();
+    let src = AtomicBuffer::new(&mut payload);
+    let publication = publisher.publication(pub_reg).expect("publication ready");
+    let max_payload = publication.max_payload_length();
+    assert!(
+        max_payload < payload_len,
+        "test payload must exceed a single fragment: max={max_payload}"
+    );
+    assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+
+    let mut assembler = FragmentAssembler::default();
+    let mut deliveries = 0;
+    let mut reassembled = Vec::new();
+    let subscription = subscriber.subscription_mut(sub_reg).expect("subscription");
+    let raw_fragments_seen = subscription.poll(
+        |buffer, offset, length, header| {
+            assembler.on_fragment(buffer, offset, length, header, |buf, off, len, _hdr| {
+                deliveries += 1;
+                let mut bytes = vec![0u8; len];
+                buf.get_bytes(off, &mut bytes);
+                reassembled = bytes;
+            });
+        },
+        10,
+    );
+
+    assert!(
+        raw_fragments_seen > 1,
+        "message should arrive as multiple raw fragments: saw {raw_fragments_seen}"
+    );
+    assert_eq!(
+        deliveries, 1,
+        "assembler must deliver exactly one reassembled message"
+    );
+    assert_eq!(reassembled, (0..100u8).collect::<Vec<u8>>());
+}
+
+#[test]
+fn repeated_publication_and_subscription_churn_keeps_driver_state_bounded() {
+    const STREAM_ID: i32 = 7007;
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+
+    // Publication images and their registrations must be fully reclaimed on removal, not just
+    // stop being polled -- otherwise the driver's resource maps grow without bound across the
+    // lifetime of a long-running process that repeatedly opens and closes streams.
+    for _ in 0..5 {
+        let pub_id = proxy.add_publication("aeron:ipc", STREAM_ID).unwrap();
+        let sub_id = proxy.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+        driver.do_work().unwrap();
+        assert_eq!(driver.conductor().publications().len(), 1);
+        assert_eq!(driver.conductor().subscriptions().len(), 1);
+
+        proxy.remove_publication(pub_id, false).unwrap();
+        proxy.remove_subscription(sub_id).unwrap();
+        driver.do_work().unwrap();
+        assert_eq!(
+            driver.conductor().publications().len(),
+            0,
+            "publication map must not accumulate stale entries across churn"
+        );
+        assert_eq!(
+            driver.conductor().subscriptions().len(),
+            0,
+            "subscription map must not accumulate stale entries across churn"
+        );
+    }
+}
+
+#[test]
+fn subscriber_reconnects_after_remove_and_readd_and_receives_new_data() {
+    const STREAM_ID: i32 = 9009;
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+    driver.do_work().expect("driver duty cycle");
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    subscriber.do_work().expect("subscriber services events");
+
+    let offer = |publisher: &mut ClientConductor<'static>, text: &'static [u8]| {
+        let mut payload = text.to_vec();
+        let payload_len = payload.len();
+        let src = AtomicBuffer::new(&mut payload);
+        let publication = publisher.publication(pub_reg).expect("publication ready");
+        assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+    };
+    let poll_one = |subscriber: &mut ClientConductor<'static>, sub_reg: i64| -> Vec<u8> {
+        let mut received = Vec::new();
+        let subscription = subscriber.subscription_mut(sub_reg).expect("subscription");
+        let fragments = subscription.poll(
+            |buffer, offset, length, _header| {
+                let mut bytes = vec![0u8; length];
+                buffer.get_bytes(offset, &mut bytes);
+                received = bytes;
+            },
+            10,
+        );
+        assert_eq!(fragments, 1, "exactly one fragment delivered");
+        received
+    };
+
+    offer(&mut publisher, b"before-reconnect");
+    assert_eq!(poll_one(&mut subscriber, sub_reg), b"before-reconnect");
+
+    // Drop the subscription entirely (not just idle) and re-register it on the same channel and
+    // stream while the publication stays live -- this is what a client reconnecting after a
+    // restart or a dropped image looks like.
+    subscriber.remove_subscription(sub_reg).unwrap();
+    driver.do_work().expect("remove subscription");
+    assert_eq!(
+        driver.conductor().subscriptions().len(),
+        0,
+        "old subscription must be fully deregistered before reconnecting"
+    );
+
+    let reconnected_sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+    driver.do_work().expect("re-register subscription");
+    for (id, counter) in driver.conductor().counters() {
+        subscriber.register_counter(*id, counter.clone());
+    }
+    subscriber
+        .do_work()
+        .expect("resolve reconnected subscription");
+
+    offer(&mut publisher, b"after-reconnect");
+    assert_eq!(
+        poll_one(&mut subscriber, reconnected_sub_reg),
+        b"after-reconnect",
+        "reconnected subscription must receive data published after it rejoined"
+    );
+}
+
+#[test]
+fn silent_client_is_reaped_after_the_liveness_timeout() {
+    let mut driver = MediaDriver::launch(Configuration {
+        ipc_term_buffer_length: TERM_MIN_LENGTH as usize,
+        client_liveness_timeout_ns: 10_000_000, // 10ms, so the test does not sit idle for long.
+        ..Configuration::default()
+    })
+    .expect("launch");
+    let proxy = client_proxy(&driver, 1);
+
+    proxy.add_publication("aeron:ipc", 1201).unwrap();
+    proxy.add_subscription("aeron:ipc", 1201).unwrap();
+    driver
+        .do_work()
+        .expect("register publication and subscription");
+    assert_eq!(driver.conductor().publications().len(), 1);
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+
+    // Never send another keepalive or command; the driver must reap this client's registrations
+    // once real time carries it past the configured liveness timeout, exactly as it would for a
+    // process that crashed without a clean CLIENT_CLOSE.
+    let mut reaped = false;
+    for _ in 0..200 {
+        driver.do_work().expect("sweep timed-out clients");
+        if driver.conductor().publications().is_empty()
+            && driver.conductor().subscriptions().is_empty()
+        {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        reaped,
+        "driver must free a silent client's publication and subscription after its liveness timeout"
+    );
+}
+
+#[test]
+fn one_client_publishes_and_subscribes_two_independent_streams_concurrently() {
+    const STREAM_A: i32 = 1301;
+    const STREAM_B: i32 = 1302;
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_a = publisher.add_publication("aeron:ipc", STREAM_A).unwrap();
+    let pub_b = publisher.add_publication("aeron:ipc", STREAM_B).unwrap();
+    let sub_a = subscriber.add_subscription("aeron:ipc", STREAM_A).unwrap();
+    let sub_b = subscriber.add_subscription("aeron:ipc", STREAM_B).unwrap();
+    driver.do_work().expect("register both streams");
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    subscriber.do_work().expect("subscriber services events");
+
+    let offer = |conductor: &mut ClientConductor<'static>, reg: i64, text: &'static [u8]| {
+        let mut payload = text.to_vec();
+        let payload_len = payload.len();
+        let src = AtomicBuffer::new(&mut payload);
+        let publication = conductor.publication(reg).expect("publication ready");
+        assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+    };
+    let poll_one = |conductor: &mut ClientConductor<'static>, reg: i64| -> Vec<u8> {
+        let mut received = Vec::new();
+        let subscription = conductor.subscription_mut(reg).expect("subscription");
+        let fragments = subscription.poll(
+            |buffer, offset, length, _header| {
+                let mut bytes = vec![0u8; length];
+                buffer.get_bytes(offset, &mut bytes);
+                received = bytes;
+            },
+            10,
+        );
+        assert_eq!(fragments, 1, "exactly one fragment delivered");
+        received
+    };
+
+    offer(&mut publisher, pub_a, b"stream-a-payload");
+    offer(&mut publisher, pub_b, b"stream-b-payload");
+
+    // Each stream's own subscription must see only its own data, not the other stream's, even
+    // though both were registered by the same client and published back to back.
+    assert_eq!(poll_one(&mut subscriber, sub_a), b"stream-a-payload");
+    assert_eq!(poll_one(&mut subscriber, sub_b), b"stream-b-payload");
+}
+
+fn last_error_correlation(events: &mut BroadcastReceiver) -> Option<i64> {
+    let mut correlation = None;
+    while events
+        .receive_next(|msg_type, buf, offset, _len| {
+            if msg_type == ON_ERROR {
+                correlation = Some(
+                    ErrorResponseFlyweight::wrap(*buf, offset).offending_command_correlation_id(),
+                );
+            }
+        })
+        .unwrap()
+    {
+        if correlation.is_some() {
+            break;
+        }
+    }
+    correlation
+}
+
+#[test]
+fn publication_with_conflicting_explicit_session_id_is_rejected() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+    let mut events = BroadcastReceiver::new(driver.cnc().to_clients_buffer()).unwrap();
+
+    // An implicit-session publication already owns this channel+stream; a second registration
+    // naming an explicit session id on the same identity is ambiguous (the first publication's
+    // auto-assigned session could already be that value) and the driver must refuse it rather
+    // than silently registering a second, possibly-colliding publication.
+    proxy.add_publication("aeron:ipc", 7001).unwrap();
+    driver.do_work().expect("register first publication");
+    assert_eq!(driver.conductor().publications().len(), 1);
+
+    let conflicting_correlation = proxy
+        .add_publication("aeron:ipc?session-id=4096", 7001)
+        .unwrap();
+    driver.do_work().expect("reject conflicting publication");
+
+    assert_eq!(
+        driver.conductor().publications().len(),
+        1,
+        "the conflicting registration must not be added"
+    );
+    assert_eq!(
+        last_error_correlation(&mut events),
+        Some(conflicting_correlation),
+        "driver must ON_ERROR the conflicting registration's own correlation id"
+    );
+}
+
+#[test]
+fn subscription_with_conflicting_reliability_is_rejected() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+    let mut events = BroadcastReceiver::new(driver.cnc().to_clients_buffer()).unwrap();
+    let channel = "aeron:udp?endpoint=127.0.0.1:0";
+
+    proxy.add_subscription(channel, 7002).unwrap();
+    driver.do_work().expect("register first subscription");
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+
+    // A second wildcard-session subscription on the same channel+stream that disagrees on
+    // reliability would leave the driver unable to give the image a single consistent loss
+    // policy, so it must be refused rather than silently coexisting.
+    let conflicting_correlation = proxy
+        .add_subscription(&format!("{channel}|reliable=false"), 7002)
+        .unwrap();
+    driver.do_work().expect("reject conflicting subscription");
+
+    assert_eq!(
+        driver.conductor().subscriptions().len(),
+        1,
+        "the conflicting registration must not be added"
+    );
+    assert_eq!(
+        last_error_correlation(&mut events),
+        Some(conflicting_correlation),
+        "driver must ON_ERROR the conflicting registration's own correlation id"
+    );
+}
+
+#[test]
+fn session_specific_subscriptions_conflict_by_session_not_by_channel() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+    let mut events = BroadcastReceiver::new(driver.cnc().to_clients_buffer()).unwrap();
+    let channel = "aeron:udp?endpoint=127.0.0.1:0";
+
+    proxy
+        .add_subscription(&format!("{channel}|session-id=1024"), 7003)
+        .unwrap();
+    driver.do_work().expect("register session 1024");
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+
+    // Same channel, same session id, disagreeing reliability: must be rejected -- two
+    // subscriptions to one session's image cannot each demand a different loss policy.
+    let conflicting_correlation = proxy
+        .add_subscription(&format!("{channel}|session-id=1024|reliable=false"), 7003)
+        .unwrap();
+    driver.do_work().expect("reject same-session conflict");
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+    assert_eq!(
+        last_error_correlation(&mut events),
+        Some(conflicting_correlation),
+        "driver must ON_ERROR a same-session reliability conflict"
+    );
+
+    // Same channel, a *different* explicit session id: conflict detection is keyed on session
+    // identity, not just channel+stream, so this must be allowed to coexist.
+    proxy
+        .add_subscription(&format!("{channel}|session-id=2048|reliable=false"), 7003)
+        .unwrap();
+    driver.do_work().expect("register the other session");
+    assert_eq!(
+        driver.conductor().subscriptions().len(),
+        2,
+        "a different session id must not be treated as conflicting"
     );
 }

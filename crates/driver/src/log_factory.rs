@@ -236,7 +236,13 @@ fn usable_space(path: &Path) -> Result<Option<u64>> {
     }
     // SAFETY: statvfs returned success and therefore initialised every field.
     let stats = unsafe { stats.assume_init() };
-    Ok(Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize)))
+    // `f_bavail`/`f_frsize` are u32 on some platforms (e.g. macOS) and already u64 on others
+    // (e.g. Linux); the cast is a real widening conversion on the former and a no-op on the
+    // latter, so clippy's identity-cast lints disagree by platform -- silence both here.
+    #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+    Ok(Some(
+        (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64),
+    ))
 }
 
 #[cfg(not(unix))]
