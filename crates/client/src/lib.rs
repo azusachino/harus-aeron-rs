@@ -19,6 +19,7 @@ pub mod counters;
 pub mod driver_events;
 pub mod driver_proxy;
 pub mod error;
+pub mod error_log;
 pub mod exceptions;
 pub mod fragment_assembler;
 pub mod image;
