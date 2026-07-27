@@ -1295,10 +1295,10 @@ impl DriverConductor {
             self.setup_elicited.remove(&image_key);
             self.session_states
                 .insert(image_key.clone(), (NetworkSessionState::Active, now_ns));
-            let Some(log_file_name) = self
+            let Some((log_file_name, initial_position)) = self
                 .images
                 .get(&image_key)
-                .map(|image| image.log_file_name().to_owned())
+                .map(|image| (image.log_file_name().to_owned(), image.rebuild_position()))
             else {
                 return Ok(());
             };
@@ -1326,6 +1326,7 @@ impl DriverConductor {
                         subscription_registration_id,
                         &log_file_name,
                         UDP_SOURCE_IDENTITY,
+                        initial_position,
                     )?;
                     new_links.push((subscription_registration_id, correlation_id));
                 }
@@ -1439,6 +1440,7 @@ impl DriverConductor {
             subscription_registration_id,
             &log_file_name,
             UDP_SOURCE_IDENTITY,
+            0,
         )?;
         let mut image = PublicationImage::new_with_active_position(
             session_id,
@@ -1471,6 +1473,7 @@ impl DriverConductor {
                 subscription_registration_id,
                 &log_file_name,
                 UDP_SOURCE_IDENTITY,
+                0,
             )?;
             image.add_subscription_link(subscription_registration_id, correlation_id);
         }
@@ -1769,12 +1772,16 @@ impl DriverConductor {
             if let Some(buffers) = self.log_buffers.get(&publication_registration_id) {
                 aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
             }
+            let initial_position = self
+                .publication_position(publication_registration_id)
+                .unwrap_or(0);
             let correlation_id = self.on_available_image(
                 session_id,
                 stream_id,
                 subscription_registration_id,
                 &log_file_name,
                 IPC_SOURCE_IDENTITY,
+                initial_position,
             )?;
             self.register_ipc_subscription(
                 publication_registration_id,
@@ -1902,12 +1909,16 @@ impl DriverConductor {
                 aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
             }
         }
+        let initial_position = self
+            .publication_position(publication_registration_id)
+            .unwrap_or(0);
         let correlation_id = self.on_available_image(
             session_id,
             stream_id,
             subscription_registration_id,
             &log_file_name,
             &source_identity,
+            initial_position,
         )?;
         self.spy_subscriptions.insert(
             (publication_registration_id, subscription_registration_id),
@@ -1932,7 +1943,7 @@ impl DriverConductor {
         else {
             return Ok(());
         };
-        let images: Vec<(NetworkImageKey, String)> = self
+        let images: Vec<(NetworkImageKey, String, i64)> = self
             .images
             .iter()
             .filter(|((image_channel, _, _, _), image)| {
@@ -1941,10 +1952,16 @@ impl DriverConductor {
                     && subscription_session_id.is_none_or(|id| image.session_id() == id)
                     && !image.has_subscription(subscription_registration_id)
             })
-            .map(|(key, image)| (key.clone(), image.log_file_name().to_owned()))
+            .map(|(key, image)| {
+                (
+                    key.clone(),
+                    image.log_file_name().to_owned(),
+                    image.rebuild_position(),
+                )
+            })
             .collect();
 
-        for (key, log_file_name) in images {
+        for (key, log_file_name, initial_position) in images {
             let (_, session_id, _, _) = &key;
             let correlation_id = self.on_available_image(
                 *session_id,
@@ -1952,6 +1969,7 @@ impl DriverConductor {
                 subscription_registration_id,
                 &log_file_name,
                 UDP_SOURCE_IDENTITY,
+                initial_position,
             )?;
             if let Some(image) = self.images.get_mut(&key) {
                 image.add_subscription_link(subscription_registration_id, correlation_id);
@@ -1990,6 +2008,7 @@ impl DriverConductor {
                 subscription_registration_id,
                 log_file_name,
                 IPC_SOURCE_IDENTITY,
+                0,
             )?;
             self.register_ipc_subscription(
                 publication_registration_id,
@@ -2166,6 +2185,7 @@ impl DriverConductor {
                         subscription_registration_id,
                         &log_file_name,
                         IPC_SOURCE_IDENTITY,
+                        old_position,
                     )?;
                     let Some(subscriber_position_id) = self
                         .subscriber_counters
@@ -2174,11 +2194,6 @@ impl DriverConductor {
                     else {
                         continue;
                     };
-                    if let Some(counter) = self.counters.get(&subscriber_position_id) {
-                        counter.store(old_position, Ordering::Release);
-                    }
-                    self.cnc
-                        .set_counter_value(subscriber_position_id, old_position)?;
                     next.correlation_id = correlation_id;
                     next.subscriber_position_id = subscriber_position_id;
                     next.state = IpcSubscriptionStateKind::Active;
@@ -2615,16 +2630,22 @@ impl DriverConductor {
         subscription_registration_id: i64,
         log_file_name: &str,
         source_identity: &str,
+        initial_position: i64,
     ) -> Result<i64> {
         let correlation_id = self.next_id();
         let subscriber_position_id = self.next_counter_id();
-        // The subscriber owns its position counter (starts at 0).
-        self.counters
-            .insert(subscriber_position_id, Arc::new(AtomicI64::new(0)));
+        // The subscriber owns its position counter. A freshly allocated network rebuild buffer
+        // starts empty (0), but a subscriber joining an already-active IPC/spy publication must
+        // start at that publication's current position, or it replays data the publisher wrote
+        // before this subscriber joined.
+        self.counters.insert(
+            subscriber_position_id,
+            Arc::new(AtomicI64::new(initial_position)),
+        );
         self.publish_counter(
             subscriber_position_id,
             DRIVER_SUBSCRIBER_POSITION_TYPE_ID,
-            0,
+            initial_position,
             "Subscriber position",
         )?;
         // 28-byte fixed body + length-prefixed log file name + length-prefixed source identity.

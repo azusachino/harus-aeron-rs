@@ -4,7 +4,10 @@
 //! Agrona broadcast buffer and reconciled into ready publications, subscriptions, and images.
 
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::AtomicI64};
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use agrona::AtomicBuffer;
@@ -511,11 +514,15 @@ impl<'a> ClientConductor<'a> {
                 ))
             })?;
         let initial_term_id = initial_term_id(&buffers.meta_data_buffer());
+        // The driver already seeded this counter with the image's real starting position (0 for
+        // a fresh network rebuild buffer, the publication's current tail for a subscriber
+        // joining an already-active IPC/spy publication) -- read it rather than assuming 0.
+        let initial_position = position.load(Ordering::Acquire);
         let image = Image::new(
             subscription_registration_id,
             session_id,
             initial_term_id,
-            0,
+            initial_position,
             position,
             buffers,
             source_identity.into(),

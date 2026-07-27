@@ -882,3 +882,73 @@ fn repeated_publication_and_subscription_churn_keeps_driver_state_bounded() {
         );
     }
 }
+
+#[test]
+fn subscriber_reconnects_after_remove_and_readd_and_receives_new_data() {
+    const STREAM_ID: i32 = 9009;
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+    driver.do_work().expect("driver duty cycle");
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    subscriber.do_work().expect("subscriber services events");
+
+    let offer = |publisher: &mut ClientConductor<'static>, text: &'static [u8]| {
+        let mut payload = text.to_vec();
+        let payload_len = payload.len();
+        let src = AtomicBuffer::new(&mut payload);
+        let publication = publisher.publication(pub_reg).expect("publication ready");
+        assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+    };
+    let poll_one = |subscriber: &mut ClientConductor<'static>, sub_reg: i64| -> Vec<u8> {
+        let mut received = Vec::new();
+        let subscription = subscriber.subscription_mut(sub_reg).expect("subscription");
+        let fragments = subscription.poll(
+            |buffer, offset, length, _header| {
+                let mut bytes = vec![0u8; length];
+                buffer.get_bytes(offset, &mut bytes);
+                received = bytes;
+            },
+            10,
+        );
+        assert_eq!(fragments, 1, "exactly one fragment delivered");
+        received
+    };
+
+    offer(&mut publisher, b"before-reconnect");
+    assert_eq!(poll_one(&mut subscriber, sub_reg), b"before-reconnect");
+
+    // Drop the subscription entirely (not just idle) and re-register it on the same channel and
+    // stream while the publication stays live -- this is what a client reconnecting after a
+    // restart or a dropped image looks like.
+    subscriber.remove_subscription(sub_reg).unwrap();
+    driver.do_work().expect("remove subscription");
+    assert_eq!(
+        driver.conductor().subscriptions().len(),
+        0,
+        "old subscription must be fully deregistered before reconnecting"
+    );
+
+    let reconnected_sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+    driver.do_work().expect("re-register subscription");
+    for (id, counter) in driver.conductor().counters() {
+        subscriber.register_counter(*id, counter.clone());
+    }
+    subscriber
+        .do_work()
+        .expect("resolve reconnected subscription");
+
+    offer(&mut publisher, b"after-reconnect");
+    assert_eq!(
+        poll_one(&mut subscriber, reconnected_sub_reg),
+        b"after-reconnect",
+        "reconnected subscription must receive data published after it rejoined"
+    );
+}
