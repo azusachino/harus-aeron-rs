@@ -236,7 +236,9 @@ fn usable_space(path: &Path) -> Result<Option<u64>> {
     }
     // SAFETY: statvfs returned success and therefore initialised every field.
     let stats = unsafe { stats.assume_init() };
-    Ok(Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize)))
+    Ok(Some(
+        u64::from(stats.f_bavail).saturating_mul(stats.f_frsize),
+    ))
 }
 
 #[cfg(not(unix))]
