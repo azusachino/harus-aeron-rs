@@ -78,10 +78,48 @@ Real pub/sub round-trip, reconnect, multi-stream, flow control — the scenarios
 puts in `aeron-system-tests` rather than the per-module unit tests. Port
 `system-tests/driver` (13) + `system-tests/security` (2) + `system-tests/test` (1) +
 the driver/client-relevant subset of system-tests root (67). **Exit: 83/83 driver/client
-system-test parity.** The current branch has focused IPC/UDP round-trip and reliability
-evidence plus Java interop smoke; the parity exit remains open. This is also where Java
-interop-smoke goes green (mirrors the zig repo's `INTEROP_STATUS.md` gate) — build out
-`deploy/interop/` here.
+system-test parity.** This is also where Java interop-smoke goes green (mirrors the zig
+repo's `INTEROP_STATUS.md` gate) — build out `deploy/interop/` here.
+
+**Current state (2026-07-27, honest re-audit):** the exit criterion is not met. A full
+method-level audit of vendor `aeron-system-tests` (319 `@Test` methods across 65 files,
+not the 83-file estimate above — see `.agents/system-test-audit.md` for the complete
+mapping) found only 15 genuine Rust system tests in `crates/driver/tests/system_tests.rs`,
+covering: IPC/UDP pub/sub roundtrip, network spy, fragmented-message reassembly, bounded
+resource cleanup across repeated churn, manual multi-destination cast (MDC), subscription
+reconnect, silent-client liveness reaping, one client running two concurrent streams, and
+single- and multi-gap NAK/retransmit loss recovery. `tutorial/driver/tests/system_tests.rs`
+and `tutorial/driver/tests/flow_control_tests.rs` are learner stubs with zero assertions
+and do not count as coverage.
+
+That work also surfaced and fixed one real correctness bug (not just a test gap): a
+subscriber joining an already-active IPC/spy/network image had its read position
+hardcoded to 0 on both the driver and client side, so it replayed data the publisher had
+already written instead of starting at the live position. Fixed in `on_available_image`
+(driver) and `ClientConductor::on_available_image` (client) to thread the real join
+position through.
+
+Explicit boundaries found during this pass (not silently dropped — see the
+`harus-aeron-rs:pitfall:*` entries in the project's Asobi graph for full detail):
+- `crates/client` has no `ExclusivePublication` type, `try_claim`/`BufferClaim`, or
+  controlled-poll API, so ~15 vendor methods in that area cannot get a system test until
+  the client exposes them.
+- `multicast_flow_control.rs` (891 lines, min/max/tagged strategies) and
+  `congestion_control.rs` are unit-tested in isolation but never called from
+  `network_publication.rs`/`sender.rs`/`conductor.rs` — every publication behaves as
+  `fc=max` regardless of the channel's `fc=` parameter, so strategy *selection* has
+  nothing to system-test yet (~15 vendor methods).
+- Untethered-subscriber timeout requires 0.75x term lag, but real IPC backpressure caps
+  reachable lag at 0.5x term, so the Linger transition is unreachable via genuine
+  `offer()` calls — only the existing unit test (which pokes `raw_tail` directly) covers
+  it.
+- True UDP multicast, `control-mode=response`, and publication revoke/reject-image are
+  recognized in parsing but have no driver-side transport/handling at all (39 methods).
+
+Remaining in-scope gaps (~220 methods, largest first): channel/URI validation (51),
+MDC/MDS depth beyond the one manual-add-destination test (43), reconnection/lifecycle
+depth (37), counters (17), session-specific pub/sub (11), name re-resolution (11,
+depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 
 ### v0.0.7 — aeron-archive
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
