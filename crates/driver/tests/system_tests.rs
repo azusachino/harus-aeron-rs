@@ -952,3 +952,93 @@ fn subscriber_reconnects_after_remove_and_readd_and_receives_new_data() {
         "reconnected subscription must receive data published after it rejoined"
     );
 }
+
+#[test]
+fn silent_client_is_reaped_after_the_liveness_timeout() {
+    let mut driver = MediaDriver::launch(Configuration {
+        ipc_term_buffer_length: TERM_MIN_LENGTH as usize,
+        client_liveness_timeout_ns: 10_000_000, // 10ms, so the test does not sit idle for long.
+        ..Configuration::default()
+    })
+    .expect("launch");
+    let proxy = client_proxy(&driver, 1);
+
+    proxy.add_publication("aeron:ipc", 1201).unwrap();
+    proxy.add_subscription("aeron:ipc", 1201).unwrap();
+    driver
+        .do_work()
+        .expect("register publication and subscription");
+    assert_eq!(driver.conductor().publications().len(), 1);
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+
+    // Never send another keepalive or command; the driver must reap this client's registrations
+    // once real time carries it past the configured liveness timeout, exactly as it would for a
+    // process that crashed without a clean CLIENT_CLOSE.
+    let mut reaped = false;
+    for _ in 0..200 {
+        driver.do_work().expect("sweep timed-out clients");
+        if driver.conductor().publications().is_empty()
+            && driver.conductor().subscriptions().is_empty()
+        {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        reaped,
+        "driver must free a silent client's publication and subscription after its liveness timeout"
+    );
+}
+
+#[test]
+fn one_client_publishes_and_subscribes_two_independent_streams_concurrently() {
+    const STREAM_A: i32 = 1301;
+    const STREAM_B: i32 = 1302;
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_a = publisher.add_publication("aeron:ipc", STREAM_A).unwrap();
+    let pub_b = publisher.add_publication("aeron:ipc", STREAM_B).unwrap();
+    let sub_a = subscriber.add_subscription("aeron:ipc", STREAM_A).unwrap();
+    let sub_b = subscriber.add_subscription("aeron:ipc", STREAM_B).unwrap();
+    driver.do_work().expect("register both streams");
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    subscriber.do_work().expect("subscriber services events");
+
+    let offer = |conductor: &mut ClientConductor<'static>, reg: i64, text: &'static [u8]| {
+        let mut payload = text.to_vec();
+        let payload_len = payload.len();
+        let src = AtomicBuffer::new(&mut payload);
+        let publication = conductor.publication(reg).expect("publication ready");
+        assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+    };
+    let poll_one = |conductor: &mut ClientConductor<'static>, reg: i64| -> Vec<u8> {
+        let mut received = Vec::new();
+        let subscription = conductor.subscription_mut(reg).expect("subscription");
+        let fragments = subscription.poll(
+            |buffer, offset, length, _header| {
+                let mut bytes = vec![0u8; length];
+                buffer.get_bytes(offset, &mut bytes);
+                received = bytes;
+            },
+            10,
+        );
+        assert_eq!(fragments, 1, "exactly one fragment delivered");
+        received
+    };
+
+    offer(&mut publisher, pub_a, b"stream-a-payload");
+    offer(&mut publisher, pub_b, b"stream-b-payload");
+
+    // Each stream's own subscription must see only its own data, not the other stream's, even
+    // though both were registered by the same client and published back to back.
+    assert_eq!(poll_one(&mut subscriber, sub_a), b"stream-a-payload");
+    assert_eq!(poll_one(&mut subscriber, sub_b), b"stream-b-payload");
+}
