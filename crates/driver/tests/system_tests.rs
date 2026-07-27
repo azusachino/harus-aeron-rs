@@ -8,6 +8,7 @@ use std::time::Duration;
 use aeron_client::conductor::ClientConductor;
 use aeron_client::driver_events::{ON_OPERATION_SUCCESS, OperationSucceededFlyweight};
 use aeron_client::driver_proxy::DriverProxy;
+use aeron_client::fragment_assembler::FragmentAssembler;
 use aeron_client::logbuffer::TERM_MIN_LENGTH;
 use aeron_client::protocol::{
     DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP, HeaderFlyweight,
@@ -46,6 +47,15 @@ fn small_ipc_config() -> Configuration {
 fn small_udp_config() -> Configuration {
     Configuration {
         publication_term_buffer_length: TERM_MIN_LENGTH as usize,
+        ..Configuration::default()
+    }
+}
+
+/// Small-term, small-MTU IPC config so a modest payload spans multiple fragments.
+fn small_mtu_ipc_config() -> Configuration {
+    Configuration {
+        ipc_term_buffer_length: TERM_MIN_LENGTH as usize,
+        ipc_mtu_length: 64,
         ..Configuration::default()
     }
 }
@@ -667,4 +677,94 @@ fn udp_receiver_gap_generates_nak_and_sender_retransmits() {
         received,
         vec![FIRST_PAYLOAD.to_vec(), SECOND_PAYLOAD.to_vec()]
     );
+}
+
+#[test]
+fn fragmented_ipc_message_reassembles_into_one_callback() {
+    const STREAM_ID: i32 = 6006;
+    let mut driver = MediaDriver::launch(small_mtu_ipc_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+    driver.do_work().expect("driver duty cycle");
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    subscriber.do_work().expect("subscriber services events");
+
+    // Payload well beyond the 32-byte-per-frame MTU limit configured above, forcing offer() to
+    // split it into BEGIN/middle/END fragments across separate term frames.
+    let mut payload: Vec<u8> = (0..100u8).collect();
+    let payload_len = payload.len();
+    let src = AtomicBuffer::new(&mut payload);
+    let publication = publisher.publication(pub_reg).expect("publication ready");
+    let max_payload = publication.max_payload_length();
+    assert!(
+        max_payload < payload_len,
+        "test payload must exceed a single fragment: max={max_payload}"
+    );
+    assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+
+    let mut assembler = FragmentAssembler::default();
+    let mut deliveries = 0;
+    let mut reassembled = Vec::new();
+    let subscription = subscriber.subscription_mut(sub_reg).expect("subscription");
+    let raw_fragments_seen = subscription.poll(
+        |buffer, offset, length, header| {
+            assembler.on_fragment(buffer, offset, length, header, |buf, off, len, _hdr| {
+                deliveries += 1;
+                let mut bytes = vec![0u8; len];
+                buf.get_bytes(off, &mut bytes);
+                reassembled = bytes;
+            });
+        },
+        10,
+    );
+
+    assert!(
+        raw_fragments_seen > 1,
+        "message should arrive as multiple raw fragments: saw {raw_fragments_seen}"
+    );
+    assert_eq!(
+        deliveries, 1,
+        "assembler must deliver exactly one reassembled message"
+    );
+    assert_eq!(reassembled, (0..100u8).collect::<Vec<u8>>());
+}
+
+#[test]
+fn repeated_publication_and_subscription_churn_keeps_driver_state_bounded() {
+    const STREAM_ID: i32 = 7007;
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+
+    // Publication images and their registrations must be fully reclaimed on removal, not just
+    // stop being polled -- otherwise the driver's resource maps grow without bound across the
+    // lifetime of a long-running process that repeatedly opens and closes streams.
+    for _ in 0..5 {
+        let pub_id = proxy.add_publication("aeron:ipc", STREAM_ID).unwrap();
+        let sub_id = proxy.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+        driver.do_work().unwrap();
+        assert_eq!(driver.conductor().publications().len(), 1);
+        assert_eq!(driver.conductor().subscriptions().len(), 1);
+
+        proxy.remove_publication(pub_id, false).unwrap();
+        proxy.remove_subscription(sub_id).unwrap();
+        driver.do_work().unwrap();
+        assert_eq!(
+            driver.conductor().publications().len(),
+            0,
+            "publication map must not accumulate stale entries across churn"
+        );
+        assert_eq!(
+            driver.conductor().subscriptions().len(),
+            0,
+            "subscription map must not accumulate stale entries across churn"
+        );
+    }
 }
