@@ -47,8 +47,18 @@ impl NameResolver for DefaultNameResolver {
         }
 
         let host_port = format!("{name}:0");
-        if let Ok(mut addrs) = host_port.to_socket_addrs() {
-            if let Some(addr) = addrs.next() {
+        if let Ok(addrs) = host_port.to_socket_addrs() {
+            // getaddrinfo's ordering is resolver/OS-dependent (e.g. some hosts return ::1 for
+            // "localhost" ahead of 127.0.0.1); prefer an IPv4 result when one exists so
+            // resolution is deterministic across platforms, falling back to IPv6 otherwise.
+            let mut first = None;
+            for addr in addrs {
+                if addr.is_ipv4() {
+                    return Ok(addr.ip());
+                }
+                first.get_or_insert(addr);
+            }
+            if let Some(addr) = first {
                 return Ok(addr.ip());
             }
         }
