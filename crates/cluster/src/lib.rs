@@ -6,3 +6,7 @@
 //! cluster implementation (see `docs/investigations/`); this crate exists so the same
 //! failover scenario can be tried on Rust/tokio for comparison once the driver/client
 //! phases are solid.
+pub mod cluster_node;
+pub mod codecs;
+pub mod consensus_module;
+pub mod state_machine;

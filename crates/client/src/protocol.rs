@@ -478,6 +478,330 @@ impl<'a> DataHeaderFlyweight<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Control-plane frames. Field offsets mirror vendor io.aeron.protocol.* (1.50.x).
+// ---------------------------------------------------------------------------
+
+/// Reply-requested flag for RTT measurement frames.
+pub const RTTM_REPLY_FLAG: u8 = 0x80;
+
+/// Status Message (SM) frame: session@8, stream@12, consumptionTermId@16,
+/// consumptionTermOffset@20, receiverWindow@24, receiverId@28. Header length 36.
+pub const SM_SESSION_ID_FIELD_OFFSET: usize = 8;
+pub const SM_STREAM_ID_FIELD_OFFSET: usize = 12;
+pub const SM_CONSUMPTION_TERM_ID_FIELD_OFFSET: usize = 16;
+pub const SM_CONSUMPTION_TERM_OFFSET_FIELD_OFFSET: usize = 20;
+pub const SM_RECEIVER_WINDOW_FIELD_OFFSET: usize = 24;
+pub const SM_RECEIVER_ID_FIELD_OFFSET: usize = 28;
+/// Length of the Status Message header (36 bytes).
+pub const STATUS_MESSAGE_HEADER_LENGTH: usize = 36;
+/// Status Message flag requesting the sender to emit a SETUP frame.
+///
+/// Matches `vendor/aeron/aeron-client/src/main/java/io/aeron/protocol/StatusMessageFlyweight.java`.
+pub const SEND_SETUP_FLAG: u8 = 0x80;
+/// Publisher should remove the receiver from flow control.
+pub const END_OF_STREAM_FLAG: u8 = 0x40;
+/// Optional group-tag feedback starts immediately after the fixed status header.
+pub const SM_GROUP_TAG_FIELD_OFFSET: usize = STATUS_MESSAGE_HEADER_LENGTH;
+
+/// Flyweight over a Status Message frame.
+#[derive(Copy, Clone)]
+pub struct StatusMessageFlyweight<'a> {
+    buffer: AtomicBuffer<'a>,
+}
+
+impl<'a> StatusMessageFlyweight<'a> {
+    pub fn new(buffer: AtomicBuffer<'a>) -> Self {
+        Self { buffer }
+    }
+
+    /// The base frame header (frame length / version / flags / type).
+    pub fn header(&self) -> HeaderFlyweight<'a> {
+        HeaderFlyweight::new(self.buffer)
+    }
+
+    pub fn flags(&self) -> u8 {
+        self.header().flags()
+    }
+
+    pub fn set_flags(&self, flags: u8) -> &Self {
+        self.header().set_flags(flags);
+        self
+    }
+
+    pub fn session_id(&self) -> i32 {
+        self.buffer.get_i32(SM_SESSION_ID_FIELD_OFFSET)
+    }
+    pub fn set_session_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SM_SESSION_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn stream_id(&self) -> i32 {
+        self.buffer.get_i32(SM_STREAM_ID_FIELD_OFFSET)
+    }
+    pub fn set_stream_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SM_STREAM_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn consumption_term_id(&self) -> i32 {
+        self.buffer.get_i32(SM_CONSUMPTION_TERM_ID_FIELD_OFFSET)
+    }
+    pub fn set_consumption_term_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SM_CONSUMPTION_TERM_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn consumption_term_offset(&self) -> i32 {
+        self.buffer.get_i32(SM_CONSUMPTION_TERM_OFFSET_FIELD_OFFSET)
+    }
+    pub fn set_consumption_term_offset(&self, v: i32) -> &Self {
+        self.buffer
+            .put_i32(SM_CONSUMPTION_TERM_OFFSET_FIELD_OFFSET, v);
+        self
+    }
+    pub fn receiver_window_length(&self) -> i32 {
+        self.buffer.get_i32(SM_RECEIVER_WINDOW_FIELD_OFFSET)
+    }
+    pub fn set_receiver_window_length(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SM_RECEIVER_WINDOW_FIELD_OFFSET, v);
+        self
+    }
+    pub fn receiver_id(&self) -> i64 {
+        self.buffer.get_i64(SM_RECEIVER_ID_FIELD_OFFSET)
+    }
+    pub fn set_receiver_id(&self, v: i64) -> &Self {
+        self.buffer.put_i64(SM_RECEIVER_ID_FIELD_OFFSET, v);
+        self
+    }
+
+    /// Whether this status message carries an 8-byte group tag.
+    pub fn has_group_tag(&self) -> bool {
+        self.header().frame_length() > STATUS_MESSAGE_HEADER_LENGTH as i32
+    }
+
+    pub fn group_tag(&self) -> i64 {
+        self.buffer.get_i64(SM_GROUP_TAG_FIELD_OFFSET)
+    }
+
+    /// Set or clear the optional 8-byte group tag and update the frame length.
+    pub fn set_group_tag(&self, group_tag: Option<i64>) -> &Self {
+        match group_tag {
+            Some(group_tag) => {
+                self.buffer.put_i64(SM_GROUP_TAG_FIELD_OFFSET, group_tag);
+                self.header()
+                    .set_frame_length((STATUS_MESSAGE_HEADER_LENGTH + 8) as i32);
+            }
+            None => {
+                self.header()
+                    .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32);
+            }
+        }
+        self
+    }
+}
+
+/// NAK frame: session@8, stream@12, termId@16, termOffset@20, length@24. Header length 28.
+pub const NAK_SESSION_ID_FIELD_OFFSET: usize = 8;
+pub const NAK_STREAM_ID_FIELD_OFFSET: usize = 12;
+pub const NAK_TERM_ID_FIELD_OFFSET: usize = 16;
+pub const NAK_TERM_OFFSET_FIELD_OFFSET: usize = 20;
+pub const NAK_LENGTH_FIELD_OFFSET: usize = 24;
+/// Length of the NAK header (28 bytes).
+pub const NAK_HEADER_LENGTH: usize = 28;
+
+/// Flyweight over a NAK (negative acknowledgement) frame.
+#[derive(Copy, Clone)]
+pub struct NakFlyweight<'a> {
+    buffer: AtomicBuffer<'a>,
+}
+
+impl<'a> NakFlyweight<'a> {
+    pub fn new(buffer: AtomicBuffer<'a>) -> Self {
+        Self { buffer }
+    }
+    pub fn header(&self) -> HeaderFlyweight<'a> {
+        HeaderFlyweight::new(self.buffer)
+    }
+    pub fn session_id(&self) -> i32 {
+        self.buffer.get_i32(NAK_SESSION_ID_FIELD_OFFSET)
+    }
+    pub fn set_session_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(NAK_SESSION_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn stream_id(&self) -> i32 {
+        self.buffer.get_i32(NAK_STREAM_ID_FIELD_OFFSET)
+    }
+    pub fn set_stream_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(NAK_STREAM_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn term_id(&self) -> i32 {
+        self.buffer.get_i32(NAK_TERM_ID_FIELD_OFFSET)
+    }
+    pub fn set_term_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(NAK_TERM_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn term_offset(&self) -> i32 {
+        self.buffer.get_i32(NAK_TERM_OFFSET_FIELD_OFFSET)
+    }
+    pub fn set_term_offset(&self, v: i32) -> &Self {
+        self.buffer.put_i32(NAK_TERM_OFFSET_FIELD_OFFSET, v);
+        self
+    }
+    pub fn length(&self) -> i32 {
+        self.buffer.get_i32(NAK_LENGTH_FIELD_OFFSET)
+    }
+    pub fn set_length(&self, v: i32) -> &Self {
+        self.buffer.put_i32(NAK_LENGTH_FIELD_OFFSET, v);
+        self
+    }
+}
+
+/// Setup frame: termOffset@8, session@12, stream@16, initialTermId@20, activeTermId@24,
+/// termLength@28, mtu@32, ttl@36. Header length 40.
+pub const SETUP_TERM_OFFSET_FIELD_OFFSET: usize = 8;
+pub const SETUP_SESSION_ID_FIELD_OFFSET: usize = 12;
+pub const SETUP_STREAM_ID_FIELD_OFFSET: usize = 16;
+pub const SETUP_INITIAL_TERM_ID_FIELD_OFFSET: usize = 20;
+pub const SETUP_ACTIVE_TERM_ID_FIELD_OFFSET: usize = 24;
+pub const SETUP_TERM_LENGTH_FIELD_OFFSET: usize = 28;
+pub const SETUP_MTU_FIELD_OFFSET: usize = 32;
+pub const SETUP_TTL_FIELD_OFFSET: usize = 36;
+/// Length of the Setup header (40 bytes).
+pub const SETUP_HEADER_LENGTH: usize = 40;
+
+/// Flyweight over a Setup frame.
+#[derive(Copy, Clone)]
+pub struct SetupFlyweight<'a> {
+    buffer: AtomicBuffer<'a>,
+}
+
+impl<'a> SetupFlyweight<'a> {
+    pub fn new(buffer: AtomicBuffer<'a>) -> Self {
+        Self { buffer }
+    }
+    pub fn header(&self) -> HeaderFlyweight<'a> {
+        HeaderFlyweight::new(self.buffer)
+    }
+    pub fn term_offset(&self) -> i32 {
+        self.buffer.get_i32(SETUP_TERM_OFFSET_FIELD_OFFSET)
+    }
+    pub fn set_term_offset(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SETUP_TERM_OFFSET_FIELD_OFFSET, v);
+        self
+    }
+    pub fn session_id(&self) -> i32 {
+        self.buffer.get_i32(SETUP_SESSION_ID_FIELD_OFFSET)
+    }
+    pub fn set_session_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SETUP_SESSION_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn stream_id(&self) -> i32 {
+        self.buffer.get_i32(SETUP_STREAM_ID_FIELD_OFFSET)
+    }
+    pub fn set_stream_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SETUP_STREAM_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn initial_term_id(&self) -> i32 {
+        self.buffer.get_i32(SETUP_INITIAL_TERM_ID_FIELD_OFFSET)
+    }
+    pub fn set_initial_term_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SETUP_INITIAL_TERM_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn active_term_id(&self) -> i32 {
+        self.buffer.get_i32(SETUP_ACTIVE_TERM_ID_FIELD_OFFSET)
+    }
+    pub fn set_active_term_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SETUP_ACTIVE_TERM_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn term_length(&self) -> i32 {
+        self.buffer.get_i32(SETUP_TERM_LENGTH_FIELD_OFFSET)
+    }
+    pub fn set_term_length(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SETUP_TERM_LENGTH_FIELD_OFFSET, v);
+        self
+    }
+    pub fn mtu_length(&self) -> i32 {
+        self.buffer.get_i32(SETUP_MTU_FIELD_OFFSET)
+    }
+    pub fn set_mtu_length(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SETUP_MTU_FIELD_OFFSET, v);
+        self
+    }
+    pub fn ttl(&self) -> i32 {
+        self.buffer.get_i32(SETUP_TTL_FIELD_OFFSET)
+    }
+    pub fn set_ttl(&self, v: i32) -> &Self {
+        self.buffer.put_i32(SETUP_TTL_FIELD_OFFSET, v);
+        self
+    }
+}
+
+/// RTT measurement frame: session@8, stream@12, echoTimestamp@16, receptionDelta@24,
+/// receiverId@32. Header length 40.
+pub const RTTM_SESSION_ID_FIELD_OFFSET: usize = 8;
+pub const RTTM_STREAM_ID_FIELD_OFFSET: usize = 12;
+pub const RTTM_ECHO_TIMESTAMP_FIELD_OFFSET: usize = 16;
+pub const RTTM_RECEPTION_DELTA_FIELD_OFFSET: usize = 24;
+pub const RTTM_RECEIVER_ID_FIELD_OFFSET: usize = 32;
+/// Length of the RTT measurement header (40 bytes).
+pub const RTTM_HEADER_LENGTH: usize = 40;
+
+/// Flyweight over an RTT measurement frame.
+#[derive(Copy, Clone)]
+pub struct RttMeasurementFlyweight<'a> {
+    buffer: AtomicBuffer<'a>,
+}
+
+impl<'a> RttMeasurementFlyweight<'a> {
+    pub fn new(buffer: AtomicBuffer<'a>) -> Self {
+        Self { buffer }
+    }
+    pub fn header(&self) -> HeaderFlyweight<'a> {
+        HeaderFlyweight::new(self.buffer)
+    }
+    pub fn session_id(&self) -> i32 {
+        self.buffer.get_i32(RTTM_SESSION_ID_FIELD_OFFSET)
+    }
+    pub fn set_session_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(RTTM_SESSION_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn stream_id(&self) -> i32 {
+        self.buffer.get_i32(RTTM_STREAM_ID_FIELD_OFFSET)
+    }
+    pub fn set_stream_id(&self, v: i32) -> &Self {
+        self.buffer.put_i32(RTTM_STREAM_ID_FIELD_OFFSET, v);
+        self
+    }
+    pub fn echo_timestamp(&self) -> i64 {
+        self.buffer.get_i64(RTTM_ECHO_TIMESTAMP_FIELD_OFFSET)
+    }
+    pub fn set_echo_timestamp(&self, v: i64) -> &Self {
+        self.buffer.put_i64(RTTM_ECHO_TIMESTAMP_FIELD_OFFSET, v);
+        self
+    }
+    pub fn reception_delta(&self) -> i64 {
+        self.buffer.get_i64(RTTM_RECEPTION_DELTA_FIELD_OFFSET)
+    }
+    pub fn set_reception_delta(&self, v: i64) -> &Self {
+        self.buffer.put_i64(RTTM_RECEPTION_DELTA_FIELD_OFFSET, v);
+        self
+    }
+    pub fn receiver_id(&self) -> i64 {
+        self.buffer.get_i64(RTTM_RECEIVER_ID_FIELD_OFFSET)
+    }
+    pub fn set_receiver_id(&self, v: i64) -> &Self {
+        self.buffer.put_i64(RTTM_RECEIVER_ID_FIELD_OFFSET, v);
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,5 +885,63 @@ mod tests {
         assert_eq!(error.error_code(), 3);
         assert_eq!(error.error_message(), "boom");
         assert_eq!(error.frame_length(), (ERROR_HEADER_LENGTH + 4) as i32);
+    }
+
+    #[test]
+    fn should_round_trip_status_message_frame() {
+        let mut bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        sm.header()
+            .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+            .set_version(CURRENT_VERSION)
+            .set_flags(0)
+            .set_header_type(HDR_TYPE_SM);
+        sm.set_session_id(11)
+            .set_stream_id(22)
+            .set_consumption_term_id(3)
+            .set_consumption_term_offset(64)
+            .set_receiver_window_length(65536)
+            .set_receiver_id(0xDEAD_BEEF);
+
+        let reader = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        assert_eq!(reader.header().header_type(), HDR_TYPE_SM);
+        assert_eq!(reader.header().frame_length(), 36);
+        assert_eq!(reader.session_id(), 11);
+        assert_eq!(reader.stream_id(), 22);
+        assert_eq!(reader.consumption_term_id(), 3);
+        assert_eq!(reader.consumption_term_offset(), 64);
+        assert_eq!(reader.receiver_window_length(), 65536);
+        assert_eq!(reader.receiver_id(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn should_round_trip_nak_and_setup_frames() {
+        let mut nak_bytes = [0u8; NAK_HEADER_LENGTH];
+        let nak = NakFlyweight::new(AtomicBuffer::new(&mut nak_bytes));
+        nak.header().set_header_type(HDR_TYPE_NAK);
+        nak.set_session_id(1)
+            .set_stream_id(2)
+            .set_term_id(3)
+            .set_term_offset(128)
+            .set_length(256);
+        let nr = NakFlyweight::new(AtomicBuffer::new(&mut nak_bytes));
+        assert_eq!(nr.header().header_type(), HDR_TYPE_NAK);
+        assert_eq!((nr.term_offset(), nr.length()), (128, 256));
+
+        let mut setup_bytes = [0u8; SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup.header().set_header_type(HDR_TYPE_SETUP);
+        setup
+            .set_term_offset(0)
+            .set_session_id(7)
+            .set_stream_id(8)
+            .set_initial_term_id(100)
+            .set_active_term_id(100)
+            .set_term_length(1 << 16)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+        let sr = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        assert_eq!(sr.header().header_type(), HDR_TYPE_SETUP);
+        assert_eq!((sr.term_length(), sr.mtu_length()), (1 << 16, 1408));
     }
 }

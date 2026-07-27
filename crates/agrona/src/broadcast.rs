@@ -15,8 +15,10 @@ pub const TAIL_INTENT_COUNTER_OFFSET: usize = 0;
 pub const TAIL_COUNTER_OFFSET: usize = 8;
 /// Offset of the latest message sequence counter in the trailer.
 pub const LATEST_COUNTER_OFFSET: usize = 16;
-/// Total length of the trailer at the end of the broadcast buffer.
-pub const TRAILER_LENGTH: usize = 1024;
+/// Total length of the trailer at the end of the broadcast buffer. The three counters are
+/// packed (no inter-field padding, per vendor `aeron_broadcast_descriptor`); the trailer as a
+/// whole is one double cache line.
+pub const TRAILER_LENGTH: usize = crate::ring_buffer::CACHE_LINE_LENGTH * 2;
 
 /// A single-writer broadcast transmitter over an [`AtomicBuffer`].
 #[derive(Clone)]

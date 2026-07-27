@@ -11,6 +11,7 @@
 //! from the v0.0.4 client milestone.
 
 pub mod buffer_builder;
+pub mod cnc_file;
 pub mod command;
 pub mod conductor;
 pub mod context;

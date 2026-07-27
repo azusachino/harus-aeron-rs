@@ -12,3 +12,7 @@ aeron-client.workspace = true
 aeron-archive.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+

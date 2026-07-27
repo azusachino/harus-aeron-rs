@@ -25,6 +25,9 @@ pub const TERM_MAX_LENGTH: i32 = 1024 * 1024 * 1024;
 pub const PAGE_MIN_SIZE: i32 = 4 * 1024;
 pub const PAGE_MAX_SIZE: i32 = 1024 * 1024 * 1024;
 
+// Log metadata field offsets follow vendor `io.aeron.logbuffer.LogBufferDescriptor`, whose
+// source is `vendor/aeron/aeron-client/src/main/java/io/aeron/logbuffer/LogBufferDescriptor.java`
+// (`PADDING_SIZE = 64`). Do not infer these from the Rust cache-line padding used elsewhere.
 pub const LOG_MTU_LENGTH_OFFSET: usize = 272;
 pub const LOG_TERM_LENGTH_OFFSET: usize = 276;
 pub const LOG_PAGE_SIZE_OFFSET: usize = 280;
@@ -139,6 +142,22 @@ pub fn compute_position(
 }
 
 pub const LOG_IS_CONNECTED_OFFSET: usize = 136;
+
+/// Offset of the shared end-of-stream position marker.
+///
+/// Matches vendored `LogBufferDescriptor.LOG_END_OF_STREAM_POSITION_OFFSET`.
+pub const LOG_END_OF_STREAM_POSITION_OFFSET: usize = 128;
+
+/// Position used until an EOS frame has been observed and rebuilt.
+pub const NO_END_OF_STREAM_POSITION: i64 = i64::MAX;
+
+pub fn end_of_stream_position(metadata_buffer: &AtomicBuffer) -> i64 {
+    metadata_buffer.get_i64_volatile(LOG_END_OF_STREAM_POSITION_OFFSET)
+}
+
+pub fn set_end_of_stream_position(metadata_buffer: &AtomicBuffer, position: i64) {
+    metadata_buffer.put_i64_ordered(LOG_END_OF_STREAM_POSITION_OFFSET, position);
+}
 
 pub fn is_connected(metadata_buffer: &AtomicBuffer) -> bool {
     metadata_buffer.get_i32_volatile(LOG_IS_CONNECTED_OFFSET) == 1
@@ -738,6 +757,23 @@ impl TermReader {
 /// Offset at which default frame headers begin in the metadata buffer.
 pub const LOG_DEFAULT_FRAME_HEADER_OFFSET: usize = 320;
 
+/// Offset of the default-frame-header length field in the log metadata.
+pub const LOG_DEFAULT_FRAME_HEADER_LENGTH_OFFSET: usize = 268;
+
+/// Store the default frame-header template into the log metadata and record its length.
+///
+/// The publication's `HeaderWriter` copies this template into every frame it appends, so the
+/// driver seeds it with the DATA type plus session/stream ids when it creates a log.
+pub fn store_default_frame_header(log_metadata_buffer: &AtomicBuffer, header: &AtomicBuffer) {
+    log_metadata_buffer.put_i32(LOG_DEFAULT_FRAME_HEADER_LENGTH_OFFSET, HEADER_LENGTH);
+    log_metadata_buffer.put_bytes_from(
+        LOG_DEFAULT_FRAME_HEADER_OFFSET,
+        header,
+        0,
+        HEADER_LENGTH as usize,
+    );
+}
+
 /// Store/apply the default header template to a term buffer at `term_offset`.
 pub fn apply_default_header(
     log_metadata_buffer: &AtomicBuffer,
@@ -856,9 +892,8 @@ impl TermGapFiller {
 
 /// Offset at which initial term ID is stored in metadata buffer.
 ///
-/// Mirrors upstream `LogBufferDescriptor.LOG_INITIAL_TERM_ID_OFFSET` (`PADDING_SIZE * 4 +
-/// SIZE_OF_LONG` = 264). Must NOT collide with `TERM_TAIL_COUNTERS_OFFSET`'s 24-byte span
-/// (partition 2's raw tail sits at byte offset 16) or with `LOG_ACTIVE_TERM_COUNT_OFFSET` (24).
+/// Mirrors upstream `LogBufferDescriptor.LOG_INITIAL_TERM_ID_OFFSET`
+/// (`PADDING_SIZE * 4 + SIZE_OF_LONG` with `PADDING_SIZE = 64`, i.e. `256 + 8 = 264`).
 pub const LOG_INITIAL_TERM_ID_OFFSET: usize = 264;
 
 /// Calculate the number of position bits to shift for a given term length.

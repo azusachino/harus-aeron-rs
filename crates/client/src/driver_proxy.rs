@@ -5,8 +5,8 @@ use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::command::{
-    DestinationMessageFlyweight, PublicationMessageFlyweight, RemoveMessageFlyweight,
-    SubscriptionMessageFlyweight, TerminateDriverFlyweight,
+    CounterMessageFlyweight, DestinationMessageFlyweight, PublicationMessageFlyweight,
+    RemoveMessageFlyweight, SubscriptionMessageFlyweight, TerminateDriverFlyweight,
 };
 use crate::error::{AeronError, Result};
 
@@ -175,6 +175,52 @@ impl<'a> DriverProxy<'a> {
         Ok(correlation_id)
     }
 
+    /// Add a client-owned counter and return its registration correlation id.
+    pub fn add_counter(&self, type_id: i32, key: &[u8], label: &str) -> Result<i64> {
+        let correlation_id = self.next_correlation_id();
+        let length = crate::command::KEY_BUFFER_OFFSET + key.len() + 4 + label.len();
+        let mut buf = vec![0u8; length];
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = CounterMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(correlation_id);
+        flyweight.set_type_id(type_id);
+        flyweight.set_key_buffer(key);
+        flyweight.set_label(label);
+
+        let written = self
+            .to_driver_ring_buffer
+            .write(ADD_COUNTER, &atomic_buf, 0, length)?;
+        if !written {
+            return Err(AeronError::CommandWriteFailed(
+                "failed to write add counter command".to_string(),
+            ));
+        }
+        Ok(correlation_id)
+    }
+
+    /// Remove a client-owned counter by its add-counter registration id.
+    pub fn remove_counter(&self, registration_id: i64) -> Result<i64> {
+        let correlation_id = self.next_correlation_id();
+        let length = RemoveMessageFlyweight::length();
+        let mut buf = vec![0u8; length];
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = RemoveMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(correlation_id);
+        flyweight.set_registration_id(registration_id);
+
+        let written = self
+            .to_driver_ring_buffer
+            .write(REMOVE_COUNTER, &atomic_buf, 0, length)?;
+        if !written {
+            return Err(AeronError::CommandWriteFailed(
+                "failed to write remove counter command".to_string(),
+            ));
+        }
+        Ok(correlation_id)
+    }
+
     /// Tell the media driver that this client is closing.
     pub fn client_close(&self) -> Result<()> {
         let mut buf = vec![0u8; crate::command::CORRELATED_MESSAGE_HEADER_LENGTH];
@@ -286,6 +332,48 @@ impl<'a> DriverProxy<'a> {
             ));
         }
 
+        Ok(correlation_id)
+    }
+
+    pub fn add_receive_destination(
+        &self,
+        registration_id: i64,
+        endpoint_channel: &str,
+    ) -> Result<i64> {
+        self.write_destination_command(ADD_RCV_DESTINATION, registration_id, endpoint_channel)
+    }
+
+    pub fn remove_receive_destination(
+        &self,
+        registration_id: i64,
+        endpoint_channel: &str,
+    ) -> Result<i64> {
+        self.write_destination_command(REMOVE_RCV_DESTINATION, registration_id, endpoint_channel)
+    }
+
+    fn write_destination_command(
+        &self,
+        message_type: i32,
+        registration_id: i64,
+        endpoint_channel: &str,
+    ) -> Result<i64> {
+        let correlation_id = self.next_correlation_id();
+        let length = DestinationMessageFlyweight::compute_length(endpoint_channel.len());
+        let mut buf = vec![0u8; length];
+        let atomic_buf = AtomicBuffer::new(&mut buf);
+        let flyweight = DestinationMessageFlyweight::new(atomic_buf, 0);
+        flyweight.set_client_id(self.client_id);
+        flyweight.set_correlation_id(correlation_id);
+        flyweight.set_registration_correlation_id(registration_id);
+        flyweight.set_channel(endpoint_channel);
+        if !self
+            .to_driver_ring_buffer
+            .write(message_type, &atomic_buf, 0, length)?
+        {
+            return Err(AeronError::CommandWriteFailed(
+                "failed to write receive destination command".to_string(),
+            ));
+        }
         Ok(correlation_id)
     }
 

@@ -6,15 +6,22 @@
 use crate::atomic_buffer::AtomicBuffer;
 use crate::error::{AgronaError, Result};
 
-/// Length of each metadata record in bytes.
-pub const METADATA_LENGTH: usize = 1024;
-/// Length of each counter value in bytes (64-byte padded to avoid false sharing).
-pub const COUNTER_LENGTH: usize = 64;
+// Record layout mirrors vendor `aeron_counters_manager.h` / `aeronc.h` (release/1.50.x).
+//
+// Metadata record (512 B): state@0, type_id@4, free_for_reuse_deadline_ms@8,
+//   key@16 [112 B], label_length@128, label@132 [380 B].
+// Value record (128 B, two cache lines): counter_value@0, registration_id@8,
+//   owner_id@16, reference_id@24, padding.
 
-/// Maximum length of key bytes in a metadata record.
-pub const MAX_KEY_LENGTH: usize = 512;
-/// Maximum length of label string in a metadata record.
-pub const MAX_LABEL_LENGTH: usize = 460;
+/// Length of each metadata record in bytes (vendor: 2 * cache line).
+pub const METADATA_LENGTH: usize = 512;
+/// Length of each counter value record in bytes (vendor: 2 cache lines, false-sharing pad).
+pub const COUNTER_LENGTH: usize = 128;
+
+/// Size of the key region in a metadata record.
+pub const MAX_KEY_LENGTH: usize = 112;
+/// Size of the label region (4-byte length prefix + up to 380 characters).
+pub const MAX_LABEL_LENGTH: usize = 384;
 
 /// State indicating the counter record slot is unused.
 pub const RECORD_UNUSED: i32 = 0;
@@ -27,10 +34,21 @@ pub const RECORD_RECLAIMED: i32 = -1;
 pub const STATE_OFFSET: usize = 0;
 /// Offset of type ID in metadata record.
 pub const TYPE_ID_OFFSET: usize = 4;
+/// Offset of the free-for-reuse deadline (ms) in metadata record.
+pub const FREE_FOR_REUSE_DEADLINE_OFFSET: usize = 8;
 /// Offset of key length and data in metadata record.
-pub const KEY_OFFSET: usize = 8;
+pub const KEY_OFFSET: usize = 16;
 /// Offset of label length and string in metadata record.
 pub const LABEL_OFFSET: usize = KEY_OFFSET + MAX_KEY_LENGTH;
+
+/// Offset of the counter value within a value record.
+pub const COUNTER_VALUE_OFFSET: usize = 0;
+/// Offset of the registration id within a value record.
+pub const REGISTRATION_ID_OFFSET: usize = 8;
+/// Offset of the owner id within a value record.
+pub const OWNER_ID_OFFSET: usize = 16;
+/// Offset of the reference id within a value record.
+pub const REFERENCE_ID_OFFSET: usize = 24;
 
 /// A handle to an individual 64-bit atomic counter within a values buffer.
 #[derive(Clone)]

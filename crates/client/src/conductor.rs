@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use agrona::AtomicBuffer;
 
+use crate::cnc_file::{
+    COUNTER_METADATA_LENGTH, COUNTER_RECORD_ALLOCATED, COUNTER_VALUE_LENGTH, CncFile,
+};
 use crate::driver_events::{DriverEvent, DriverEventsAdapter};
 use crate::driver_proxy::DriverProxy;
 use crate::error::{AeronError, Result};
@@ -44,6 +47,9 @@ pub struct ClientConductor<'a> {
     publications: HashMap<i64, ConcurrentPublication>,
     subscriptions: HashMap<i64, Subscription>,
     counter_values: HashMap<i32, Arc<AtomicI64>>,
+    /// CnC counter slots mirrored into the stable Arc handles used by publications and images.
+    cnc_counter_offsets: HashMap<i32, usize>,
+    cnc_file: Option<CncFile>,
     log_buffers: HashMap<String, LogBuffers>,
     is_closed: bool,
     timed_out: bool,
@@ -68,6 +74,8 @@ impl<'a> ClientConductor<'a> {
             publications: HashMap::new(),
             subscriptions: HashMap::new(),
             counter_values: HashMap::new(),
+            cnc_counter_offsets: HashMap::new(),
+            cnc_file: None,
             log_buffers: HashMap::new(),
             is_closed: false,
             timed_out: false,
@@ -91,6 +99,17 @@ impl<'a> ClientConductor<'a> {
     ) -> Result<Self> {
         let mut conductor = Self::new(driver_proxy);
         conductor.event_adapter = Some(DriverEventsAdapter::new(to_client_buffer)?);
+        Ok(conductor)
+    }
+
+    /// Construct a client conductor directly over a mapped CnC file.
+    ///
+    /// This is the cross-process path used by a real Aeron client: counter IDs in driver events
+    /// refer to Agrona slots in `cnc.dat`, rather than to Rust-owned `Arc<AtomicI64>` values.
+    /// Layout authority is the vendored `CncFileDescriptor.java` plus Agrona counters source.
+    pub fn with_cnc_file(driver_proxy: DriverProxy<'a>, cnc: CncFile) -> Result<Self> {
+        let mut conductor = Self::with_event_buffer(driver_proxy, cnc.to_clients_buffer())?;
+        conductor.cnc_file = Some(cnc);
         Ok(conductor)
     }
 
@@ -136,6 +155,48 @@ impl<'a> ClientConductor<'a> {
         self.counter_values.insert(counter_id, value);
     }
 
+    fn bind_cnc_counter(&mut self, counter_id: i32) {
+        let Some(cnc) = &self.cnc_file else {
+            return;
+        };
+        if counter_id < 0 || self.counter_values.contains_key(&counter_id) {
+            return;
+        }
+        let id = counter_id as usize;
+        let metadata_offset = id.saturating_mul(COUNTER_METADATA_LENGTH);
+        let value_offset = id.saturating_mul(COUNTER_VALUE_LENGTH);
+        if metadata_offset + 4 > cnc.counters_metadata_length()
+            || value_offset + 8 > cnc.counters_values_length()
+        {
+            return;
+        }
+        let metadata = cnc.counters_metadata_buffer();
+        if metadata.get_i32_volatile(metadata_offset) != COUNTER_RECORD_ALLOCATED {
+            return;
+        }
+        let values = cnc.counters_values_buffer();
+        self.counter_values.insert(
+            counter_id,
+            Arc::new(AtomicI64::new(values.get_i64_volatile(value_offset))),
+        );
+        self.cnc_counter_offsets.insert(counter_id, value_offset);
+    }
+
+    fn sync_cnc_counters(&mut self) {
+        let Some(cnc) = &self.cnc_file else {
+            return;
+        };
+        let values = cnc.counters_values_buffer();
+        for (&counter_id, &offset) in &self.cnc_counter_offsets {
+            if let Some(value) = self.counter_values.get(&counter_id) {
+                value.store(
+                    values.get_i64_volatile(offset),
+                    std::sync::atomic::Ordering::Release,
+                );
+            }
+        }
+    }
+
     /// Register an already-open log buffer by the name used in a driver event. This is useful
     /// for embedded drivers; normal clients fall back to opening the event's file path.
     pub fn register_log_buffers(&mut self, name: impl Into<String>, buffers: LogBuffers) {
@@ -144,6 +205,7 @@ impl<'a> ClientConductor<'a> {
 
     /// Drain all currently available driver events.
     pub fn service(&mut self) -> Result<usize> {
+        self.sync_cnc_counters();
         let mut events = Vec::new();
         if let Some(adapter) = &mut self.event_adapter {
             events = adapter.receive()?;
@@ -355,14 +417,12 @@ impl<'a> ClientConductor<'a> {
         log_file_name: &str,
         exclusive: bool,
     ) -> Result<()> {
-        let pending = self
-            .pending_publications
-            .remove(&correlation_id)
-            .ok_or_else(|| {
-                AeronError::IllegalState(format!(
-                    "unknown publication correlation {correlation_id}"
-                ))
-            })?;
+        // The to-clients broadcast is shared by every client; ignore a publication-ready
+        // event for a correlation this client never registered (it belongs to another client).
+        let pending = match self.pending_publications.remove(&correlation_id) {
+            Some(pending) => pending,
+            None => return Ok(()),
+        };
         if pending.exclusive != exclusive {
             return Err(AeronError::IllegalState(format!(
                 "publication mode mismatch for correlation {correlation_id}"
@@ -375,6 +435,7 @@ impl<'a> ClientConductor<'a> {
         }
         let buffers = self.load_log_buffers(log_file_name)?;
         let initial_term_id = initial_term_id(&buffers.meta_data_buffer());
+        self.bind_cnc_counter(publication_limit_counter_id);
         let publication_limit = self
             .counter_values
             .get(&publication_limit_counter_id)
@@ -406,14 +467,11 @@ impl<'a> ClientConductor<'a> {
         correlation_id: i64,
         channel_status_counter_id: i32,
     ) -> Result<()> {
-        let pending = self
-            .pending_subscriptions
-            .remove(&correlation_id)
-            .ok_or_else(|| {
-                AeronError::IllegalState(format!(
-                    "unknown subscription correlation {correlation_id}"
-                ))
-            })?;
+        // Shared broadcast: ignore a subscription-ready event for another client's correlation.
+        let pending = match self.pending_subscriptions.remove(&correlation_id) {
+            Some(pending) => pending,
+            None => return Ok(()),
+        };
         let mut subscription =
             Subscription::new(correlation_id, pending.stream_id, pending.channel);
         subscription.set_channel_status_counter_id(channel_status_counter_id);
@@ -442,6 +500,7 @@ impl<'a> ClientConductor<'a> {
             return Ok(());
         }
         let buffers = self.load_log_buffers(log_file_name)?;
+        self.bind_cnc_counter(subscriber_position_id);
         let position = self
             .counter_values
             .get(&subscriber_position_id)
@@ -665,12 +724,15 @@ impl<'a> ClientConductor<'a> {
     }
 
     fn load_log_buffers(&self, name: &str) -> Result<LogBuffers> {
+        // A registered buffer (unit tests / in-memory scenarios) wins; otherwise map the
+        // driver-named log file `MAP_SHARED` so publisher writes are visible to this
+        // subscriber's reads (real cross-process/IPC log sharing, not a private copy).
         let buffers = self
             .log_buffers
             .get(name)
             .cloned()
             .map(Ok)
-            .unwrap_or_else(|| LogBuffers::from_file(name))?;
+            .unwrap_or_else(|| LogBuffers::map_existing(name))?;
         if self.pre_touch_mapped_memory {
             buffers.pre_touch();
         }
@@ -689,6 +751,10 @@ impl<'a> ClientConductor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cnc_file::{
+        DEFAULT_COUNTER_METADATA_LENGTH, DEFAULT_COUNTER_VALUES_LENGTH, DEFAULT_ERROR_LOG_LENGTH,
+        DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH,
+    };
     use crate::driver_proxy::{
         ADD_PUBLICATION, ADD_SUBSCRIPTION, CLIENT_CLOSE, REMOVE_PUBLICATION, REMOVE_SUBSCRIPTION,
     };
@@ -704,6 +770,47 @@ mod tests {
             ClientConductor::new(DriverProxy::new(buffer.clone(), 42)),
             buffer,
         )
+    }
+
+    #[test]
+    fn maps_and_refreshes_counters_from_cnc_file() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-client-cnc-counter-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let cnc = CncFile::create_new_with_regions(
+            &path,
+            DEFAULT_TO_DRIVER_LENGTH,
+            DEFAULT_TO_CLIENTS_LENGTH,
+            DEFAULT_COUNTER_METADATA_LENGTH,
+            DEFAULT_COUNTER_VALUES_LENGTH,
+            DEFAULT_ERROR_LOG_LENGTH,
+            10_000_000_000,
+        )
+        .unwrap();
+        cnc.write_counter_metadata(5, 1, 5, 123, "test counter")
+            .unwrap();
+
+        let ring = ManyToOneRingBuffer::new(cnc.to_driver_buffer()).unwrap();
+        let mut conductor =
+            ClientConductor::with_cnc_file(DriverProxy::new(ring, 42), cnc.clone()).unwrap();
+        conductor.bind_cnc_counter(5);
+        assert_eq!(
+            conductor.counter_values[&5].load(std::sync::atomic::Ordering::Acquire),
+            123
+        );
+
+        cnc.set_counter_value(5, 456).unwrap();
+        conductor.sync_cnc_counters();
+        assert_eq!(
+            conductor.counter_values[&5].load(std::sync::atomic::Ordering::Acquire),
+            456
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

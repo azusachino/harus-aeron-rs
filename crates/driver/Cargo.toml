@@ -15,6 +15,11 @@ path = "src/bin/aeron-driver.rs"
 agrona.workspace = true
 aeron-client.workspace = true
 tokio.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
+libc.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

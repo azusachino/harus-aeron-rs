@@ -2,7 +2,9 @@
 
 use crate::error::{AeronError, Result};
 use crate::log_buffers::LogBuffers;
-use crate::logbuffer::{Header, TermReader, index_by_position};
+use crate::logbuffer::{
+    Header, NO_END_OF_STREAM_POSITION, TermReader, end_of_stream_position, index_by_position,
+};
 use agrona::AtomicBuffer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -93,6 +95,23 @@ impl Image {
 
     pub fn is_closed(&self) -> bool {
         self.is_closed
+    }
+
+    /// Whether the subscriber has reached the publication's shared EOS position.
+    ///
+    /// Matches vendored `io.aeron.Image.isEndOfStream()` and reads the marker written by the
+    /// driver-side `PublicationImage` through the shared log metadata.
+    pub fn is_end_of_stream(&self) -> bool {
+        if self.is_closed {
+            return false;
+        }
+        let eos_position = end_of_stream_position(&self.log_buffers.meta_data_buffer());
+        eos_position != NO_END_OF_STREAM_POSITION && self.position() >= eos_position
+    }
+
+    /// Return the shared EOS position, or `i64::MAX` while the stream is still open.
+    pub fn end_of_stream_position(&self) -> i64 {
+        end_of_stream_position(&self.log_buffers.meta_data_buffer())
     }
 
     pub fn close(&mut self) {
@@ -196,6 +215,10 @@ mod tests {
         let meta_buf = AtomicBuffer::new(&mut meta_slice);
         crate::logbuffer::set_term_length(&meta_buf, TERM_MIN_LENGTH);
         crate::logbuffer::set_page_size(&meta_buf, PAGE_MIN_SIZE);
+        crate::logbuffer::set_end_of_stream_position(
+            &meta_buf,
+            crate::logbuffer::NO_END_OF_STREAM_POSITION,
+        );
         contents[meta_offset..].copy_from_slice(&meta_slice);
         LogBuffers::from_bytes(contents).unwrap()
     }
@@ -242,6 +265,13 @@ mod tests {
 
         image.set_position(TERM_MIN_LENGTH as i64).unwrap();
         assert_eq!(image.position(), TERM_MIN_LENGTH as i64);
+        assert!(!image.is_end_of_stream());
+        crate::logbuffer::set_end_of_stream_position(
+            &image.log_buffers.meta_data_buffer(),
+            TERM_MIN_LENGTH as i64,
+        );
+        assert!(image.is_end_of_stream());
+        assert_eq!(image.end_of_stream_position(), TERM_MIN_LENGTH as i64);
     }
 
     #[test]

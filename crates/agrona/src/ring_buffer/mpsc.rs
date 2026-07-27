@@ -55,6 +55,20 @@ impl<'a> ManyToOneRingBuffer<'a> {
         self.buffer.get_i64_volatile(head_offset)
     }
 
+    /// Read the consumer heartbeat timestamp stored in the shared trailer.
+    pub fn consumer_heartbeat_time(&self) -> i64 {
+        self.buffer
+            .get_i64_volatile(self.capacity + crate::ring_buffer::CONSUMER_HEARTBEAT_OFFSET)
+    }
+
+    /// Publish the consumer heartbeat timestamp stored in the shared trailer.
+    pub fn set_consumer_heartbeat_time(&self, timestamp: i64) {
+        self.buffer.put_i64_ordered(
+            self.capacity + crate::ring_buffer::CONSUMER_HEARTBEAT_OFFSET,
+            timestamp,
+        );
+    }
+
     /// Write a message into the ring buffer.
     ///
     /// Thread-safe. Returns `true` if successful, or `false` if the buffer is full.

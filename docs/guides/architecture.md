@@ -1,25 +1,49 @@
-# Architecture
+# Harus Aeron Rust System Architecture
 
-Skeleton document — fill in as each crate gains real implementation.
+`harus-aeron-rs` is a high-performance Rust reimplementation of the Aeron UDP messaging protocol, wire-compatible with upstream `aeron-io/aeron`.
 
-## Crate map
+## Component Architecture & Dependencies
 
-Mirrors upstream `aeron-io/aeron`'s actual Gradle module graph (`vendor/aeron/build.gradle`):
-`agrona` is an external dependency, not an Aeron module; `protocol`/`logbuffer`/`media`
-are packages inside `aeron-client`/`aeron-driver`, not separate modules.
+```
+[ crates/agrona ]  <--- Lock-free primitives, AtomicBuffer, RingBuffers, Counters
+       ^
+       |
+[ crates/client ]  <--- Aeron wire codecs, Header flyweights, LogBuffers, Pub/Sub
+       ^
+       +--------------------+
+       |                    |
+[ crates/driver ]   [ crates/archive ]  <--- Catalog persistent index, ControlSession
+                            ^
+                            |
+                    [ crates/cluster ]  <--- Raft ConsensusModule, ClusterNode failover
+```
 
-| Crate | Purpose | Depends on |
-|---|---|---|
-| `crates/agrona` | Ring buffer, broadcast, atomic buffer, idle strategies, counters | — |
-| `crates/client` (`aeron-client`) | Wire protocol (`protocol.rs`) + log buffer (`logbuffer.rs`) + Publication/Subscription API | `agrona` |
-| `crates/driver` (`aeron-driver`) | MediaDriver: Conductor, Sender, Receiver agents + UDP transport (`media.rs`); hosts the `aeron-driver` binary | `aeron-client`, `agrona` |
-| `crates/archive` (`aeron-archive`) | Recording, replay, catalog persistence (future) | `aeron-client` |
-| `crates/cluster` (`aeron-cluster`) | Raft consensus, replicated log (future) | `aeron-client`, `aeron-archive` |
+### Crate Boundaries
 
-## Runtime model
+1. **`agrona` (`crates/agrona`)**:
+   - Generic concurrent primitives: `AtomicBuffer`, `OneToOneRingBuffer`, `ManyToOneRingBuffer`, `BroadcastTransmitter`, `BroadcastReceiver`, `CountersManager`, `IdleStrategy`.
+2. **`aeron-client` (`crates/client`)**:
+   - Wire frame codecs: `HeaderFlyweight`, `DataHeaderFlyweight`, `SetupFlyweight`, `StatusMessageFlyweight`, `NakFlyweight`.
+   - Client structures: `LogBuffers`, `Publication`, `Subscription`.
+3. **`aeron-driver` (`crates/driver`)**:
+   - Transport layers: `UdpChannel`, `UdpChannelTransport`, `SendChannelEndpoint`, `ReceiveChannelEndpoint`, `DataTransportPoller`, `ControlTransportPoller`.
+   - Driver agents: `Sender`, `Receiver`, `DriverConductor`, `MediaDriver`.
+4. **`aeron-archive` (`crates/archive`)**:
+   - Stream recording codecs: `ControlRequestHeader`, `RecordingDescriptor`.
+   - Persistence & management: `Catalog`, `ControlSession`, `ArchiveConductor`.
+5. **`aeron-cluster` (`crates/cluster`)**:
+   - Raft protocol: `ClusterHeader`, `ClusterRole`, `ClusterMember`, `ClusterStateMachine`.
+   - Consensus agent: `ConsensusModule`, `ClusterNode`.
 
-Aeron's driver agents (Conductor/Sender/Receiver) are duty-cycle loops with
-configurable idle strategies (busy-spin, back-off, yielding), not thread-per-connection.
-`crates/driver`'s `media` submodule uses `tokio` for async UDP I/O, but the intent is
-to keep the duty-cycle model rather than fan work out across arbitrary tokio tasks —
-match the zig implementation's agent boundaries so the two stay comparable.
+## Agent & Duty Cycle Runtime Model
+
+Aeron uses explicit single-threaded agent duty cycles (`do_work()`) rather than thread-per-connection.
+
+- **`Sender`**: Transmits pending data frames from log buffers to UDP channels.
+- **`Receiver`**: Polls UDP data transport sockets and processes incoming frames.
+- **`DriverConductor`**: Coordinates client commands, image/publication allocations, and counter cleanup.
+- **`ConsensusModule`**: Drives Raft election timeouts, vote collections, and leader heartbeats.
+
+## Leader Failover & Parity Verification
+
+The `aeron-cluster` implementation resolves the stuck-failover scenario identified in `harus-aeron-zig` by maintaining strict majority quorum checks (`(len / 2) + 1`) and deterministic state transitions.

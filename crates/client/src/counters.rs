@@ -24,6 +24,8 @@ pub const SYSTEM_COUNTER_ID_POSSIBLE_TTL_ASYMMETRY: i32 = 19;
 pub const SYSTEM_COUNTER_ID_CONTROLLABLE_IDLE_IDLE: i32 = 20;
 pub const SYSTEM_COUNTER_ID_LOSS_REPORT_CHANGE: i32 = 21;
 pub const SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION: i32 = 43;
+/// Semantic version 1.0.0 of the client/driver control protocol (Java Aeron 1.50.x).
+pub const CONTROL_PROTOCOL_SEMANTIC_VERSION: i64 = 0x01_00_00_00;
 
 // Counter Type IDs
 pub const DRIVER_SUBSCRIBER_POSITION_TYPE_ID: i32 = 1;

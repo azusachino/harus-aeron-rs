@@ -68,15 +68,20 @@ Port `client/command` (2) + `client/exceptions` (1) + `client/security` (1) + cl
 root (16). **Exit: 33/33 client parity.**
 
 ### v0.0.5 — aeron-driver: Conductor/Sender/Receiver + media
-Port `driver/driver` package. **Exit: 41/41 driver parity.**
+Port the driver runtime boundary: CnC command processing, IPC and UDP data paths,
+flow control, loss recovery, and managed lifecycle. **Current: 39/41 driver test
+files resolved; the two remaining rows are explicitly in-progress because they combine
+broader conductor coverage with Java-only context executor/poller injection APIs.**
 
 ### v0.0.6 — driver/client system tests
 Real pub/sub round-trip, reconnect, multi-stream, flow control — the scenarios upstream
 puts in `aeron-system-tests` rather than the per-module unit tests. Port
 `system-tests/driver` (13) + `system-tests/security` (2) + `system-tests/test` (1) +
 the driver/client-relevant subset of system-tests root (67). **Exit: 83/83 driver/client
-system-test parity.** This is also where Java interop-smoke goes green (mirrors the zig
-repo's `INTEROP_STATUS.md` gate) — build out `deploy/interop/` here.
+system-test parity.** The current branch has focused IPC/UDP round-trip and reliability
+evidence plus Java interop smoke; the parity exit remains open. This is also where Java
+interop-smoke goes green (mirrors the zig repo's `INTEROP_STATUS.md` gate) — build out
+`deploy/interop/` here.
 
 ### v0.0.7 — aeron-archive
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
