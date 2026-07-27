@@ -11,18 +11,18 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use agrona::AtomicBuffer;
 
 use aeron_client::log_buffers::LogBuffers;
-use aeron_client::logbuffer::{
-    TermScanner, compute_position, index_by_position, position_bits_to_shift,
-};
+use aeron_client::logbuffer::{TermScanner, index_by_position, position_bits_to_shift};
 use aeron_client::protocol::{
     CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP,
-    SETUP_HEADER_LENGTH, SetupFlyweight,
+    HDR_TYPE_SM, SETUP_HEADER_LENGTH, STATUS_MESSAGE_HEADER_LENGTH, SetupFlyweight,
+    StatusMessageFlyweight,
 };
 
 use crate::error::Result;
 use crate::flow_control::calculate_retransmission_length;
 use crate::loss_detector::StaticDelayGenerator;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
+use crate::multicast_flow_control::NetworkFlowControl;
 use crate::retransmit_handler::{RetransmitFlowControl, RetransmitHandler};
 
 /// Interval between SETUP re-sends and idle heartbeats (100 ms), matching upstream defaults.
@@ -87,6 +87,8 @@ pub struct NetworkPublication {
     publication_limit: Arc<AtomicI64>,
     retransmit_receiver_window_multiple: i32,
     retransmit_handler: RetransmitHandler,
+    /// The channel's selected `fc=` strategy (max/min/tagged), live per-receiver state included.
+    flow_control: NetworkFlowControl,
 }
 
 impl NetworkPublication {
@@ -102,7 +104,7 @@ impl NetworkPublication {
         mtu_length: usize,
         publication_limit: Arc<AtomicI64>,
         retransmit_receiver_window_multiple: i32,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_with_position(
             registration_id,
             log_buffers,
@@ -131,10 +133,15 @@ impl NetworkPublication {
         initial_position: i64,
         publication_limit: Arc<AtomicI64>,
         retransmit_receiver_window_multiple: i32,
-    ) -> Self {
+    ) -> Result<Self> {
         let term_length = log_buffers.term_length();
         let has_group_semantics = endpoint.udp_channel().has_group_semantics();
-        Self {
+        let flow_control = NetworkFlowControl::new_for_channel(
+            endpoint.udp_channel(),
+            stream_id,
+            registration_id,
+        )?;
+        Ok(Self {
             registration_id,
             log_buffers,
             endpoint,
@@ -161,7 +168,8 @@ impl NetworkPublication {
                 16,
                 Arc::new(AtomicI64::new(0)),
             ),
-        }
+            flow_control,
+        })
     }
 
     pub fn registration_id(&self) -> i64 {
@@ -211,18 +219,42 @@ impl NetworkPublication {
         let mut work = self.endpoint.poll_control()?;
         for status in self.endpoint.take_status_messages() {
             if status.session_id == self.session_id && status.stream_id == self.stream_id {
-                let consumption_position = compute_position(
-                    status.term_id,
-                    status.term_offset,
-                    self.position_bits_to_shift as i32,
-                    self.initial_term_id,
-                );
-                let new_receiver_limit = consumption_position
-                    .saturating_add(status.receiver_window_length.max(0) as i64);
+                // The channel endpoint already decoded the wire frame into plain fields; rebuild
+                // a flyweight view over them so the selected flow-control strategy (which mirrors
+                // vendor's flyweight-based API) can read it exactly as it would off the wire.
+                let mut scratch = [0u8; STATUS_MESSAGE_HEADER_LENGTH + 8];
+                let length = if status.group_tag.is_some() {
+                    scratch.len()
+                } else {
+                    STATUS_MESSAGE_HEADER_LENGTH
+                };
+                let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut scratch[..length]));
+                sm.header()
+                    .set_frame_length(length as i32)
+                    .set_version(CURRENT_VERSION)
+                    .set_flags(status.flags)
+                    .set_header_type(HDR_TYPE_SM);
+                sm.set_session_id(status.session_id)
+                    .set_stream_id(status.stream_id)
+                    .set_consumption_term_id(status.term_id)
+                    .set_consumption_term_offset(status.term_offset)
+                    .set_receiver_window_length(status.receiver_window_length)
+                    .set_receiver_id(status.receiver_id);
+                if let Some(group_tag) = status.group_tag {
+                    sm.set_group_tag(Some(group_tag));
+                }
+
                 // SETUP is periodically re-sent and can elicit an older offset-0 SM after a
                 // newer data-progress SM. A reliable publication must not move its send limit
-                // backwards because of that stale control frame.
-                self.receiver_limit = self.receiver_limit.max(new_receiver_limit);
+                // backwards because of that stale control frame -- every strategy's
+                // on_status_message is itself monotonic against the sender_limit it's handed.
+                self.receiver_limit = self.flow_control.on_status_message(
+                    sm,
+                    self.receiver_limit,
+                    self.initial_term_id,
+                    self.position_bits_to_shift as i32,
+                    now_ns,
+                );
                 self.status_received = true;
                 self.update_publication_limit();
                 work += 1;
@@ -313,6 +345,11 @@ impl NetworkPublication {
             self.setup_sent = false;
             work += 1;
         }
+        // Expire receivers min/tagged flow control has not heard from within their timeout,
+        // independent of whether an SM arrived this cycle -- a receiver that stops sending
+        // status messages entirely (crash, network partition) must eventually stop constraining
+        // the sender's window, not hold it hostage forever.
+        self.receiver_limit = self.flow_control.on_idle(now_ns, self.receiver_limit);
         Ok(work)
     }
 
@@ -564,7 +601,8 @@ mod tests {
             1408,
             Arc::new(AtomicI64::new(0)),
             16,
-        );
+        )
+        .unwrap();
 
         assert!(publication.add_destination(second));
         assert!(!publication.add_destination(second));
@@ -610,7 +648,8 @@ mod tests {
             1408,
             publication_limit.clone(),
             16,
-        );
+        )
+        .unwrap();
         publication.status_received = true;
         publication.receiver_limit = TERM_MIN_LENGTH as i64 + 128;
         let term_buffers = publication.log_buffers.duplicate_term_buffers();

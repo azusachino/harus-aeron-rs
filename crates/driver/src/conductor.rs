@@ -1129,7 +1129,7 @@ impl DriverConductor {
                 initial_position,
                 publication_limit,
                 retransmit_receiver_window_multiple,
-            ));
+            )?);
         Ok(())
     }
 
