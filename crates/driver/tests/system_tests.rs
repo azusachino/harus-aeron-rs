@@ -6,7 +6,9 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 use aeron_client::conductor::ClientConductor;
-use aeron_client::driver_events::{ON_OPERATION_SUCCESS, OperationSucceededFlyweight};
+use aeron_client::driver_events::{
+    ErrorResponseFlyweight, ON_ERROR, ON_OPERATION_SUCCESS, OperationSucceededFlyweight,
+};
 use aeron_client::driver_proxy::DriverProxy;
 use aeron_client::fragment_assembler::FragmentAssembler;
 use aeron_client::logbuffer::TERM_MIN_LENGTH;
@@ -1252,4 +1254,124 @@ fn one_client_publishes_and_subscribes_two_independent_streams_concurrently() {
     // though both were registered by the same client and published back to back.
     assert_eq!(poll_one(&mut subscriber, sub_a), b"stream-a-payload");
     assert_eq!(poll_one(&mut subscriber, sub_b), b"stream-b-payload");
+}
+
+fn last_error_correlation(events: &mut BroadcastReceiver) -> Option<i64> {
+    let mut correlation = None;
+    while events
+        .receive_next(|msg_type, buf, offset, _len| {
+            if msg_type == ON_ERROR {
+                correlation = Some(
+                    ErrorResponseFlyweight::wrap(*buf, offset).offending_command_correlation_id(),
+                );
+            }
+        })
+        .unwrap()
+    {
+        if correlation.is_some() {
+            break;
+        }
+    }
+    correlation
+}
+
+#[test]
+fn publication_with_conflicting_explicit_session_id_is_rejected() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+    let mut events = BroadcastReceiver::new(driver.cnc().to_clients_buffer()).unwrap();
+
+    // An implicit-session publication already owns this channel+stream; a second registration
+    // naming an explicit session id on the same identity is ambiguous (the first publication's
+    // auto-assigned session could already be that value) and the driver must refuse it rather
+    // than silently registering a second, possibly-colliding publication.
+    proxy.add_publication("aeron:ipc", 7001).unwrap();
+    driver.do_work().expect("register first publication");
+    assert_eq!(driver.conductor().publications().len(), 1);
+
+    let conflicting_correlation = proxy
+        .add_publication("aeron:ipc?session-id=4096", 7001)
+        .unwrap();
+    driver.do_work().expect("reject conflicting publication");
+
+    assert_eq!(
+        driver.conductor().publications().len(),
+        1,
+        "the conflicting registration must not be added"
+    );
+    assert_eq!(
+        last_error_correlation(&mut events),
+        Some(conflicting_correlation),
+        "driver must ON_ERROR the conflicting registration's own correlation id"
+    );
+}
+
+#[test]
+fn subscription_with_conflicting_reliability_is_rejected() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+    let mut events = BroadcastReceiver::new(driver.cnc().to_clients_buffer()).unwrap();
+    let channel = "aeron:udp?endpoint=127.0.0.1:0";
+
+    proxy.add_subscription(channel, 7002).unwrap();
+    driver.do_work().expect("register first subscription");
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+
+    // A second wildcard-session subscription on the same channel+stream that disagrees on
+    // reliability would leave the driver unable to give the image a single consistent loss
+    // policy, so it must be refused rather than silently coexisting.
+    let conflicting_correlation = proxy
+        .add_subscription(&format!("{channel}|reliable=false"), 7002)
+        .unwrap();
+    driver.do_work().expect("reject conflicting subscription");
+
+    assert_eq!(
+        driver.conductor().subscriptions().len(),
+        1,
+        "the conflicting registration must not be added"
+    );
+    assert_eq!(
+        last_error_correlation(&mut events),
+        Some(conflicting_correlation),
+        "driver must ON_ERROR the conflicting registration's own correlation id"
+    );
+}
+
+#[test]
+fn session_specific_subscriptions_conflict_by_session_not_by_channel() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+    let mut events = BroadcastReceiver::new(driver.cnc().to_clients_buffer()).unwrap();
+    let channel = "aeron:udp?endpoint=127.0.0.1:0";
+
+    proxy
+        .add_subscription(&format!("{channel}|session-id=1024"), 7003)
+        .unwrap();
+    driver.do_work().expect("register session 1024");
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+
+    // Same channel, same session id, disagreeing reliability: must be rejected -- two
+    // subscriptions to one session's image cannot each demand a different loss policy.
+    let conflicting_correlation = proxy
+        .add_subscription(&format!("{channel}|session-id=1024|reliable=false"), 7003)
+        .unwrap();
+    driver.do_work().expect("reject same-session conflict");
+    assert_eq!(driver.conductor().subscriptions().len(), 1);
+    assert_eq!(
+        last_error_correlation(&mut events),
+        Some(conflicting_correlation),
+        "driver must ON_ERROR a same-session reliability conflict"
+    );
+
+    // Same channel, a *different* explicit session id: conflict detection is keyed on session
+    // identity, not just channel+stream, so this must be allowed to coexist.
+    proxy
+        .add_subscription(&format!("{channel}|session-id=2048|reliable=false"), 7003)
+        .unwrap();
+    driver.do_work().expect("register the other session");
+    assert_eq!(
+        driver.conductor().subscriptions().len(),
+        2,
+        "a different session id must not be treated as conflicting"
+    );
 }
