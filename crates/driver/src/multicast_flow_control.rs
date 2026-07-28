@@ -411,6 +411,101 @@ impl TaggedMulticastFlowControl {
     }
 }
 
+/// A network publication's live flow-control state, dispatching to whichever strategy its
+/// channel selected. `Max` carries no extra state: it is exactly the previous unconditional
+/// `receiver_limit.max(new_receiver_limit)` behavior, now made one option among three instead of
+/// the only one every publication got regardless of its `fc=` parameter.
+pub enum NetworkFlowControl {
+    Max,
+    Min(MinMulticastFlowControl),
+    Tagged(TaggedMulticastFlowControl),
+}
+
+impl NetworkFlowControl {
+    /// Resolve `udp_channel`'s `fc=` strategy and initialize its state, using vendor default
+    /// group-min-size/receiver-timeout context values (the channel's own `fc=g:.../t:...`
+    /// options can still override them per `initialize`).
+    pub fn new_for_channel(
+        udp_channel: &UdpChannel,
+        stream_id: i32,
+        registration_id: i64,
+    ) -> Result<Self> {
+        let strategy = DefaultMulticastFlowControlSupplier::new().new_instance(
+            udp_channel,
+            stream_id,
+            registration_id,
+        )?;
+        Ok(match strategy {
+            MulticastFlowControlStrategy::Max => NetworkFlowControl::Max,
+            MulticastFlowControlStrategy::Min => {
+                let mut min = MinMulticastFlowControl::new();
+                min.initialize(
+                    udp_channel,
+                    DEFAULT_GROUP_MIN_SIZE,
+                    DEFAULT_RECEIVER_TIMEOUT_NS,
+                )?;
+                NetworkFlowControl::Min(min)
+            }
+            MulticastFlowControlStrategy::Tagged => {
+                let mut tagged = TaggedMulticastFlowControl::new();
+                tagged.initialize(
+                    udp_channel,
+                    DEFAULT_GROUP_MIN_SIZE,
+                    DEFAULT_RECEIVER_TIMEOUT_NS,
+                )?;
+                NetworkFlowControl::Tagged(tagged)
+            }
+        })
+    }
+
+    /// Compute the sender's new position limit from a received Status Message.
+    pub fn on_status_message(
+        &mut self,
+        status_message: StatusMessageFlyweight<'_>,
+        sender_limit: i64,
+        initial_term_id: i32,
+        position_bits_to_shift: i32,
+        time_ns: i64,
+    ) -> i64 {
+        match self {
+            NetworkFlowControl::Max => {
+                let position = compute_position(
+                    status_message.consumption_term_id(),
+                    status_message.consumption_term_offset(),
+                    position_bits_to_shift,
+                    initial_term_id,
+                );
+                let window = i64::from(status_message.receiver_window_length().max(0));
+                sender_limit.max(position.saturating_add(window))
+            }
+            NetworkFlowControl::Min(min) => min.on_status_message(
+                status_message,
+                sender_limit,
+                initial_term_id,
+                position_bits_to_shift,
+                time_ns,
+            ),
+            NetworkFlowControl::Tagged(tagged) => tagged.on_status_message(
+                status_message,
+                sender_limit,
+                initial_term_id,
+                position_bits_to_shift,
+                time_ns,
+            ),
+        }
+    }
+
+    /// Expire receivers that have gone quiet past their timeout, matching real disconnect
+    /// detection for `Min`/`Tagged`. A no-op for `Max`, which tracks no per-receiver state.
+    pub fn on_idle(&mut self, time_ns: i64, sender_limit: i64) -> i64 {
+        match self {
+            NetworkFlowControl::Max => sender_limit,
+            NetworkFlowControl::Min(min) => min.on_idle(time_ns, sender_limit),
+            NetworkFlowControl::Tagged(tagged) => tagged.on_idle(time_ns, sender_limit),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Faithful port of

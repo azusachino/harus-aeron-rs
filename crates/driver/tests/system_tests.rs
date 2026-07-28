@@ -1375,3 +1375,129 @@ fn session_specific_subscriptions_conflict_by_session_not_by_channel() {
         "a different session id must not be treated as conflicting"
     );
 }
+
+#[test]
+fn repeated_driver_errors_are_deduplicated_in_the_cnc_error_log() {
+    let mut driver = MediaDriver::launch(Configuration::default()).expect("launch");
+    let proxy = client_proxy(&driver, 1);
+    let channel = "aeron:udp?endpoint=127.0.0.1:0";
+    const STREAM_ID: i32 = 7004;
+
+    proxy.add_subscription(channel, STREAM_ID).unwrap();
+    driver.do_work().expect("register first subscription");
+
+    // Trigger the exact same conflict twice: the driver's own error log must summarise these as
+    // one distinct record with observation_count == 2, not two separate log entries, matching
+    // vendor DistinctErrorLog semantics.
+    proxy
+        .add_subscription(&format!("{channel}|reliable=false"), STREAM_ID)
+        .unwrap();
+    driver
+        .do_work()
+        .expect("reject first conflicting registration");
+    proxy
+        .add_subscription(&format!("{channel}|reliable=false"), STREAM_ID)
+        .unwrap();
+    driver
+        .do_work()
+        .expect("reject second conflicting registration");
+
+    let error_log_buffer = driver.conductor().cnc().error_log_buffer();
+    let mut records: Vec<(i32, i64, i64, Vec<u8>)> = Vec::new();
+    let entries = aeron_client::error_log::read_error_log(
+        &error_log_buffer,
+        0,
+        |count, first, last, desc| {
+            records.push((count, first, last, desc.to_vec()));
+        },
+    );
+
+    assert_eq!(
+        entries, 1,
+        "the two identical conflicts must collapse into a single distinct-error record"
+    );
+    assert_eq!(
+        records[0].0, 2,
+        "observation_count must reflect both occurrences"
+    );
+    assert!(
+        records[0].1 <= records[0].2,
+        "first_observation_timestamp <= last"
+    );
+    let description = String::from_utf8(records[0].3.clone()).unwrap();
+    assert!(
+        description.contains("conflicting reliable and unreliable subscriptions"),
+        "unexpected description: {description}"
+    );
+}
+
+#[test]
+fn min_flow_control_gates_the_sender_on_the_slowest_receiver() {
+    const STREAM_ID: i32 = 9002;
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let channel = format!(
+        "aeron:udp?endpoint=127.0.0.1:{}|fc=min",
+        receiver.local_addr().unwrap().port()
+    );
+
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    driver
+        .do_work()
+        .expect("register publication and send setup");
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    let _ = publisher.publication(pub_reg).expect("publication ready");
+
+    // Capture the real SETUP so both fake receivers build correctly-scoped Status Messages.
+    let mut buf = [0u8; 2048];
+    let (n, source) = receiver.recv_from(&mut buf).expect("receive setup");
+    let (session_id, initial_term_id) = {
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+        (setup.session_id(), setup.initial_term_id())
+    };
+
+    let send_sm = |receiver_id: i64, window: i32| {
+        let mut bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        sm.header()
+            .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+            .set_version(aeron_client::protocol::CURRENT_VERSION)
+            .set_flags(0)
+            .set_header_type(aeron_client::protocol::HDR_TYPE_SM);
+        sm.set_session_id(session_id)
+            .set_stream_id(STREAM_ID)
+            .set_consumption_term_id(initial_term_id)
+            .set_consumption_term_offset(0)
+            .set_receiver_window_length(window)
+            .set_receiver_id(receiver_id);
+        receiver.send_to(&bytes, source).unwrap();
+    };
+
+    // Two independent receivers reporting from the same position but very different windows: a
+    // slow one that has almost no room, and a fast one with room for a whole term. The slow
+    // receiver must be admitted first -- MinMulticastFlowControl only admits a newly-seen
+    // receiver whose window isn't wildly behind the current tracked minimum (an anti-flap
+    // safeguard against one rogue receiver tanking the group), so reporting the fast receiver
+    // first would raise that admission threshold and cause the slow one to be rejected instead
+    // of tracked.
+    send_sm(2, 1024);
+    send_sm(1, TERM_MIN_LENGTH);
+
+    for _ in 0..20 {
+        driver.do_work().expect("process both status messages");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let limit = driver.sender().network_publications()[0].receiver_limit();
+    assert_eq!(
+        limit, 1024,
+        "fc=min must cap the sender at the slowest receiver's window, not the fastest"
+    );
+}

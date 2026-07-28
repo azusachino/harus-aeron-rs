@@ -130,7 +130,8 @@ mod tests {
             1408,
             Arc::new(AtomicI64::new(0)),
             16,
-        );
+        )
+        .unwrap();
 
         let mut sender = Sender::new();
         sender.add_network_publication(publication);

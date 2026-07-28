@@ -23,7 +23,12 @@ The Rust equivalent covers startup validation for CnC ring geometry, counter and
 buffer bounds, term/MTU/window geometry, liveness, untethered timeouts, NAK timing,
 resolver configuration, termination policy, storage policy, file page size, and shared
 Cnc metadata. Driver command errors are counted in the standard CnC driver-exceptions
-counter and surfaced as `ON_ERROR` events.
+counter, surfaced as `ON_ERROR` events, and (2026-07-27) recorded into the CnC file's
+error-log region via a real `DistinctErrorLog` writer (`aeron_client::error_log`, ported
+from `vendor/aeron/aeron-client/src/main/c/concurrent/aeron_distinct_error_log.c`) —
+readable directly from the CnC file by real Java `ErrorLogReader` tooling, not just by a
+client subscribed to the broadcast at the time. Deduplicates repeat errors into one
+record with a running `observation_count`, matching vendor semantics.
 
 The upstream injectable `Executor` API and reflective assertions about Java transport
 poller error-handler objects have no Rust equivalent. Rust uses the managed driver thread

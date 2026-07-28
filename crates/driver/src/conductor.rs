@@ -40,6 +40,7 @@ use aeron_client::driver_proxy::{
     CLIENT_KEEPALIVE, GET_NEXT_AVAILABLE_SESSION_ID, REMOVE_COUNTER, REMOVE_PUBLICATION,
     REMOVE_SUBSCRIPTION, TERMINATE_DRIVER,
 };
+use aeron_client::error_log::DistinctErrorLog;
 use aeron_client::log_buffers::LogBuffers;
 use aeron_client::logbuffer::{
     FRAME_ALIGNMENT, align, compute_position, index_by_term_count, initial_term_id,
@@ -454,6 +455,10 @@ pub struct DriverConductor {
     counters: HashMap<i32, Arc<AtomicI64>>,
     /// Counted driver errors, published through the standard Aeron system-counter slot.
     errors: Arc<AtomicI64>,
+    /// Deduplicated, persistent record of driver errors in the CnC error-log region, readable by
+    /// external tooling (including real Java `ErrorLogReader`) independent of any client's
+    /// ON_ERROR broadcast subscription.
+    distinct_error_log: DistinctErrorLog<'static>,
     /// Client counter registration id -> allocated counter id and owner.
     client_counters: HashMap<i64, (i64, i32)>,
     /// Subscriber-position counter id keyed by the subscription and image notification that own it.
@@ -530,6 +535,8 @@ impl DriverConductor {
             )?;
         }
 
+        let distinct_error_log = DistinctErrorLog::new(cnc.error_log_buffer());
+
         Ok(Self {
             cnc,
             to_driver,
@@ -545,6 +552,7 @@ impl DriverConductor {
             log_buffers: HashMap::new(),
             counters: HashMap::new(),
             errors,
+            distinct_error_log,
             client_counters: HashMap::new(),
             subscriber_counters: HashMap::new(),
             ipc_subscriptions: HashMap::new(),
@@ -616,7 +624,12 @@ impl DriverConductor {
             let correlation_id = command.correlation_id();
             if let Err(error) = self.dispatch(command, now_ns) {
                 if let Some(correlation_id) = correlation_id {
-                    self.on_error(correlation_id, error_code(&error), error.to_string())?;
+                    self.on_error(
+                        correlation_id,
+                        error_code(&error),
+                        error.to_string(),
+                        now_ns,
+                    )?;
                     work += 1;
                 } else {
                     return Err(error);
@@ -870,6 +883,7 @@ impl DriverConductor {
                 correlation_id,
                 6,
                 format!("ERROR - command typeId={message_type}"),
+                now_ns,
             ),
         }
     }
@@ -1115,7 +1129,7 @@ impl DriverConductor {
                 initial_position,
                 publication_limit,
                 retransmit_receiver_window_multiple,
-            ));
+            )?);
         Ok(())
     }
 
@@ -2741,10 +2755,21 @@ impl DriverConductor {
         self.transmit(ON_CLIENT_TIMEOUT, &buf, len)
     }
 
-    fn on_error(&self, correlation_id: i64, code: i32, message: String) -> Result<()> {
+    fn on_error(
+        &mut self,
+        correlation_id: i64,
+        code: i32,
+        message: String,
+        now_ns: i64,
+    ) -> Result<()> {
         let error_count = self.errors.fetch_add(1, Ordering::Relaxed) + 1;
         self.cnc
             .set_counter_value(SYSTEM_COUNTER_ID_DRIVER_EXCEPTIONS, error_count)?;
+        // Best-effort: matches the vendor C implementation, which falls back to an stderr print
+        // rather than failing the caller when the error-log region is exhausted.
+        let _ = self
+            .distinct_error_log
+            .record(code, &message, now_ns / 1_000_000);
         let length = 12 + 4 + message.len();
         let mut bytes = vec![0u8; length];
         let buf = AtomicBuffer::new(&mut bytes);

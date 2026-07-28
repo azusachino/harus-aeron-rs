@@ -21,6 +21,14 @@ pub struct StatusMessage {
     pub term_id: i32,
     pub term_offset: i32,
     pub receiver_window_length: i32,
+    /// Sending receiver's identity, needed by min/tagged multicast flow control to track one
+    /// state slot per receiver. Zero for callers that only exercise the plain 5-field form.
+    pub receiver_id: i64,
+    /// Raw header flags, including `END_OF_STREAM_FLAG` (min/tagged flow control retires a
+    /// receiver once it reports end-of-stream instead of waiting out its full timeout).
+    pub flags: u8,
+    /// Present only on tagged multicast flow control's status messages.
+    pub group_tag: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -80,12 +88,15 @@ impl SendChannelEndpoint {
                     if sm.header().flags() & SEND_SETUP_FLAG != 0 {
                         self.setup_requests.push((sm.session_id(), sm.stream_id()));
                     }
-                    self.on_status_message(
+                    self.on_status_message_full(
                         sm.session_id(),
                         sm.stream_id(),
                         sm.consumption_term_id(),
                         sm.consumption_term_offset(),
                         sm.receiver_window_length(),
+                        sm.receiver_id(),
+                        sm.flags(),
+                        sm.has_group_tag().then(|| sm.group_tag()),
                     );
                     work += 1;
                 }
@@ -127,12 +138,39 @@ impl SendChannelEndpoint {
         term_offset: i32,
         receiver_window_length: i32,
     ) {
+        self.on_status_message_full(
+            session_id,
+            stream_id,
+            term_id,
+            term_offset,
+            receiver_window_length,
+            0,
+            0,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_status_message_full(
+        &mut self,
+        session_id: i32,
+        stream_id: i32,
+        term_id: i32,
+        term_offset: i32,
+        receiver_window_length: i32,
+        receiver_id: i64,
+        flags: u8,
+        group_tag: Option<i64>,
+    ) {
         self.status_messages.push(StatusMessage {
             session_id,
             stream_id,
             term_id,
             term_offset,
             receiver_window_length,
+            receiver_id,
+            flags,
+            group_tag,
         });
     }
 
