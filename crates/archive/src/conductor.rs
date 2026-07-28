@@ -125,8 +125,76 @@ impl ArchiveConductor {
             is_active: true,
         };
         self.recording_sessions.insert(rec_id, recording_session);
-
         rec_id
+    }
+
+    pub fn on_stop_recording(&mut self, recording_id: i64) -> bool {
+        if let Some(session) = self.recording_sessions.get_mut(&recording_id) {
+            if session.is_active {
+                session.is_active = false;
+                session.stop_position = session.current_position;
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                self.catalog
+                    .update_stop_position(recording_id, session.current_position, now_ts);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn on_stop_replay(&mut self, replay_id: i64) -> bool {
+        if let Some(session) = self.replay_sessions.get_mut(&replay_id) {
+            if session.is_active {
+                session.is_active = false;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn list_recordings(
+        &self,
+        from_recording_id: i64,
+        record_count: i32,
+    ) -> Vec<RecordingDescriptor> {
+        if record_count <= 0 {
+            return Vec::new();
+        }
+        let count = record_count as usize;
+        self.catalog
+            .recordings()
+            .iter()
+            .filter(|d| d.recording_id >= from_recording_id)
+            .take(count)
+            .cloned()
+            .collect()
+    }
+
+    pub fn list_recordings_for_uri(
+        &self,
+        from_recording_id: i64,
+        record_count: i32,
+        channel: &str,
+        stream_id: i32,
+    ) -> Vec<RecordingDescriptor> {
+        if record_count <= 0 {
+            return Vec::new();
+        }
+        let count = record_count as usize;
+        self.catalog
+            .recordings()
+            .iter()
+            .filter(|d| {
+                d.recording_id >= from_recording_id
+                    && d.stream_id == stream_id
+                    && d.original_channel.contains(channel)
+            })
+            .take(count)
+            .cloned()
+            .collect()
     }
 
     pub fn on_start_replay(&mut self, recording_id: i64, position: i64, length: i64) -> i64 {
@@ -168,5 +236,23 @@ mod tests {
         let rec_id = conductor.on_start_recording(1001, "aeron:ipc", "test");
         assert_eq!(rec_id, 1);
         assert_eq!(conductor.catalog().recordings().len(), 1);
+
+        // List recordings
+        let list = conductor.list_recordings(1, 10);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].recording_id, rec_id);
+
+        let list_uri = conductor.list_recordings_for_uri(1, 10, "aeron:ipc", 1001);
+        assert_eq!(list_uri.len(), 1);
+
+        // Replay lifecycle
+        let replay_id = conductor.on_start_replay(rec_id, 0, 14080);
+        assert_eq!(replay_id, 1);
+        assert!(conductor.on_stop_replay(replay_id));
+        assert!(!conductor.on_stop_replay(replay_id));
+
+        // Stop recording
+        assert!(conductor.on_stop_recording(rec_id));
+        assert!(!conductor.on_stop_recording(rec_id));
     }
 }
