@@ -188,7 +188,7 @@ impl ConcurrentPublication {
         let limit = self.publication_limit.load(Ordering::Acquire);
         let term_count = active_term_count(&self.log_metadata_buffer);
         let index = index_by_term_count(term_count as i64) as usize;
-        let term_buffer = self.term_buffers[index];
+        let term_buffer = self.term_buffers[index].clone();
         let tail_counter_offset = TERM_TAIL_COUNTERS_OFFSET + index * std::mem::size_of::<i64>();
 
         let raw_tail = self

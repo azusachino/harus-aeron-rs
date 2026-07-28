@@ -631,7 +631,7 @@ mod tests {
 
         image.on_heartbeat(1, 256, 30);
         assert_eq!(image.hwm_position(), 256);
-        let term_buffer = image.log_buffers.duplicate_term_buffers()[0];
+        let term_buffer = image.log_buffers.duplicate_term_buffers()[0].clone();
         assert_eq!(term_buffer.get_i32(64), 40);
 
         drop(image);
@@ -686,7 +686,7 @@ mod tests {
         );
 
         image.on_heartbeat(1, 0, 10);
-        let term_buffer = image.log_buffers.duplicate_term_buffers()[0];
+        let term_buffer = image.log_buffers.duplicate_term_buffers()[0].clone();
         assert_eq!(term_buffer.get_i32(0), 0);
 
         let mut data = data_frame(1, 0, 0x11);

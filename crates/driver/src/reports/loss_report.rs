@@ -70,7 +70,7 @@ impl<'a> LossReport<'a> {
         self.next_record_offset += align(required_capacity, ENTRY_ALIGNMENT);
 
         Some(ReportEntry {
-            buffer: self.buffer,
+            buffer: self.buffer.clone(),
             offset,
         })
     }
@@ -80,7 +80,7 @@ impl<'a> LossReport<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ReportEntry<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -106,7 +106,7 @@ mod tests {
     fn creates_and_updates_entries() {
         let mut bytes = vec![0u8; 1024];
         let buffer = AtomicBuffer::new(&mut bytes);
-        let mut report = LossReport::new(buffer);
+        let mut report = LossReport::new(buffer.clone());
         let entry = report
             .create_entry(32, 7, 3, 1, "aeron:udp://stuff", "127.0.0.1:8888")
             .unwrap();

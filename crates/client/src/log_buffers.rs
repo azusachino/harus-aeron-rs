@@ -186,6 +186,15 @@ impl LogBuffers {
         if let Err(msg) = check_page_size(page_sz) {
             return Err(AeronError::IllegalState(msg));
         }
+        let required_length = (term_len as usize)
+            .checked_mul(PARTITION_COUNT as usize)
+            .and_then(|length| length.checked_add(LOG_META_DATA_LENGTH))
+            .ok_or_else(|| AeronError::IllegalState("log geometry overflows usize".to_string()))?;
+        if log_length != required_length {
+            return Err(AeronError::IllegalState(format!(
+                "Log file length {log_length} does not match declared geometry {required_length}"
+            )));
+        }
 
         Ok(Self(Arc::new(LogBuffersInner {
             storage,
@@ -216,7 +225,9 @@ impl LogBuffers {
                 // resized/reallocated after construction — only mutated in place via
                 // `AtomicBuffer`'s atomic operations.
                 let ptr = unsafe { base_ptr.add(i * term_len) };
-                buffers.push(unsafe { AtomicBuffer::from_raw_parts(ptr, term_len) });
+                buffers.push(unsafe {
+                    AtomicBuffer::from_raw_parts_owned(ptr, term_len, Arc::clone(&self.0))
+                });
             }
         }
 
@@ -231,7 +242,9 @@ impl LogBuffers {
         let meta_offset = self.0.storage.len() - LOG_META_DATA_LENGTH;
         // Safety: see `duplicate_term_buffers`.
         let ptr = unsafe { (self.0.storage.as_ptr() as *mut u8).add(meta_offset) };
-        unsafe { AtomicBuffer::from_raw_parts(ptr, LOG_META_DATA_LENGTH) }
+        unsafe {
+            AtomicBuffer::from_raw_parts_owned(ptr, LOG_META_DATA_LENGTH, Arc::clone(&self.0))
+        }
     }
 
     /// Touch one byte per page in every mapped region, matching Aeron's optional pre-touch
@@ -315,6 +328,28 @@ mod tests {
         let terms = log_buffers.duplicate_term_buffers();
         assert_eq!(terms.len(), 3);
         assert_eq!(terms[0].capacity(), term_len);
+    }
+
+    #[test]
+    fn rejects_storage_that_does_not_match_declared_term_geometry() {
+        let mut contents = vec![0u8; TERM_MIN_LENGTH as usize + LOG_META_DATA_LENGTH];
+        let meta_offset = contents.len() - LOG_META_DATA_LENGTH;
+        let meta = AtomicBuffer::new(&mut contents[meta_offset..]);
+        set_term_length(&meta, TERM_MIN_LENGTH);
+        set_page_size(&meta, PAGE_MIN_SIZE);
+
+        let error = LogBuffers::from_bytes(contents).err().unwrap().to_string();
+        assert!(error.contains("does not match declared geometry"));
+    }
+
+    #[test]
+    fn term_view_retains_its_backing_storage() {
+        let log_buffers = LogBuffers::from_zeroed(TERM_MIN_LENGTH, PAGE_MIN_SIZE).unwrap();
+        let term = log_buffers.duplicate_term_buffers().remove(0);
+
+        drop(log_buffers);
+        term.put_i32(0, 42);
+        assert_eq!(term.get_i32(0), 42);
     }
 
     #[test]

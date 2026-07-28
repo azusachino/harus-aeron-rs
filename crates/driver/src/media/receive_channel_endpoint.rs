@@ -2,6 +2,7 @@
 //!
 //! Mirrors `io.aeron.driver.media.ReceiveChannelEndpoint.java`.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 
 use aeron_client::protocol::{
@@ -40,15 +41,27 @@ pub struct ReceiveChannelEndpoint {
     transport: UdpChannelTransport,
     setup_messages: Vec<SetupMessage>,
     data_packets: Vec<DataPacket>,
+    receiver_id: i64,
+    group_tag: Option<i64>,
 }
 
 impl ReceiveChannelEndpoint {
     pub fn new(udp_channel: UdpChannel, transport: UdpChannelTransport) -> Self {
+        let mut hasher = DefaultHasher::new();
+        transport
+            .local_addr()
+            .unwrap_or_else(|_| transport.bind_address())
+            .hash(&mut hasher);
+        udp_channel.canonical_form.hash(&mut hasher);
+        let receiver_id = hasher.finish() as i64;
+        let group_tag = udp_channel.group_tag;
         Self {
             udp_channel,
             transport,
             setup_messages: Vec::new(),
             data_packets: Vec::new(),
+            receiver_id,
+            group_tag,
         }
     }
 
@@ -123,11 +136,16 @@ impl ReceiveChannelEndpoint {
         window_length: i32,
         target: SocketAddr,
     ) -> Result<usize> {
-        let mut buf = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        let mut buf = [0u8; STATUS_MESSAGE_HEADER_LENGTH + 8];
+        let frame_length = if self.group_tag.is_some() {
+            buf.len()
+        } else {
+            STATUS_MESSAGE_HEADER_LENGTH
+        };
         {
-            let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut buf));
+            let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut buf[..frame_length]));
             sm.header()
-                .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+                .set_frame_length(frame_length as i32)
                 .set_version(CURRENT_VERSION)
                 .set_flags(0)
                 .set_header_type(HDR_TYPE_SM);
@@ -136,9 +154,10 @@ impl ReceiveChannelEndpoint {
                 .set_consumption_term_id(term_id)
                 .set_consumption_term_offset(term_offset)
                 .set_receiver_window_length(window_length)
-                .set_receiver_id(0);
+                .set_receiver_id(self.receiver_id);
+            sm.set_group_tag(self.group_tag);
         }
-        self.transport.send_to(&buf, target)
+        self.transport.send_to(&buf[..frame_length], target)
     }
 
     /// Send the setup-eliciting Status Message used by Aeron's DataPacketDispatcher when DATA

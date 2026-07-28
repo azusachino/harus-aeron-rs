@@ -246,6 +246,7 @@ pub struct PublicationEntry {
     pub channel: String,
     pub is_exclusive: bool,
     pub is_ipc: bool,
+    pub spies_simulate_connection: bool,
     pub session_id: i32,
     /// Entity tag used to resolve tagged session ids and reject duplicate tagged publications.
     pub entity_tag: i64,
@@ -1034,10 +1035,6 @@ impl DriverConductor {
                         ))
                     })?,
             )?;
-            self.open_publication_window(
-                publication_limit_counter_id,
-                self.configuration.publication_term_buffer_length,
-            )?;
             Some(name)
         } else {
             None
@@ -1053,6 +1050,7 @@ impl DriverConductor {
                 channel,
                 is_exclusive: exclusive,
                 is_ipc,
+                spies_simulate_connection: params.spies_simulate_connection,
                 session_id,
                 entity_tag: params.entity_tag,
                 term_length: params.term_length,
@@ -1300,7 +1298,7 @@ impl DriverConductor {
         now_ns: i64,
         channel: Option<&str>,
     ) -> Result<()> {
-        let setup = SetupFlyweight::new(*buf);
+        let setup = SetupFlyweight::new(buf.clone());
         let session_id = setup.session_id();
         let stream_id = setup.stream_id();
         let channel_key = channel.unwrap_or("").to_owned();
@@ -1680,7 +1678,7 @@ impl DriverConductor {
         // HeaderWriter stamps real data frames — without this every frame reads as padding.
         let mut header_bytes = [0u8; DATA_HEADER_LENGTH];
         let header_buf = AtomicBuffer::new(&mut header_bytes);
-        let header = DataHeaderFlyweight::new(header_buf);
+        let header = DataHeaderFlyweight::new(header_buf.clone());
         header.set_version(CURRENT_VERSION);
         header.set_header_type(HDR_TYPE_DATA);
         header.set_session_id(session_id);
@@ -1891,34 +1889,42 @@ impl DriverConductor {
         {
             return Ok(());
         }
-        let (log_file_name, session_id, stream_id, source_identity, is_ipc, limit_counter_id) =
-            self.publications
-                .get(&publication_registration_id)
-                .map(|publication| {
-                    (
-                        publication.log_file_name.clone(),
-                        publication.session_id,
-                        publication.stream_id,
-                        publication.channel.clone(),
-                        publication.is_ipc,
-                        publication.publication_limit_counter_id,
-                    )
-                })
-                .ok_or_else(|| {
-                    DriverError::IllegalState(format!(
-                        "missing publication {publication_registration_id}"
-                    ))
-                })?;
+        let (
+            log_file_name,
+            session_id,
+            stream_id,
+            source_identity,
+            is_ipc,
+            spies_simulate_connection,
+            limit_counter_id,
+            term_length,
+        ) = self
+            .publications
+            .get(&publication_registration_id)
+            .map(|publication| {
+                (
+                    publication.log_file_name.clone(),
+                    publication.session_id,
+                    publication.stream_id,
+                    publication.channel.clone(),
+                    publication.is_ipc,
+                    publication.spies_simulate_connection,
+                    publication.publication_limit_counter_id,
+                    publication.term_length,
+                )
+            })
+            .ok_or_else(|| {
+                DriverError::IllegalState(format!(
+                    "missing publication {publication_registration_id}"
+                ))
+            })?;
         let log_file_name = log_file_name.ok_or_else(|| {
             DriverError::IllegalState(format!(
                 "publication {publication_registration_id} has no log buffer"
             ))
         })?;
-        if is_ipc {
-            self.open_publication_window(
-                limit_counter_id,
-                self.configuration.ipc_term_buffer_length,
-            )?;
+        if is_ipc || spies_simulate_connection {
+            self.open_publication_window(limit_counter_id, term_length)?;
             if let Some(buffers) = self.log_buffers.get(&publication_registration_id) {
                 aeron_client::logbuffer::set_is_connected(&buffers.meta_data_buffer(), true);
             }
@@ -2110,6 +2116,14 @@ impl DriverConductor {
             self.cnc.set_counter_value(counter_id, value)?;
         }
         Ok(())
+    }
+
+    /// Mirror a sender-owned network publication limit into the cross-process CnC counter.
+    pub fn sync_network_publication_limit(&self, registration_id: i64, value: i64) -> Result<()> {
+        let Some(publication) = self.publications.get(&registration_id) else {
+            return Ok(());
+        };
+        self.set_publication_limit(publication.publication_limit_counter_id, value)
     }
 
     /// Run the IPC publication-side untethered subscription state machine.
@@ -2621,7 +2635,7 @@ impl DriverConductor {
         let mut scratch = vec![0u8; 32 + 4 + log_file_name.len()];
         let len = scratch.len();
         let buf = AtomicBuffer::new(&mut scratch);
-        let fw = PublicationBuffersReadyFlyweight::wrap(buf, 0);
+        let fw = PublicationBuffersReadyFlyweight::wrap(buf.clone(), 0);
         fw.set_correlation_id(correlation_id);
         fw.set_registration_id(registration_id);
         fw.set_session_id(session_id);
@@ -2668,7 +2682,7 @@ impl DriverConductor {
         let mut scratch = vec![0u8; 28 + name_field + source_field];
         let len = scratch.len();
         let buf = AtomicBuffer::new(&mut scratch);
-        let fw = ImageBuffersReadyFlyweight::wrap(buf, 0);
+        let fw = ImageBuffersReadyFlyweight::wrap(buf.clone(), 0);
         fw.set_correlation_id(correlation_id);
         fw.set_session_id(session_id);
         fw.set_stream_id(stream_id);
@@ -2700,7 +2714,7 @@ impl DriverConductor {
         let mut scratch = [0u8; 12];
         let len = scratch.len();
         let buf = AtomicBuffer::new(&mut scratch);
-        let flyweight = SubscriptionReadyFlyweight::wrap(buf, 0);
+        let flyweight = SubscriptionReadyFlyweight::wrap(buf.clone(), 0);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_channel_status_counter_id(-1);
         self.transmit(ON_SUBSCRIPTION_READY, &buf, len)
@@ -2710,7 +2724,7 @@ impl DriverConductor {
         let mut scratch = [0u8; 8];
         let len = scratch.len();
         let buf = AtomicBuffer::new(&mut scratch);
-        let flyweight = OperationSucceededFlyweight::wrap(buf, 0);
+        let flyweight = OperationSucceededFlyweight::wrap(buf.clone(), 0);
         flyweight.set_correlation_id(correlation_id);
         self.transmit(ON_OPERATION_SUCCESS, &buf, len)
     }
@@ -2750,7 +2764,7 @@ impl DriverConductor {
         let mut scratch = [0u8; 8];
         let len = scratch.len();
         let buf = AtomicBuffer::new(&mut scratch);
-        let flyweight = ClientTimeoutFlyweight::wrap(buf, 0);
+        let flyweight = ClientTimeoutFlyweight::wrap(buf.clone(), 0);
         flyweight.set_client_id(client_id);
         self.transmit(ON_CLIENT_TIMEOUT, &buf, len)
     }
@@ -2773,7 +2787,7 @@ impl DriverConductor {
         let length = 12 + 4 + message.len();
         let mut bytes = vec![0u8; length];
         let buf = AtomicBuffer::new(&mut bytes);
-        let error = ErrorResponseFlyweight::wrap(buf, 0);
+        let error = ErrorResponseFlyweight::wrap(buf.clone(), 0);
         error.set_offending_command_correlation_id(correlation_id);
         error.set_error_code(code);
         error.set_error_message(&message);
@@ -2824,7 +2838,7 @@ fn decode_command(
     // perform bounds checks for every field read.
     let malformed = || {
         (length >= CORRELATED_HEADER).then(|| {
-            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
+            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(buffer.clone(), offset);
             Command::Unknown {
                 correlation_id: fw.correlation_id(),
                 message_type: msg_type,
@@ -2846,7 +2860,7 @@ fn decode_command(
             {
                 return malformed();
             }
-            let fw = PublicationMessageFlyweight::new(*buffer, offset);
+            let fw = PublicationMessageFlyweight::new(buffer.clone(), offset);
             Some(Command::AddPublication {
                 client_id: fw.client_id(),
                 correlation_id: fw.correlation_id(),
@@ -2868,7 +2882,7 @@ fn decode_command(
             {
                 return malformed();
             }
-            let fw = SubscriptionMessageFlyweight::new(*buffer, offset);
+            let fw = SubscriptionMessageFlyweight::new(buffer.clone(), offset);
             Some(Command::AddSubscription {
                 client_id: fw.client_id(),
                 correlation_id: fw.correlation_id(),
@@ -2877,7 +2891,7 @@ fn decode_command(
             })
         }
         ADD_COUNTER if length >= aeron_client::command::KEY_BUFFER_OFFSET => {
-            let fw = CounterMessageFlyweight::new(*buffer, offset);
+            let fw = CounterMessageFlyweight::new(buffer.clone(), offset);
             let key_length_raw = buffer.get_i32(offset + aeron_client::command::KEY_LENGTH_OFFSET);
             if key_length_raw < 0 {
                 return malformed();
@@ -2923,7 +2937,7 @@ fn decode_command(
             if length
                 >= aeron_client::command::RemoveMessageFlyweight::remove_publication_length() =>
         {
-            let fw = RemoveMessageFlyweight::new(*buffer, offset);
+            let fw = RemoveMessageFlyweight::new(buffer.clone(), offset);
             Some(Command::RemovePublication {
                 correlation_id: fw.correlation_id(),
                 registration_id: fw.registration_id(),
@@ -2932,7 +2946,7 @@ fn decode_command(
         REMOVE_SUBSCRIPTION | REMOVE_COUNTER
             if length >= aeron_client::command::RemoveMessageFlyweight::length() =>
         {
-            let fw = RemoveMessageFlyweight::new(*buffer, offset);
+            let fw = RemoveMessageFlyweight::new(buffer.clone(), offset);
             if msg_type == REMOVE_SUBSCRIPTION {
                 Some(Command::RemoveSubscription {
                     correlation_id: fw.correlation_id(),
@@ -2948,7 +2962,7 @@ fn decode_command(
         GET_NEXT_AVAILABLE_SESSION_ID
             if length >= aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH + 4 =>
         {
-            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
+            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(buffer.clone(), offset);
             Some(Command::GetNextAvailableSessionId {
                 client_id: fw.client_id(),
                 correlation_id: fw.correlation_id(),
@@ -2957,7 +2971,7 @@ fn decode_command(
             })
         }
         CLIENT_KEEPALIVE | CLIENT_CLOSE if length >= CORRELATED_HEADER => {
-            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
+            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(buffer.clone(), offset);
             if msg_type == CLIENT_KEEPALIVE {
                 Some(Command::Keepalive {
                     client_id: fw.client_id(),
@@ -2978,7 +2992,7 @@ fn decode_command(
             {
                 return malformed();
             }
-            let fw = TerminateDriverFlyweight::new(*buffer, offset);
+            let fw = TerminateDriverFlyweight::new(buffer.clone(), offset);
             Some(Command::TerminateDriver {
                 client_id: fw.client_id(),
                 correlation_id: fw.correlation_id(),
@@ -2998,7 +3012,7 @@ fn decode_command(
             {
                 return malformed();
             }
-            let fw = DestinationMessageFlyweight::new(*buffer, offset);
+            let fw = DestinationMessageFlyweight::new(buffer.clone(), offset);
             let command = if msg_type == aeron_client::driver_proxy::ADD_DESTINATION {
                 Command::AddDestination {
                     client_id: fw.client_id(),
@@ -3030,7 +3044,7 @@ fn decode_command(
             {
                 return malformed();
             }
-            let fw = DestinationMessageFlyweight::new(*buffer, offset);
+            let fw = DestinationMessageFlyweight::new(buffer.clone(), offset);
             let command = if msg_type == aeron_client::driver_proxy::ADD_RCV_DESTINATION {
                 Command::AddReceiveDestination {
                     client_id: fw.client_id(),
@@ -3049,7 +3063,7 @@ fn decode_command(
             Some(command)
         }
         _ if length >= aeron_client::command::CORRELATED_MESSAGE_HEADER_LENGTH => {
-            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(*buffer, offset);
+            let fw = aeron_client::command::CorrelatedMessageFlyweight::new(buffer.clone(), offset);
             Some(Command::Unknown {
                 correlation_id: fw.correlation_id(),
                 message_type: msg_type,
@@ -3388,7 +3402,7 @@ mod tests {
             .receive_next(|msg_type, buf, offset, _| {
                 if msg_type == ON_ERROR {
                     error_correlation = Some(
-                        ErrorResponseFlyweight::wrap(*buf, offset)
+                        ErrorResponseFlyweight::wrap(buf.clone(), offset)
                             .offending_command_correlation_id(),
                     );
                 }
@@ -3424,7 +3438,8 @@ mod tests {
         let got = events
             .receive_next(|msg_type, buf, offset, _len| {
                 seen_type = msg_type;
-                seen_correlation = SubscriptionReadyFlyweight::wrap(*buf, offset).correlation_id();
+                seen_correlation =
+                    SubscriptionReadyFlyweight::wrap(buf.clone(), offset).correlation_id();
             })
             .unwrap();
 
@@ -3453,7 +3468,7 @@ mod tests {
             events
                 .receive_next(|msg_type, buf, offset, _len| {
                     assert_eq!(msg_type, ON_COUNTER_READY);
-                    let update = CounterUpdateFlyweight::wrap(*buf, offset);
+                    let update = CounterUpdateFlyweight::wrap(buf.clone(), offset);
                     ready_correlation = update.correlation_id();
                     counter_id = update.counter_id();
                 })
@@ -3480,7 +3495,7 @@ mod tests {
             events
                 .receive_next(|msg_type, buf, offset, _len| {
                     assert_eq!(msg_type, ON_UNAVAILABLE_COUNTER);
-                    let update = CounterUpdateFlyweight::wrap(*buf, offset);
+                    let update = CounterUpdateFlyweight::wrap(buf.clone(), offset);
                     unavailable_correlation = update.correlation_id();
                     unavailable_id = update.counter_id();
                 })
@@ -3513,7 +3528,7 @@ mod tests {
         while events
             .receive_next(|msg_type, buf, offset, _len| {
                 assert_eq!(msg_type, ON_NEXT_AVAILABLE_SESSION_ID);
-                let response = NextAvailableSessionIdFlyweight::wrap(*buf, offset);
+                let response = NextAvailableSessionIdFlyweight::wrap(buf.clone(), offset);
                 responses.push((response.correlation_id(), response.next_session_id()));
             })
             .unwrap()
@@ -3690,7 +3705,7 @@ mod tests {
             events
                 .receive_next(|msg_type, buf, offset, _len| {
                     seen_type = msg_type;
-                    let error = ErrorResponseFlyweight::wrap(*buf, offset);
+                    let error = ErrorResponseFlyweight::wrap(buf.clone(), offset);
                     seen_correlation = error.offending_command_correlation_id();
                     seen_code = error.error_code();
                     seen_message = error.error_message().unwrap();
@@ -3764,7 +3779,7 @@ mod tests {
             events
                 .receive_next(|msg_type, buf, offset, _len| {
                     seen_type = msg_type;
-                    let error = ErrorResponseFlyweight::wrap(*buf, offset);
+                    let error = ErrorResponseFlyweight::wrap(buf.clone(), offset);
                     seen_correlation = error.offending_command_correlation_id();
                     seen_code = error.error_code();
                     seen_message = error.error_message().unwrap();
@@ -3785,7 +3800,7 @@ mod tests {
                 .receive_next(|msg_type, buf, offset, _len| {
                     assert_eq!(msg_type, ON_SUBSCRIPTION_READY);
                     ready_correlation =
-                        SubscriptionReadyFlyweight::wrap(*buf, offset).correlation_id();
+                        SubscriptionReadyFlyweight::wrap(buf.clone(), offset).correlation_id();
                 })
                 .unwrap()
         );
@@ -3835,7 +3850,8 @@ mod tests {
         let got = events
             .receive_next(|msg_type, buf, offset, _len| {
                 seen_type = msg_type;
-                seen_correlation = OperationSucceededFlyweight::wrap(*buf, offset).correlation_id();
+                seen_correlation =
+                    OperationSucceededFlyweight::wrap(buf.clone(), offset).correlation_id();
             })
             .unwrap();
         assert!(got);
@@ -4471,7 +4487,7 @@ mod tests {
             events
                 .receive_next(|msg_type, buf, offset, _len| {
                     assert_eq!(msg_type, ON_COUNTER_READY);
-                    counter_id = CounterUpdateFlyweight::wrap(*buf, offset).counter_id();
+                    counter_id = CounterUpdateFlyweight::wrap(buf.clone(), offset).counter_id();
                 })
                 .unwrap()
         );
@@ -4489,7 +4505,7 @@ mod tests {
             events
                 .receive_next(|msg_type, buf, offset, _len| {
                     assert_eq!(msg_type, ON_CLIENT_TIMEOUT);
-                    seen_client_id = ClientTimeoutFlyweight::wrap(*buf, offset).client_id();
+                    seen_client_id = ClientTimeoutFlyweight::wrap(buf.clone(), offset).client_id();
                 })
                 .unwrap()
         );
@@ -4500,7 +4516,7 @@ mod tests {
             events
                 .receive_next(|msg_type, buf, offset, _len| {
                     assert_eq!(msg_type, ON_UNAVAILABLE_COUNTER);
-                    let update = CounterUpdateFlyweight::wrap(*buf, offset);
+                    let update = CounterUpdateFlyweight::wrap(buf.clone(), offset);
                     unavailable_registration = update.correlation_id();
                     unavailable_id = update.counter_id();
                 })
@@ -4616,7 +4632,7 @@ mod tests {
         let got = events
             .receive_next(|msg_type, buf, offset, _len| {
                 seen_type = msg_type;
-                let fw = PublicationBuffersReadyFlyweight::wrap(*buf, offset);
+                let fw = PublicationBuffersReadyFlyweight::wrap(buf.clone(), offset);
                 seen_session = fw.session_id();
                 seen_name = fw.log_file_name().unwrap();
             })
@@ -4833,7 +4849,7 @@ mod tests {
         while events
             .receive_next(|msg_type, buf, offset, _len| {
                 if msg_type == ON_AVAILABLE_IMAGE {
-                    let fw = ImageBuffersReadyFlyweight::wrap(*buf, offset);
+                    let fw = ImageBuffersReadyFlyweight::wrap(buf.clone(), offset);
                     image_name = Some(fw.log_file_name().unwrap());
                     image_sub_reg = fw.subscription_registration_id();
                     image_source = fw.source_identity().unwrap();

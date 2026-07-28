@@ -232,8 +232,8 @@ mod tests {
         let mut backing = [0u8; 128 + TRAILER_LENGTH];
         let buf = AtomicBuffer::new(&mut backing);
 
-        let transmitter = BroadcastTransmitter::new(buf).unwrap();
-        let mut receiver1 = BroadcastReceiver::new(buf).unwrap();
+        let transmitter = BroadcastTransmitter::new(buf.clone()).unwrap();
+        let mut receiver1 = BroadcastReceiver::new(buf.clone()).unwrap();
         let mut receiver2 = BroadcastReceiver::new(buf).unwrap();
 
         let mut src_backing = [0u8; 32];
@@ -273,7 +273,7 @@ mod tests {
         let mut backing = [0u8; 64 + TRAILER_LENGTH];
         let buf = AtomicBuffer::new(&mut backing);
 
-        let transmitter = BroadcastTransmitter::new(buf).unwrap();
+        let transmitter = BroadcastTransmitter::new(buf.clone()).unwrap();
         let mut receiver = BroadcastReceiver::new(buf).unwrap();
 
         let mut src_backing = [0u8; 32];

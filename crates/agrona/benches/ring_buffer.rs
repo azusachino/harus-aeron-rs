@@ -46,7 +46,7 @@ fn bench_ring_buffers(c: &mut Criterion) {
     c.bench_function("broadcast_transmit_receive_throughput", |b| {
         let mut backing = vec![0u8; 65536 + BC_TRAILER];
         let buf = AtomicBuffer::new(&mut backing);
-        let tx = BroadcastTransmitter::new(buf).unwrap();
+        let tx = BroadcastTransmitter::new(buf.clone()).unwrap();
         let mut rx = BroadcastReceiver::new(buf).unwrap();
 
         let mut src_backing = [0u8; 64];

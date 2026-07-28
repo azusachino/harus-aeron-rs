@@ -54,6 +54,10 @@ impl ClusterStateMachine {
         self.role
     }
 
+    pub fn member_id(&self) -> i32 {
+        self.member_id
+    }
+
     pub fn state(&self) -> ConsensusModuleState {
         self.state
     }

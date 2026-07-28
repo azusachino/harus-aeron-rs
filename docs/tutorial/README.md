@@ -6,11 +6,11 @@ Welcome to the `harus-aeron-rs` structured course. This course mirrors the archi
 
 | Chapter | Title | Module / Topic |
 |---|---|---|
-| 01 | [Agrona AtomicBuffer & Endian Primitives](01-agrona-atomic-buffer.md) | Concurrent memory views & endianness |
-| 02 | [Agrona RingBuffers (SPSC & MPSC)](02-agrona-ring-buffers.md) | Lock-free queueing structures |
-| 03 | [Agrona Broadcast Transmitters & Receivers](03-agrona-broadcast.md) | Multi-receiver broadcast buffers |
-| 04 | [Aeron Wire Protocol Codecs](04-client-protocol-codecs.md) | Header flyweights & SBE frame layouts |
-| 05 | [Aeron Client LogBuffers, Publications & Subscriptions](05-client-log-buffers.md) | IPC shared memory & term rotations |
+| 01 | [Agrona Core](01-agrona-core.md) | Atomic buffers, ring buffers, and broadcast primitives |
+| 02 | [Client Wire Protocol](02-client-wire-protocol.md) | Header flyweights and SBE frame layouts |
+| 03 | [Client Log Buffers](03-client-logbuffer.md) | Shared-memory term layout and rotation |
+| 04 | [Client API](04-client-api.md) | Publications, subscriptions, and conductor interaction |
+| 05 | [Driver Configuration](05-driver-configuration.md) | Configuration defaults and publication parameters |
 | 06 | [MediaDriver UDP Channel & Interface Parsing](06-driver-udp-channel.md) | Unicast, Multicast, & Control Mode URIs |
 | 07 | [MediaDriver Transport Poller & Channel Endpoints](07-driver-transport-endpoints.md) | Non-blocking UDP sockets & socket options |
 | 08 | [MediaDriver Agents, Duty Cycles & Conductor](08-driver-agents-conductor.md) | Sender, Receiver & DriverConductor threads |

@@ -7,8 +7,9 @@ use std::net::SocketAddr;
 
 use aeron_client::logbuffer::{FRAME_ALIGNMENT, align};
 use aeron_client::protocol::{
-    DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_RTTM, HDR_TYPE_SETUP,
-    HeaderFlyweight, RTTM_HEADER_LENGTH, RTTM_REPLY_FLAG, RttMeasurementFlyweight, SetupFlyweight,
+    CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_RTTM,
+    HDR_TYPE_SETUP, HeaderFlyweight, RTTM_HEADER_LENGTH, RTTM_REPLY_FLAG, RttMeasurementFlyweight,
+    SETUP_HEADER_LENGTH, SetupFlyweight,
 };
 use agrona::AtomicBuffer;
 
@@ -17,6 +18,8 @@ use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 
 /// Matches vendored `Configuration.STATUS_MESSAGE_TIMEOUT_DEFAULT_NS`.
 const STATUS_MESSAGE_TIMEOUT_NS: i64 = 200_000_000;
+const RECEIVE_BATCH_LIMIT: usize = 64;
+const MAX_UDP_PAYLOAD_LENGTH: usize = 65_507;
 
 pub struct Receiver {
     receive_channel_endpoints: Vec<ReceiveChannelEndpoint>,
@@ -127,13 +130,16 @@ impl Receiver {
     pub fn do_work_at(&mut self, now_ns: i64) -> Result<usize> {
         // Drain every receive endpoint's socket; the conductor turns SETUP/DATA frames into
         // images and reassembled term data.
-        let mut buffer = [0u8; 2048];
+        let mut buffer = vec![0u8; MAX_UDP_PAYLOAD_LENGTH];
         let mut count = 0;
         for endpoint_index in 0..self.receive_channel_endpoints.len() {
-            while let Ok((len, src)) = self.receive_channel_endpoints[endpoint_index]
-                .transport()
-                .recv_from(&mut buffer)
-            {
+            for _ in 0..RECEIVE_BATCH_LIMIT {
+                let Some((len, src)) = self.receive_channel_endpoints[endpoint_index]
+                    .transport()
+                    .try_recv_from(&mut buffer)?
+                else {
+                    break;
+                };
                 let frame = buffer[..len].to_vec();
                 let receiver_status = self.handle_frame(endpoint_index, &frame, src, now_ns)?;
                 let (session_id, stream_id) = frame_identity(&frame);
@@ -169,9 +175,16 @@ impl Receiver {
 
         let mut owned = bytes.to_vec();
         let buffer = AtomicBuffer::new(&mut owned);
-        let header = HeaderFlyweight::new(buffer);
+        let header = HeaderFlyweight::new(buffer.clone());
+        if header.version() != CURRENT_VERSION {
+            return Ok(None);
+        }
         match header.header_type() {
-            HDR_TYPE_SETUP => {
+            HDR_TYPE_SETUP
+                if bytes.len() >= SETUP_HEADER_LENGTH
+                    && header.frame_length() as usize >= SETUP_HEADER_LENGTH
+                    && header.frame_length() as usize <= bytes.len() =>
+            {
                 let setup = SetupFlyweight::new(buffer);
                 self.receive_channel_endpoints[endpoint_index].on_setup_message(
                     setup.session_id(),
@@ -637,6 +650,30 @@ mod tests {
             &mut status_bytes[..status_length],
         ));
         assert_eq!(status.consumption_term_offset(), aligned_length as i32);
+    }
+
+    #[test]
+    fn should_ignore_truncated_setup_without_panicking() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        let peer = UdpSocket::bind(bind_addr).unwrap();
+        let source = peer.local_addr().unwrap();
+        let mut receiver = Receiver::new();
+        receiver.add_receive_channel_endpoint(ReceiveChannelEndpoint::new(channel, transport));
+
+        let mut bytes = [0u8; DATA_HEADER_LENGTH];
+        let header = HeaderFlyweight::new(AtomicBuffer::new(&mut bytes));
+        header
+            .set_frame_length(SETUP_HEADER_LENGTH as i32)
+            .set_version(aeron_client::protocol::CURRENT_VERSION)
+            .set_header_type(HDR_TYPE_SETUP);
+        assert!(
+            receiver
+                .handle_frame(0, &bytes, source, 1)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -56,7 +56,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
 
-        let flyweight = PublicationMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = PublicationMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_stream_id(stream_id);
@@ -81,7 +81,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
 
-        let flyweight = PublicationMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = PublicationMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_stream_id(stream_id);
@@ -106,7 +106,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
 
-        let flyweight = RemoveMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = RemoveMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_registration_id(registration_id);
@@ -131,7 +131,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
 
-        let flyweight = SubscriptionMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = SubscriptionMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_registration_correlation_id(-1);
@@ -157,7 +157,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
 
-        let flyweight = RemoveMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = RemoveMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_registration_id(registration_id);
@@ -181,7 +181,7 @@ impl<'a> DriverProxy<'a> {
         let length = crate::command::KEY_BUFFER_OFFSET + key.len() + 4 + label.len();
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
-        let flyweight = CounterMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = CounterMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_type_id(type_id);
@@ -205,7 +205,7 @@ impl<'a> DriverProxy<'a> {
         let length = RemoveMessageFlyweight::length();
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
-        let flyweight = RemoveMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = RemoveMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_registration_id(registration_id);
@@ -226,7 +226,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; crate::command::CORRELATED_MESSAGE_HEADER_LENGTH];
         let length = buf.len();
         let atomic_buf = AtomicBuffer::new(&mut buf);
-        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(-1);
         let written = self
@@ -249,7 +249,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; crate::command::CORRELATED_MESSAGE_HEADER_LENGTH + 4];
         let length = buf.len();
         let atomic_buf = AtomicBuffer::new(&mut buf);
-        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         atomic_buf.put_i32(crate::command::CORRELATED_MESSAGE_HEADER_LENGTH, stream_id);
@@ -271,7 +271,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; crate::command::CORRELATED_MESSAGE_HEADER_LENGTH];
         let length = buf.len();
         let atomic_buf = AtomicBuffer::new(&mut buf);
-        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = crate::command::CorrelatedMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(-1);
         let written = self
@@ -291,7 +291,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
 
-        let flyweight = DestinationMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = DestinationMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_registration_correlation_id(registration_id);
@@ -316,7 +316,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
 
-        let flyweight = DestinationMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = DestinationMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_registration_correlation_id(registration_id);
@@ -361,7 +361,7 @@ impl<'a> DriverProxy<'a> {
         let length = DestinationMessageFlyweight::compute_length(endpoint_channel.len());
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
-        let flyweight = DestinationMessageFlyweight::new(atomic_buf, 0);
+        let flyweight = DestinationMessageFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_registration_correlation_id(registration_id);
@@ -383,7 +383,7 @@ impl<'a> DriverProxy<'a> {
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
 
-        let flyweight = TerminateDriverFlyweight::new(atomic_buf, 0);
+        let flyweight = TerminateDriverFlyweight::new(atomic_buf.clone(), 0);
         flyweight.set_client_id(self.client_id);
         flyweight.set_correlation_id(correlation_id);
         flyweight.set_token_buffer(token_bytes);
@@ -425,7 +425,7 @@ mod tests {
         let messages_read = ring_buffer.read(|msg_type_id, buffer, index, _length| {
             read_count += 1;
             assert_eq!(msg_type_id, ADD_PUBLICATION);
-            let flyweight = PublicationMessageFlyweight::new(*buffer, index);
+            let flyweight = PublicationMessageFlyweight::new(buffer.clone(), index);
             assert_eq!(flyweight.client_id(), CLIENT_ID);
             assert_eq!(flyweight.stream_id(), STREAM_ID);
             assert_eq!(flyweight.channel(), CHANNEL);
@@ -448,7 +448,7 @@ mod tests {
         let messages_read = ring_buffer.read(|msg_type_id, buffer, index, _length| {
             read_count += 1;
             assert_eq!(msg_type_id, REMOVE_PUBLICATION);
-            let flyweight = RemoveMessageFlyweight::new(*buffer, index);
+            let flyweight = RemoveMessageFlyweight::new(buffer.clone(), index);
             assert_eq!(flyweight.client_id(), CLIENT_ID);
             assert_eq!(flyweight.registration_id(), 3);
             assert!(!flyweight.revoke());
@@ -471,7 +471,7 @@ mod tests {
         let messages_read = ring_buffer.read(|msg_type_id, buffer, index, _length| {
             read_count += 1;
             assert_eq!(msg_type_id, REMOVE_SUBSCRIPTION);
-            let flyweight = RemoveMessageFlyweight::new(*buffer, index);
+            let flyweight = RemoveMessageFlyweight::new(buffer.clone(), index);
             assert_eq!(flyweight.client_id(), CLIENT_ID);
             assert_eq!(flyweight.registration_id(), 3);
         });

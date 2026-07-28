@@ -122,7 +122,7 @@ proptest! {
     ) {
         let mut backing = vec![0u8; 4096 + TRAILER_LENGTH];
         let buf = AtomicBuffer::new(&mut backing);
-        let tx = BroadcastTransmitter::new(buf).unwrap();
+        let tx = BroadcastTransmitter::new(buf.clone()).unwrap();
         let mut rx = BroadcastReceiver::new(buf).unwrap();
 
         let mut read_payloads = Vec::new();

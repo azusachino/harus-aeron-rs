@@ -59,7 +59,7 @@ pub const MIN_HEADER_LENGTH: usize = TYPE_FIELD_OFFSET + std::mem::size_of::<i16
 ///  +-------------+---------------+---------------------------------+
 ///  |                       Depends on Type                        ...
 /// ```
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct HeaderFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
 }
@@ -221,7 +221,7 @@ pub const HAS_GROUP_ID_FLAG: u8 = 0x08;
 /// 40 |                         Error String                        ...
 ///    +---------------------------------------------------------------+
 /// ```
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct ErrorFlyweight<'a> {
     header: HeaderFlyweight<'a>,
 }
@@ -357,7 +357,7 @@ impl<'a> ErrorFlyweight<'a> {
 }
 
 /// Flyweight for Data Frame header of a message fragment.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct DataHeaderFlyweight<'a> {
     header: HeaderFlyweight<'a>,
 }
@@ -505,7 +505,7 @@ pub const END_OF_STREAM_FLAG: u8 = 0x40;
 pub const SM_GROUP_TAG_FIELD_OFFSET: usize = STATUS_MESSAGE_HEADER_LENGTH;
 
 /// Flyweight over a Status Message frame.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct StatusMessageFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
 }
@@ -517,7 +517,7 @@ impl<'a> StatusMessageFlyweight<'a> {
 
     /// The base frame header (frame length / version / flags / type).
     pub fn header(&self) -> HeaderFlyweight<'a> {
-        HeaderFlyweight::new(self.buffer)
+        HeaderFlyweight::new(self.buffer.clone())
     }
 
     pub fn flags(&self) -> u8 {
@@ -609,7 +609,7 @@ pub const NAK_LENGTH_FIELD_OFFSET: usize = 24;
 pub const NAK_HEADER_LENGTH: usize = 28;
 
 /// Flyweight over a NAK (negative acknowledgement) frame.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct NakFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
 }
@@ -619,7 +619,7 @@ impl<'a> NakFlyweight<'a> {
         Self { buffer }
     }
     pub fn header(&self) -> HeaderFlyweight<'a> {
-        HeaderFlyweight::new(self.buffer)
+        HeaderFlyweight::new(self.buffer.clone())
     }
     pub fn session_id(&self) -> i32 {
         self.buffer.get_i32(NAK_SESSION_ID_FIELD_OFFSET)
@@ -672,7 +672,7 @@ pub const SETUP_TTL_FIELD_OFFSET: usize = 36;
 pub const SETUP_HEADER_LENGTH: usize = 40;
 
 /// Flyweight over a Setup frame.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct SetupFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
 }
@@ -682,7 +682,7 @@ impl<'a> SetupFlyweight<'a> {
         Self { buffer }
     }
     pub fn header(&self) -> HeaderFlyweight<'a> {
-        HeaderFlyweight::new(self.buffer)
+        HeaderFlyweight::new(self.buffer.clone())
     }
     pub fn term_offset(&self) -> i32 {
         self.buffer.get_i32(SETUP_TERM_OFFSET_FIELD_OFFSET)
@@ -753,7 +753,7 @@ pub const RTTM_RECEIVER_ID_FIELD_OFFSET: usize = 32;
 pub const RTTM_HEADER_LENGTH: usize = 40;
 
 /// Flyweight over an RTT measurement frame.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct RttMeasurementFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
 }
@@ -763,7 +763,7 @@ impl<'a> RttMeasurementFlyweight<'a> {
         Self { buffer }
     }
     pub fn header(&self) -> HeaderFlyweight<'a> {
-        HeaderFlyweight::new(self.buffer)
+        HeaderFlyweight::new(self.buffer.clone())
     }
     pub fn session_id(&self) -> i32 {
         self.buffer.get_i32(RTTM_SESSION_ID_FIELD_OFFSET)

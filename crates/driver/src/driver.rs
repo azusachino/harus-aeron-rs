@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use aeron_client::cnc_file::CncFile;
 
@@ -26,6 +26,8 @@ pub struct MediaDriver {
     sender: Sender,
     receiver: Receiver,
     remove_aeron_dir_on_drop: bool,
+    clock_origin: Instant,
+    clock_origin_epoch_ns: i64,
 }
 
 /// A MediaDriver running its conductor, sender, and receiver duty cycle on a dedicated thread.
@@ -99,6 +101,8 @@ impl MediaDriver {
             sender,
             receiver,
             remove_aeron_dir_on_drop,
+            clock_origin: Instant::now(),
+            clock_origin_epoch_ns: epoch_ns(),
         })
     }
 
@@ -160,7 +164,9 @@ impl MediaDriver {
 
     /// Run one duty cycle across all agents, returning the total work done.
     pub fn do_work(&mut self) -> Result<usize> {
-        let now_ns = now_ns();
+        let now_ns = self
+            .clock_origin_epoch_ns
+            .saturating_add(self.clock_origin.elapsed().as_nanos().min(i64::MAX as u128) as i64);
         let conductor_work = self.conductor.do_work(now_ns)?;
         // Adopt any endpoints the conductor created this cycle into the send/receive agents.
         for publication in self.conductor.take_new_network_publications() {
@@ -182,6 +188,12 @@ impl MediaDriver {
             self.sender.update_destination(registration_id, update);
         }
         let sender_work = self.sender.do_work(now_ns)?;
+        for publication in self.sender.network_publications() {
+            self.conductor.sync_network_publication_limit(
+                publication.registration_id(),
+                publication.publication_limit(),
+            )?;
+        }
         let receiver_work = self.receiver.do_work_at(now_ns)?;
         // Hand received SETUP/DATA frames to the conductor for image creation + reassembly.
         let mut dispatch_work = 0;
@@ -325,7 +337,7 @@ impl Drop for RunningMediaDriver {
     }
 }
 
-fn now_ns() -> i64 {
+fn epoch_ns() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as i64)

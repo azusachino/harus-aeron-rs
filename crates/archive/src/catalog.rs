@@ -78,8 +78,49 @@ impl Catalog {
         use std::io::Write;
         let mut file = std::fs::File::create(path)?;
         file.write_all(&self.header.version.to_le_bytes())?;
-        file.write_all(&self.header.length.to_le_bytes())?;
+        let count = u32::try_from(self.ordered_descriptors.len()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "too many catalog entries")
+        })?;
+        file.write_all(&count.to_le_bytes())?;
         file.write_all(&self.header.next_recording_id.to_le_bytes())?;
+        for descriptor in &self.ordered_descriptors {
+            for value in [
+                descriptor.control_session_id,
+                descriptor.correlation_id,
+                descriptor.recording_id,
+                descriptor.start_position,
+                descriptor.stop_position,
+                descriptor.start_timestamp,
+                descriptor.stop_timestamp,
+            ] {
+                file.write_all(&value.to_le_bytes())?;
+            }
+            for value in [
+                descriptor.initial_term_id,
+                descriptor.segment_file_length,
+                descriptor.term_buffer_length,
+                descriptor.mtu_length,
+                descriptor.session_id,
+                descriptor.stream_id,
+            ] {
+                file.write_all(&value.to_le_bytes())?;
+            }
+            for value in [
+                &descriptor.stripped_channel,
+                &descriptor.original_channel,
+                &descriptor.source_identity,
+            ] {
+                let bytes = value.as_bytes();
+                let length = u32::try_from(bytes.len()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "catalog string exceeds u32",
+                    )
+                })?;
+                file.write_all(&length.to_le_bytes())?;
+                file.write_all(bytes)?;
+            }
+        }
         file.sync_all()?;
         Ok(())
     }
@@ -94,20 +135,80 @@ impl Catalog {
         let version = i32::from_le_bytes(buf4);
 
         file.read_exact(&mut buf4)?;
-        let length = i32::from_le_bytes(buf4);
+        let descriptor_count = u32::from_le_bytes(buf4);
 
         file.read_exact(&mut buf8)?;
         let next_recording_id = i64::from_le_bytes(buf8);
 
-        Ok(Self {
+        let mut catalog = Self {
             header: CatalogHeader {
                 version,
-                length,
+                length: descriptor_count.min(i32::MAX as u32) as i32,
                 next_recording_id,
             },
             descriptors: HashMap::new(),
             ordered_descriptors: Vec::new(),
-        })
+        };
+        for _ in 0..descriptor_count {
+            let mut read_i64 = || -> std::io::Result<i64> {
+                let mut bytes = [0u8; 8];
+                file.read_exact(&mut bytes)?;
+                Ok(i64::from_le_bytes(bytes))
+            };
+            let control_session_id = read_i64()?;
+            let correlation_id = read_i64()?;
+            let recording_id = read_i64()?;
+            let start_position = read_i64()?;
+            let stop_position = read_i64()?;
+            let start_timestamp = read_i64()?;
+            let stop_timestamp = read_i64()?;
+            let mut read_i32 = || -> std::io::Result<i32> {
+                let mut bytes = [0u8; 4];
+                file.read_exact(&mut bytes)?;
+                Ok(i32::from_le_bytes(bytes))
+            };
+            let initial_term_id = read_i32()?;
+            let segment_file_length = read_i32()?;
+            let term_buffer_length = read_i32()?;
+            let mtu_length = read_i32()?;
+            let session_id = read_i32()?;
+            let stream_id = read_i32()?;
+            let mut read_string = || -> std::io::Result<String> {
+                let mut length_bytes = [0u8; 4];
+                file.read_exact(&mut length_bytes)?;
+                let length = u32::from_le_bytes(length_bytes) as usize;
+                if length > 16 * 1024 * 1024 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "catalog string is unreasonably large",
+                    ));
+                }
+                let mut bytes = vec![0u8; length];
+                file.read_exact(&mut bytes)?;
+                String::from_utf8(bytes)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            };
+            let descriptor = RecordingDescriptor::new(
+                control_session_id,
+                correlation_id,
+                recording_id,
+                start_position,
+                stop_position,
+                start_timestamp,
+                stop_timestamp,
+                initial_term_id,
+                segment_file_length,
+                term_buffer_length,
+                mtu_length,
+                session_id,
+                stream_id,
+                read_string()?,
+                read_string()?,
+                read_string()?,
+            );
+            catalog.add_recording(descriptor);
+        }
+        Ok(catalog)
     }
 }
 
@@ -143,5 +244,42 @@ mod tests {
         catalog.add_recording(desc.clone());
         assert_eq!(catalog.get_recording(rec_id), Some(&desc));
         assert_eq!(catalog.recordings().len(), 1);
+    }
+
+    #[test]
+    fn should_persist_complete_recording_descriptors() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-catalog-{}-{:?}.dat",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut catalog = Catalog::new();
+        let recording_id = catalog.allocate_recording_id();
+        let descriptor = RecordingDescriptor::new(
+            1,
+            2,
+            recording_id,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            "stripped".into(),
+            "original".into(),
+            "source".into(),
+        );
+        catalog.add_recording(descriptor.clone());
+        catalog.save_to_file(&path).unwrap();
+
+        let loaded = Catalog::load_from_file(&path).unwrap();
+        assert_eq!(loaded.header().next_recording_id, 2);
+        assert_eq!(loaded.recordings(), &[descriptor]);
+        let _ = std::fs::remove_file(path);
     }
 }

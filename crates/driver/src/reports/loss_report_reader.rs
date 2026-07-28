@@ -61,7 +61,7 @@ mod tests {
     fn reads_multiple_entries_in_order() {
         let mut bytes = vec![0u8; 1024];
         let buffer = AtomicBuffer::new(&mut bytes);
-        let mut report = LossReport::new(buffer);
+        let mut report = LossReport::new(buffer.clone());
         report.create_entry(32, 7, 3, 1, "channel-one", "source-one");
         report.create_entry(48, 17, 13, 11, "channel-two", "source-two");
 
