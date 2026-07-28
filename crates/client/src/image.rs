@@ -164,7 +164,7 @@ impl Image {
         let index = index_by_position(position, self.position_bits_to_shift);
         let term_offset = (position & self.term_length_mask as i64) as usize;
 
-        let term_buffer = self.term_buffers[index];
+        let term_buffer = self.term_buffers[index].clone();
 
         let mut handler_adapter = |buf: &AtomicBuffer, offset: usize, length: i32, hdr: &Header| {
             fragment_handler(buf, offset, length as usize, hdr);

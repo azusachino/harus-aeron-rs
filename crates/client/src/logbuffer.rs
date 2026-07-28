@@ -680,7 +680,7 @@ impl TermReader {
         let mut fragments_read = 0;
         let mut offset = term_offset;
         let capacity = term_buffer.capacity();
-        header.set_buffer(*term_buffer);
+        header.set_buffer(term_buffer.clone());
 
         while fragments_read < fragments_limit && offset < capacity {
             let frame_length = frame_length_volatile(term_buffer, offset);
@@ -727,7 +727,7 @@ impl TermReader {
         let mut fragments_read = 0;
         let mut offset = term_offset;
         let capacity = term_buffer.capacity();
-        header.set_buffer(*term_buffer);
+        header.set_buffer(term_buffer.clone());
 
         while fragments_read < fragments_limit && offset < capacity {
             let frame_length = frame_length_volatile(term_buffer, offset);
@@ -1269,7 +1269,7 @@ mod tests {
         {
             let mut bytes = vec![0u8; 128];
             let buf = AtomicBuffer::new(&mut bytes);
-            let flyweight = DataHeaderFlyweight::new(buf);
+            let flyweight = DataHeaderFlyweight::new(buf.clone());
             flyweight.set_frame_length(frame_length);
             flyweight.set_term_id(term_id);
             flyweight.set_term_offset(term_offset);

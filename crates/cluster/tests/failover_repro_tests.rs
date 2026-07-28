@@ -1,14 +1,13 @@
-//! Integration test reproducing 3-node leader failover scenario under simulated load.
+//! In-memory election model for a three-node leader transition.
 //!
-//! Validates leader election failover recovery, addressing the unresolved bug scenario from
-//! `harus-aeron-zig`.
+//! This does not exercise transports, replicated logs, archive recovery, or concurrent load.
 
 use aeron_cluster::codecs::ClusterRole;
 use aeron_cluster::consensus_module::ConsensusModule;
 use aeron_cluster::state_machine::ClusterMember;
 
 #[test]
-fn should_recover_from_leader_failover_under_load() {
+fn should_model_a_leader_transition_after_a_new_election() {
     let members = vec![
         ClusterMember::new(0, "aeron:ipc", "aeron:ipc"),
         ClusterMember::new(1, "aeron:ipc", "aeron:ipc"),

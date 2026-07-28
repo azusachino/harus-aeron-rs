@@ -104,7 +104,7 @@ mod tests {
     fn should_pass_through_unfragmented_message() {
         let mut header_bytes = vec![0u8; 64];
         let header_buf = AtomicBuffer::new(&mut header_bytes);
-        let data_header = DataHeaderFlyweight::new(header_buf);
+        let data_header = DataHeaderFlyweight::new(header_buf.clone());
         data_header.set_flags(UNFRAGMENTED);
         data_header.set_session_id(SESSION_ID);
 
@@ -136,7 +136,7 @@ mod tests {
 
         let mut header_bytes_1 = vec![0u8; 64];
         let header_buf_1 = AtomicBuffer::new(&mut header_bytes_1);
-        let data_hdr_1 = DataHeaderFlyweight::new(header_buf_1);
+        let data_hdr_1 = DataHeaderFlyweight::new(header_buf_1.clone());
         data_hdr_1.set_flags(BEGIN_FRAG_FLAG);
         data_hdr_1.set_session_id(SESSION_ID);
         data_hdr_1.set_term_offset(HEADER_LENGTH);
@@ -160,7 +160,7 @@ mod tests {
 
         let mut header_bytes_2 = vec![0u8; 64];
         let header_buf_2 = AtomicBuffer::new(&mut header_bytes_2);
-        let data_hdr_2 = DataHeaderFlyweight::new(header_buf_2);
+        let data_hdr_2 = DataHeaderFlyweight::new(header_buf_2.clone());
         data_hdr_2.set_flags(END_FRAG_FLAG);
         data_hdr_2.set_session_id(SESSION_ID);
         data_hdr_2.set_term_offset(next_offset);

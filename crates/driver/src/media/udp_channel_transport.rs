@@ -83,6 +83,18 @@ impl UdpChannelTransport {
             .map_err(|e| DriverError::IllegalState(format!("UDP recv_from error: {e}")))
     }
 
+    /// Receive one datagram without hiding socket failures behind an empty poll.
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>> {
+        match self.socket.recv_from(buf) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(None),
+            Err(error) => Err(DriverError::IllegalState(format!(
+                "UDP recv_from error: {error}"
+            ))),
+        }
+    }
+
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr().map_err(|e| {
             DriverError::IllegalState(format!("failed to query local socket address: {e}"))

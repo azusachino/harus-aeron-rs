@@ -97,7 +97,8 @@ fn removing_a_publication_acks_with_operation_success() {
     let got = events
         .receive_next(|msg_type, buf, offset, _len| {
             seen_type = msg_type;
-            seen_correlation = OperationSucceededFlyweight::wrap(*buf, offset).correlation_id();
+            seen_correlation =
+                OperationSucceededFlyweight::wrap(buf.clone(), offset).correlation_id();
         })
         .unwrap();
 
@@ -163,7 +164,9 @@ fn network_spy_subscription_reads_the_publication_log() {
         receiver.local_addr().unwrap().port()
     );
     let spy_channel = format!("aeron-spy:{channel}");
-    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut config = small_udp_config();
+    config.spies_simulate_connection = true;
+    let mut driver = MediaDriver::launch(config).expect("launch");
     let mut publisher = client_conductor(&driver, 1);
     let mut spy = client_conductor(&driver, 2);
 
@@ -229,10 +232,10 @@ fn network_publication_sender_transmits_setup_and_data_frames() {
     let payload_len = payload.len();
     let src = AtomicBuffer::new(&mut payload);
     let publication = publisher.publication(pub_reg).expect("publication ready");
-    assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
-
-    // Next duty cycle flushes the framed data out of the shared log onto the wire.
-    driver.do_work().expect("flush data");
+    assert_eq!(
+        publication.offer(&src, 0, payload_len).unwrap(),
+        aeron_client::publication::NOT_CONNECTED
+    );
 
     // The receiver socket sees a SETUP announcement followed by the DATA frame.
     let mut saw_setup = false;
@@ -250,7 +253,6 @@ fn network_publication_sender_transmits_setup_and_data_frames() {
         };
         let header = HeaderFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
         let frame_type = header.header_type();
-        let frame_length = header.frame_length() as usize;
         if frame_type == HDR_TYPE_SETUP {
             saw_setup = true;
             let setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
@@ -277,8 +279,21 @@ fn network_publication_sender_transmits_setup_and_data_frames() {
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
-        } else if frame_type == HDR_TYPE_DATA && frame_length > DATA_HEADER_LENGTH {
-            // Slice by the frame's own length, not the MTU-padded datagram size.
+            break;
+        }
+    }
+
+    assert!(saw_setup, "sender announced the stream with a SETUP frame");
+    assert!(publication.offer(&src, 0, payload_len).unwrap() > 0);
+    driver.do_work().expect("flush data");
+    for _ in 0..4 {
+        let (n, source) = match receiver.recv_from(&mut buf) {
+            Ok(value) => value,
+            Err(_) => break,
+        };
+        let header = HeaderFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+        let frame_length = header.frame_length() as usize;
+        if header.header_type() == HDR_TYPE_DATA && frame_length > DATA_HEADER_LENGTH {
             data_payload = Some(buf[DATA_HEADER_LENGTH..frame_length].to_vec());
             sender_address = Some(source);
             data_frame_length = frame_length;
@@ -289,8 +304,6 @@ fn network_publication_sender_transmits_setup_and_data_frames() {
             break;
         }
     }
-
-    assert!(saw_setup, "sender announced the stream with a SETUP frame");
     assert_eq!(data_payload.as_deref(), Some(&b"hello-udp"[..]));
 
     // Request the frame again and prove the sender retransmits from the mapped term log.
@@ -366,6 +379,15 @@ fn udp_publication_to_subscription_roundtrip_through_two_drivers() {
         subscriber.register_counter(*id, counter.clone());
     }
     subscriber.do_work().expect("resolve available image");
+    for _ in 0..20 {
+        publisher_driver
+            .do_work()
+            .expect("publisher receives initial status");
+        if publisher_driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     let mut payload = *b"hello-udp-roundtrip";
     let payload_len = payload.len();
@@ -1262,7 +1284,8 @@ fn last_error_correlation(events: &mut BroadcastReceiver) -> Option<i64> {
         .receive_next(|msg_type, buf, offset, _len| {
             if msg_type == ON_ERROR {
                 correlation = Some(
-                    ErrorResponseFlyweight::wrap(*buf, offset).offending_command_correlation_id(),
+                    ErrorResponseFlyweight::wrap(buf.clone(), offset)
+                        .offending_command_correlation_id(),
                 );
             }
         })

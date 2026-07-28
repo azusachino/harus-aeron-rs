@@ -195,12 +195,26 @@ impl CncFile {
         client_liveness_timeout_ns: i64,
         file_page_size: i32,
     ) -> Result<Self> {
-        let total_len = META_DATA_LENGTH
-            + to_driver_length
-            + to_clients_length
-            + counters_metadata_length
-            + counters_values_length
-            + error_log_length;
+        let region_lengths = [
+            ("to-driver", to_driver_length),
+            ("to-clients", to_clients_length),
+            ("counters metadata", counters_metadata_length),
+            ("counters values", counters_values_length),
+            ("error log", error_log_length),
+        ];
+        for (name, length) in region_lengths {
+            i32::try_from(length).map_err(|_| {
+                AeronError::IllegalState(format!("{name} region length exceeds i32: {length}"))
+            })?;
+        }
+        let total_len =
+            region_lengths
+                .iter()
+                .try_fold(META_DATA_LENGTH, |total, (_, length)| {
+                    total.checked_add(*length).ok_or_else(|| {
+                        AeronError::IllegalState("CnC region lengths overflow usize".to_string())
+                    })
+                })?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -267,18 +281,28 @@ impl CncFile {
             )));
         }
 
-        let to_driver_length = meta.get_i32(TO_DRIVER_LENGTH_OFFSET) as usize;
-        let to_clients_length = meta.get_i32(TO_CLIENTS_LENGTH_OFFSET) as usize;
-        let counters_metadata_length = meta.get_i32(COUNTER_METADATA_LENGTH_OFFSET) as usize;
-        let counters_values_length = meta.get_i32(COUNTER_VALUES_LENGTH_OFFSET) as usize;
-        let error_log_length = meta.get_i32(ERROR_LOG_LENGTH_OFFSET) as usize;
+        let read_length = |offset, name| {
+            usize::try_from(meta.get_i32(offset)).map_err(|_| {
+                AeronError::IllegalState(format!("CnC {name} region length is negative"))
+            })
+        };
+        let to_driver_length = read_length(TO_DRIVER_LENGTH_OFFSET, "to-driver")?;
+        let to_clients_length = read_length(TO_CLIENTS_LENGTH_OFFSET, "to-clients")?;
+        let counters_metadata_length =
+            read_length(COUNTER_METADATA_LENGTH_OFFSET, "counters metadata")?;
+        let counters_values_length = read_length(COUNTER_VALUES_LENGTH_OFFSET, "counters values")?;
+        let error_log_length = read_length(ERROR_LOG_LENGTH_OFFSET, "error log")?;
         let to_driver_offset = META_DATA_LENGTH;
-        let to_clients_offset = to_driver_offset + to_driver_length;
-        let counters_metadata_offset = to_clients_offset + to_clients_length;
-        let counters_values_offset = counters_metadata_offset + counters_metadata_length;
-        let error_log_offset = counters_values_offset + counters_values_length;
-
-        let required_length = error_log_offset + error_log_length;
+        let add = |offset: usize, length: usize| {
+            offset.checked_add(length).ok_or_else(|| {
+                AeronError::IllegalState("CnC region geometry overflows usize".to_string())
+            })
+        };
+        let to_clients_offset = add(to_driver_offset, to_driver_length)?;
+        let counters_metadata_offset = add(to_clients_offset, to_clients_length)?;
+        let counters_values_offset = add(counters_metadata_offset, counters_metadata_length)?;
+        let error_log_offset = add(counters_values_offset, counters_values_length)?;
+        let required_length = add(error_log_offset, error_log_length)?;
         if storage.len() < required_length {
             return Err(AeronError::IllegalState(format!(
                 "CnC file length {} too small for declared buffers (to_driver={}, to_clients={}, counters_metadata={}, counters_values={}, error_log={})",
@@ -311,7 +335,7 @@ impl CncFile {
         // construction, and the mapping is kept alive by the `Arc` for as long as any
         // returned buffer is used.
         let ptr = unsafe { (self.0.storage.as_ptr() as *mut u8).add(offset) };
-        unsafe { AtomicBuffer::from_raw_parts(ptr, length) }
+        unsafe { AtomicBuffer::from_raw_parts_owned(ptr, length, Arc::clone(&self.0)) }
     }
 
     /// The to-driver region — wrap with `ManyToOneRingBuffer` to send/receive client commands.
@@ -531,6 +555,31 @@ mod tests {
         assert!(CncFile::from_bytes(vec![0u8; META_DATA_LENGTH - 1]).is_err());
         // Long enough but version field is zero (uninitialized).
         assert!(CncFile::from_bytes(vec![0u8; META_DATA_LENGTH + 8]).is_err());
+    }
+
+    #[test]
+    fn rejects_negative_declared_region_length() {
+        let mut bytes = vec![0u8; META_DATA_LENGTH];
+        let metadata = AtomicBuffer::new(&mut bytes);
+        metadata.put_i32(CNC_VERSION_OFFSET, CNC_VERSION);
+        metadata.put_i32(TO_DRIVER_LENGTH_OFFSET, -1);
+
+        let error = CncFile::from_bytes(bytes).err().unwrap().to_string();
+        assert!(error.contains("to-driver region length is negative"));
+    }
+
+    #[test]
+    fn region_view_retains_its_backing_storage() {
+        let mut bytes = vec![0u8; META_DATA_LENGTH + 8];
+        let metadata = AtomicBuffer::new(&mut bytes);
+        metadata.put_i32(CNC_VERSION_OFFSET, CNC_VERSION);
+        metadata.put_i32(TO_DRIVER_LENGTH_OFFSET, 8);
+        let cnc = CncFile::from_bytes(bytes).unwrap();
+        let view = cnc.to_driver_buffer();
+
+        drop(cnc);
+        view.put_i64(0, 42);
+        assert_eq!(view.get_i64(0), 42);
     }
 
     #[test]

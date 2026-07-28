@@ -7,6 +7,8 @@ use std::net::SocketAddr;
 use crate::error::Result;
 use crate::media::udp_channel_transport::UdpChannelTransport;
 
+const POLL_BATCH_LIMIT: usize = 64;
+
 pub struct DataTransportPoller {
     transports: Vec<UdpChannelTransport>,
     buffer: Vec<u8>,
@@ -36,7 +38,11 @@ impl DataTransportPoller {
     {
         let mut total_bytes = 0;
         for transport in &self.transports {
-            while let Ok((bytes_read, src_addr)) = transport.recv_from(&mut self.buffer) {
+            for _ in 0..POLL_BATCH_LIMIT {
+                let Some((bytes_read, src_addr)) = transport.try_recv_from(&mut self.buffer)?
+                else {
+                    break;
+                };
                 if bytes_read > 0 {
                     total_bytes += bytes_read;
                     frame_handler(&self.buffer[..bytes_read], src_addr);
@@ -76,7 +82,11 @@ impl ControlTransportPoller {
     {
         let mut total_bytes = 0;
         for transport in &self.transports {
-            while let Ok((bytes_read, src_addr)) = transport.recv_from(&mut self.buffer) {
+            for _ in 0..POLL_BATCH_LIMIT {
+                let Some((bytes_read, src_addr)) = transport.try_recv_from(&mut self.buffer)?
+                else {
+                    break;
+                };
                 if bytes_read > 0 {
                     total_bytes += bytes_read;
                     frame_handler(&self.buffer[..bytes_read], src_addr);

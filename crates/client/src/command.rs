@@ -7,7 +7,7 @@ pub const CLIENT_ID_OFFSET: usize = 0;
 pub const CORRELATION_ID_OFFSET: usize = 8;
 
 /// Base flyweight for correlated request messages (`client_id`, `correlation_id`).
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct CorrelatedMessageFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -46,7 +46,7 @@ pub const KEY_LENGTH_OFFSET: usize = 20;
 pub const KEY_BUFFER_OFFSET: usize = 24;
 
 /// Flyweight for `ADD_COUNTER` / `REMOVE_COUNTER` control messages.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct CounterMessageFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -134,7 +134,7 @@ pub const TOKEN_LENGTH_OFFSET: usize = 16;
 pub const TOKEN_BUFFER_OFFSET: usize = 20;
 
 /// Flyweight for `TERMINATE_DRIVER` control messages.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct TerminateDriverFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -191,7 +191,7 @@ pub const PUB_CHANNEL_LENGTH_OFFSET: usize = 20;
 pub const PUB_CHANNEL_OFFSET: usize = 24;
 
 /// Flyweight for `ADD_PUBLICATION` / `ADD_EXCLUSIVE_PUBLICATION`.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct PublicationMessageFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -261,7 +261,7 @@ pub const REGISTRATION_ID_OFFSET: usize = 16;
 pub const REMOVE_PUB_FLAGS_OFFSET: usize = 24;
 
 /// Flyweight for `REMOVE_PUBLICATION`, `REMOVE_SUBSCRIPTION`, `REMOVE_COUNTER`.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct RemoveMessageFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -324,7 +324,7 @@ pub const SUB_CHANNEL_LENGTH_OFFSET: usize = 28;
 pub const SUB_CHANNEL_OFFSET: usize = 32;
 
 /// Flyweight for `ADD_SUBSCRIPTION`.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct SubscriptionMessageFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -405,7 +405,7 @@ pub const DEST_CHANNEL_LENGTH_OFFSET: usize = 24;
 pub const DEST_CHANNEL_OFFSET: usize = 28;
 
 /// Flyweight for `ADD_DESTINATION` / `REMOVE_DESTINATION`.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct DestinationMessageFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,

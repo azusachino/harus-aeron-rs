@@ -5,14 +5,17 @@
 
 #[cfg(not(all(test, loom)))]
 use std::sync::atomic::Ordering;
+#[cfg(not(all(test, loom)))]
+use std::{any::Any, sync::Arc};
 
 use crate::error::{AgronaError, Result};
 
 #[cfg(not(all(test, loom)))]
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct AtomicBuffer<'a> {
     ptr: *mut u8,
     len: usize,
+    _owner: Option<Arc<dyn Any + Send + Sync>>,
     _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -33,6 +36,7 @@ impl<'a> AtomicBuffer<'a> {
         Self {
             ptr: slice.as_mut_ptr(),
             len: slice.len(),
+            _owner: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -42,10 +46,11 @@ impl<'a> AtomicBuffer<'a> {
     /// # Safety
     /// Calling mutators on a buffer created from a read-only slice is undefined behavior
     /// unless the underlying memory is mutable (e.g. shared memory). Use with caution.
-    pub fn from_slice(slice: &'a [u8]) -> Self {
+    pub unsafe fn from_slice(slice: &'a [u8]) -> Self {
         Self {
             ptr: slice.as_ptr() as *mut u8,
             len: slice.len(),
+            _owner: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -59,6 +64,28 @@ impl<'a> AtomicBuffer<'a> {
         Self {
             ptr,
             len,
+            _owner: None,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Create a raw buffer view which owns the storage keeping `ptr` alive.
+    ///
+    /// # Safety
+    /// The caller must ensure `ptr` identifies at least `len` bytes within `owner`'s stable
+    /// allocation. The allocation must not move or be resized while any cloned view exists.
+    pub unsafe fn from_raw_parts_owned<T>(
+        ptr: *mut u8,
+        len: usize,
+        owner: Arc<T>,
+    ) -> AtomicBuffer<'static>
+    where
+        T: Any + Send + Sync,
+    {
+        AtomicBuffer {
+            ptr,
+            len,
+            _owner: Some(owner),
             _marker: std::marker::PhantomData,
         }
     }
@@ -72,12 +99,18 @@ impl<'a> AtomicBuffer<'a> {
     pub fn wrap(&mut self, slice: &'a mut [u8]) {
         self.ptr = slice.as_mut_ptr();
         self.len = slice.len();
+        self._owner = None;
     }
 
     /// Re-wrap the buffer over a read-only slice.
-    pub fn wrap_slice(&mut self, slice: &'a [u8]) {
+    ///
+    /// # Safety
+    /// The caller must ensure that the underlying memory is mutable before calling any
+    /// mutating operation through this buffer.
+    pub unsafe fn wrap_slice(&mut self, slice: &'a [u8]) {
         self.ptr = slice.as_ptr() as *mut u8;
         self.len = slice.len();
+        self._owner = None;
     }
 
     /// Returns a slice view of the underlying memory.
@@ -125,9 +158,11 @@ impl<'a> AtomicBuffer<'a> {
     /// Try to get a slice of bytes from the specified offset.
     pub fn try_get_bytes(&self, offset: usize, dest: &mut [u8]) -> Result<()> {
         self.check_bounds(offset, dest.len())?;
-        unsafe {
-            let src_ptr = self.ptr.add(offset);
-            std::ptr::copy_nonoverlapping(src_ptr, dest.as_mut_ptr(), dest.len());
+        for (index, byte) in dest.iter_mut().enumerate() {
+            unsafe {
+                let src = &*(self.ptr.add(offset + index) as *const std::sync::atomic::AtomicU8);
+                *byte = src.load(Ordering::Relaxed);
+            }
         }
         Ok(())
     }
@@ -141,9 +176,11 @@ impl<'a> AtomicBuffer<'a> {
     /// Try to put a slice of bytes at the specified offset.
     pub fn try_put_bytes(&self, offset: usize, src: &[u8]) -> Result<()> {
         self.check_bounds(offset, src.len())?;
-        unsafe {
-            let dest_ptr = self.ptr.add(offset);
-            std::ptr::copy_nonoverlapping(src.as_ptr(), dest_ptr, src.len());
+        for (index, byte) in src.iter().copied().enumerate() {
+            unsafe {
+                let dest = &*(self.ptr.add(offset + index) as *const std::sync::atomic::AtomicU8);
+                dest.store(byte, Ordering::Relaxed);
+            }
         }
         Ok(())
     }
@@ -164,8 +201,14 @@ impl<'a> AtomicBuffer<'a> {
     ) -> Result<()> {
         self.check_bounds(offset, length)?;
         src.check_bounds(src_offset, length)?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.ptr.add(src_offset), self.ptr.add(offset), length);
+        for index in 0..length {
+            unsafe {
+                let src_byte =
+                    &*(src.ptr.add(src_offset + index) as *const std::sync::atomic::AtomicU8);
+                let dest_byte =
+                    &*(self.ptr.add(offset + index) as *const std::sync::atomic::AtomicU8);
+                dest_byte.store(src_byte.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
         }
         Ok(())
     }
@@ -351,11 +394,9 @@ macro_rules! impl_primitive {
             #[doc = concat!("Try to get a `", stringify!($t), "` value at the specified offset using non-atomic load.")]
             pub fn $try_get_name(&self, offset: usize) -> Result<$t> {
                 self.check_bounds(offset, $size)?;
-                unsafe {
-                    let ptr = self.ptr.add(offset);
-                    let bytes = std::ptr::read_unaligned(ptr as *const [u8; $size]);
-                    Ok(<$t>::from_le_bytes(bytes))
-                }
+                let mut bytes = [0u8; $size];
+                self.try_get_bytes(offset, &mut bytes)?;
+                Ok(<$t>::from_le_bytes(bytes))
             }
 
             #[doc = concat!("Get a `", stringify!($t), "` value at the specified offset using non-atomic load. Panics on bounds error.")]
@@ -366,12 +407,7 @@ macro_rules! impl_primitive {
             #[doc = concat!("Try to put a `", stringify!($t), "` value at the specified offset using non-atomic store.")]
             pub fn $try_put_name(&self, offset: usize, value: $t) -> Result<()> {
                 self.check_bounds(offset, $size)?;
-                unsafe {
-                    let ptr = self.ptr.add(offset);
-                    let bytes = value.to_le_bytes();
-                    std::ptr::write_unaligned(ptr as *mut [u8; $size], bytes);
-                }
-                Ok(())
+                self.try_put_bytes(offset, &value.to_le_bytes())
             }
 
             #[doc = concat!("Put a `", stringify!($t), "` value at the specified offset using non-atomic store. Panics on bounds error.")]

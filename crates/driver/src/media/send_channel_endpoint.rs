@@ -76,12 +76,15 @@ impl SendChannelEndpoint {
     pub fn poll_control(&mut self) -> Result<usize> {
         let mut buffer = [0u8; 256];
         let mut work = 0;
-        while let Ok((length, _src)) = self.transport.recv_from(&mut buffer) {
+        for _ in 0..64 {
+            let Some((length, _src)) = self.transport.try_recv_from(&mut buffer)? else {
+                break;
+            };
             if length < 8 {
                 continue;
             }
             let frame = AtomicBuffer::new(&mut buffer[..length]);
-            let header = HeaderFlyweight::new(frame);
+            let header = HeaderFlyweight::new(frame.clone());
             match header.header_type() {
                 HDR_TYPE_SM if length >= aeron_client::protocol::STATUS_MESSAGE_HEADER_LENGTH => {
                     let sm = StatusMessageFlyweight::new(frame);

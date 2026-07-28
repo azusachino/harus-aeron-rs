@@ -184,6 +184,10 @@ impl NetworkPublication {
         self.receiver_limit
     }
 
+    pub fn publication_limit(&self) -> i64 {
+        self.publication_limit.load(Ordering::Acquire)
+    }
+
     pub fn clean_position(&self) -> i64 {
         self.clean_position
     }
@@ -349,7 +353,11 @@ impl NetworkPublication {
         // independent of whether an SM arrived this cycle -- a receiver that stops sending
         // status messages entirely (crash, network partition) must eventually stop constraining
         // the sender's window, not hold it hostage forever.
+        let previous_limit = self.receiver_limit;
         self.receiver_limit = self.flow_control.on_idle(now_ns, self.receiver_limit);
+        if self.receiver_limit != previous_limit {
+            self.update_publication_limit();
+        }
         Ok(work)
     }
 
@@ -377,7 +385,7 @@ impl NetworkPublication {
         }
         let index = index_by_position(self.sender_position, self.position_bits_to_shift);
         let term_buffers = self.log_buffers.duplicate_term_buffers();
-        let term_buffer = term_buffers[index];
+        let term_buffer = term_buffers[index].clone();
         let term_offset = (self.sender_position as usize) & (self.term_length - 1);
 
         // Whole data frames available from the sender position, bounded by the MTU.
@@ -475,7 +483,7 @@ impl NetworkPublication {
         }
 
         let term_buffers = log_buffers.duplicate_term_buffers();
-        let term_buffer = term_buffers[term_count as usize];
+        let term_buffer = term_buffers[term_count as usize].clone();
         let mut offset = term_offset as usize;
         let length = calculate_retransmission_length(
             length,

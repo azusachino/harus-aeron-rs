@@ -2,7 +2,7 @@
 //!
 //! Mirrors `io.aeron.cluster.ConsensusModule.java`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::codecs::{ClusterHeader, ClusterRole};
@@ -15,7 +15,7 @@ pub struct ConsensusModule {
     election_timeout: Duration,
     heartbeat_interval: Duration,
     last_heartbeat: Instant,
-    votes_received: usize,
+    votes_received: HashSet<i32>,
 }
 
 impl ConsensusModule {
@@ -31,7 +31,7 @@ impl ConsensusModule {
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             last_heartbeat: Instant::now(),
-            votes_received: 0,
+            votes_received: HashSet::new(),
         }
     }
 
@@ -54,7 +54,7 @@ impl ConsensusModule {
                 }
             }
             ClusterRole::Candidate => {
-                if self.votes_received >= self.quorum_size() {
+                if self.votes_received.len() >= self.quorum_size() {
                     self.state_machine.transition_to_leader();
                     work_count += 1;
                 } else if self.last_heartbeat.elapsed() > self.election_timeout {
@@ -76,7 +76,8 @@ impl ConsensusModule {
 
     pub fn start_election(&mut self) {
         self.state_machine.transition_to_candidate();
-        self.votes_received = 1; // vote for self
+        self.votes_received.clear();
+        self.votes_received.insert(self.state_machine.member_id());
         self.last_heartbeat = Instant::now();
     }
 
@@ -103,12 +104,13 @@ impl ConsensusModule {
         }
     }
 
-    pub fn on_vote_response(&mut self, _voter_id: i32, term_id: i64, vote_granted: bool) {
+    pub fn on_vote_response(&mut self, voter_id: i32, term_id: i64, vote_granted: bool) {
         if self.state_machine.role() == ClusterRole::Candidate
             && term_id == self.state_machine.term_id()
             && vote_granted
+            && self.members.contains_key(&voter_id)
         {
-            self.votes_received += 1;
+            self.votes_received.insert(voter_id);
         }
     }
 }
@@ -134,6 +136,29 @@ mod tests {
         consensus.on_vote_response(1, 1, true);
         let _ = consensus.do_work();
 
+        assert_eq!(consensus.state_machine().role(), ClusterRole::Leader);
+    }
+
+    #[test]
+    fn should_not_count_duplicate_or_unknown_votes() {
+        let members = vec![
+            ClusterMember::new(0, "aeron:ipc", "aeron:ipc"),
+            ClusterMember::new(1, "aeron:ipc", "aeron:ipc"),
+            ClusterMember::new(2, "aeron:ipc", "aeron:ipc"),
+            ClusterMember::new(3, "aeron:ipc", "aeron:ipc"),
+            ClusterMember::new(4, "aeron:ipc", "aeron:ipc"),
+        ];
+        let mut consensus = ConsensusModule::new(0, members);
+        consensus.start_election();
+
+        consensus.on_vote_response(1, 1, true);
+        consensus.on_vote_response(1, 1, true);
+        consensus.on_vote_response(99, 1, true);
+        consensus.do_work().unwrap();
+        assert_eq!(consensus.state_machine().role(), ClusterRole::Candidate);
+
+        consensus.on_vote_response(2, 1, true);
+        consensus.do_work().unwrap();
         assert_eq!(consensus.state_machine().role(), ClusterRole::Leader);
     }
 }

@@ -27,7 +27,7 @@ const I64: usize = 8;
 const I32: usize = 4;
 
 /// Response flyweight for `ON_PUBLICATION_READY` and `ON_EXCLUSIVE_PUBLICATION_READY`.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct PublicationBuffersReadyFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -87,7 +87,7 @@ impl<'a> PublicationBuffersReadyFlyweight<'a> {
 }
 
 /// Response flyweight for `ON_SUBSCRIPTION_READY`.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct SubscriptionReadyFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -111,7 +111,7 @@ impl<'a> SubscriptionReadyFlyweight<'a> {
 }
 
 /// Response flyweight for `ON_AVAILABLE_IMAGE`.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct ImageBuffersReadyFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -177,7 +177,7 @@ impl<'a> ImageBuffersReadyFlyweight<'a> {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct ErrorResponseFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -211,7 +211,7 @@ impl<'a> ErrorResponseFlyweight<'a> {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct OperationSucceededFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -228,7 +228,7 @@ impl<'a> OperationSucceededFlyweight<'a> {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct ClientTimeoutFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -245,7 +245,7 @@ impl<'a> ClientTimeoutFlyweight<'a> {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct NextAvailableSessionIdFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -263,7 +263,7 @@ impl<'a> NextAvailableSessionIdFlyweight<'a> {
 }
 
 /// Shared response flyweight for counter available/unavailable notifications.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct CounterUpdateFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,
@@ -281,7 +281,7 @@ impl<'a> CounterUpdateFlyweight<'a> {
 }
 
 /// Flyweight for the correlation and subscription id in an unavailable-image event.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct ImageMessageFlyweight<'a> {
     buffer: AtomicBuffer<'a>,
     offset: usize,

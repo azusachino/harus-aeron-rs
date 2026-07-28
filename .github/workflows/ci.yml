@@ -36,3 +36,12 @@ jobs:
 
       - name: Test-parity report (informational)
         run: make test-parity
+
+      - name: Rust client to Rust driver interop
+        run: make interop-rust-smoke
+
+      - name: Java and Rust driver interop
+        run: make interop-smoke
+
+      - name: Agrona loom interleaving checks
+        run: RUSTFLAGS="--cfg loom" cargo test -p agrona --lib
