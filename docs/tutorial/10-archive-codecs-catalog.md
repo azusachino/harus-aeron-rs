@@ -15,6 +15,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 
 - `crates/archive/src/control_session.rs`: `ControlSession` state machine (`Init`, `Connected`, `Closed`).
 - `crates/archive/src/conductor.rs`: `ArchiveConductor` for processing client connection requests (`on_connect`) and stream recording sessions (`on_start_recording`).
+- `crates/archive/src/runtime.rs`: persistent recording of aligned frames from a real subscription and replay through a real publication after catalog restart.
 
 ## Verification
 

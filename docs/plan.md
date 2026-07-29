@@ -129,11 +129,14 @@ term-aligned segment-file math, recording-signal values, bounded recording queri
 an in-memory recording/replay lifecycle are implemented. The current control boundary
 now uses bounded complete v13 SBE codecs for `ConnectRequest`, `StartRecordingRequest`,
 and `ControlResponse`, including variable ASCII data and pinned Java-generated golden
-vectors. This is still not Archive runtime parity: no real driver → segment file →
-restart → replay path exists, and the remaining schema templates are added only as
-their runtime operations land. Keep all 30 Archive module files and 20 Archive
-system-test files `todo` until the real lifecycle boundary is closed and corresponding
-upstream test files are ported.
+vectors. The runtime now records complete aligned frames from a real Media Driver
+subscription into Archive segment files, persists catalog stop metadata, reopens both
+after an Archive-state restart, and replays payloads through a real
+publication/subscription. This closes the first lifecycle proof, not full Archive
+parity: the runtime is an in-process Archive client, the broader control template set
+and process launcher remain future work, and no complete upstream Archive test-file
+family has been ported. Keep all Archive ledger rows `todo` until their corresponding
+upstream test scopes are satisfied.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is
