@@ -2,60 +2,49 @@
 
 use aeron_archive::catalog::Catalog;
 use aeron_archive::codecs::{
-    ControlRequestHeader, ControlResponseCode, ControlResponseHeader, MessageHeader, SBE_SCHEMA_ID,
-    SBE_SCHEMA_VERSION,
+    ConnectRequest, ControlResponse, ControlResponseCode, PROTOCOL_SEMANTIC_VERSION,
+    SBE_SCHEMA_VERSION, SourceLocation, StartRecordingRequest,
 };
 use aeron_archive::conductor::ArchiveConductor;
 use aeron_archive::control_session::ControlSession;
 use aeron_archive::recording_descriptor::RecordingDescriptor;
-use agrona::atomic_buffer::AtomicBuffer;
-
 #[test]
-fn test_sbe_message_header_roundtrip() {
-    let mut backing = [0u8; 32];
-    let buffer = AtomicBuffer::new(&mut backing);
-
-    let header = MessageHeader {
-        block_length: 24,
-        template_id: 1,
-        schema_id: SBE_SCHEMA_ID,
-        version: SBE_SCHEMA_VERSION,
+fn test_complete_sbe_messages_roundtrip() {
+    let connect = ConnectRequest {
+        correlation_id: 100,
+        response_stream_id: 200,
+        version: PROTOCOL_SEMANTIC_VERSION,
+        response_channel: "aeron:ipc".into(),
     };
-    header.encode(&buffer, 0);
+    assert_eq!(
+        ConnectRequest::decode(&connect.encode().expect("encode")).expect("decode"),
+        connect
+    );
 
-    let decoded = MessageHeader::decode(&buffer, 0);
-    assert_eq!(decoded.block_length, 24);
-    assert_eq!(decoded.template_id, 1);
-    assert_eq!(decoded.schema_id, SBE_SCHEMA_ID);
-    assert_eq!(decoded.version, SBE_SCHEMA_VERSION);
-}
-
-#[test]
-fn test_control_headers_encode_decode() {
-    let mut backing = [0u8; 64];
-    let buffer = AtomicBuffer::new(&mut backing);
-
-    let req = ControlRequestHeader {
+    let start = StartRecordingRequest {
         control_session_id: 100,
         correlation_id: 200,
-        template_id: 3,
-        schema_id: SBE_SCHEMA_ID as i16,
-        version: SBE_SCHEMA_VERSION as i16,
+        stream_id: 10,
+        source_location: SourceLocation::Local,
+        channel: "aeron:ipc".into(),
     };
-    req.encode(&buffer, 0);
-    let decoded_req = ControlRequestHeader::decode(&buffer, 0);
-    assert_eq!(decoded_req, req);
+    assert_eq!(
+        StartRecordingRequest::decode(&start.encode().expect("encode")).expect("decode"),
+        start
+    );
 
-    let resp = ControlResponseHeader {
+    let response = ControlResponse {
         control_session_id: 100,
         correlation_id: 200,
         relevant_id: 1,
-        code: ControlResponseCode::Ok as i32,
-        _pad: 0,
+        code: ControlResponseCode::Ok,
+        version: PROTOCOL_SEMANTIC_VERSION,
+        error_message: String::new(),
     };
-    resp.encode(&buffer, 24);
-    let decoded_resp = ControlResponseHeader::decode(&buffer, 24);
-    assert_eq!(decoded_resp, resp);
+    assert_eq!(
+        ControlResponse::decode(&response.encode().expect("encode")).expect("decode"),
+        response
+    );
 }
 
 #[test]
@@ -247,8 +236,8 @@ fn test_control_session_responses() {
     assert_eq!(ok_resp.control_session_id, 42);
     assert_eq!(ok_resp.correlation_id, 1234);
     assert_eq!(ok_resp.relevant_id, 99);
-    assert_eq!(ok_resp.code, ControlResponseCode::Ok as i32);
+    assert_eq!(ok_resp.code, ControlResponseCode::Ok);
 
     let err_resp = session.build_error_response(1235, 1);
-    assert_eq!(err_resp.code, ControlResponseCode::Error as i32);
+    assert_eq!(err_resp.code, ControlResponseCode::Error);
 }

@@ -4,7 +4,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 
 ## Archive Control Protocol & Flyweights
 
-- `crates/archive/src/codecs.rs`: `ControlRequestType` enum and `ControlRequestHeader` with exact 24-byte SBE wire layout check.
+- `crates/archive/src/codecs.rs`: bounded complete-message codecs for the v13 `ConnectRequest`, `StartRecordingRequest`, and `ControlResponse` SBE templates. Each frame uses the exact eight-byte message header, template-specific fixed block, and length-prefixed variable ASCII field.
 - `crates/archive/src/recording_descriptor.rs`: `RecordingDescriptor` struct encapsulating recording metadata (`recording_id`, `start_position`, `stop_position`, `stream_id`, `channel`).
 
 ## Persistent Catalog Indexing

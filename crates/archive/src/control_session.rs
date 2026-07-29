@@ -2,7 +2,7 @@
 //!
 //! Mirrors `io.aeron.archive.ControlSession.java`.
 
-use crate::codecs::{ControlResponseCode, ControlResponseHeader};
+use crate::codecs::{ControlResponse, ControlResponseCode, PROTOCOL_SEMANTIC_VERSION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlSessionState {
@@ -47,18 +47,15 @@ impl ControlSession {
         self.state = ControlSessionState::Closed;
     }
 
-    pub fn build_ok_response(
-        &mut self,
-        correlation_id: i64,
-        relevant_id: i64,
-    ) -> ControlResponseHeader {
+    pub fn build_ok_response(&mut self, correlation_id: i64, relevant_id: i64) -> ControlResponse {
         self.last_correlation_id = correlation_id;
-        ControlResponseHeader {
+        ControlResponse {
             control_session_id: self.control_session_id,
             correlation_id,
             relevant_id,
-            code: ControlResponseCode::Ok as i32,
-            _pad: 0,
+            code: ControlResponseCode::Ok,
+            version: PROTOCOL_SEMANTIC_VERSION,
+            error_message: String::new(),
         }
     }
 
@@ -66,14 +63,15 @@ impl ControlSession {
         &mut self,
         correlation_id: i64,
         error_code: i32,
-    ) -> ControlResponseHeader {
+    ) -> ControlResponse {
         self.last_correlation_id = correlation_id;
-        ControlResponseHeader {
+        ControlResponse {
             control_session_id: self.control_session_id,
             correlation_id,
             relevant_id: error_code as i64,
-            code: ControlResponseCode::Error as i32,
-            _pad: 0,
+            code: ControlResponseCode::Error,
+            version: PROTOCOL_SEMANTIC_VERSION,
+            error_message: format!("archive error {error_code}"),
         }
     }
 }
@@ -94,10 +92,10 @@ mod tests {
         assert_eq!(ok_resp.control_session_id, 100);
         assert_eq!(ok_resp.correlation_id, 500);
         assert_eq!(ok_resp.relevant_id, 42);
-        assert_eq!(ok_resp.code, ControlResponseCode::Ok as i32);
+        assert_eq!(ok_resp.code, ControlResponseCode::Ok);
 
         let err_resp = session.build_error_response(501, 1);
-        assert_eq!(err_resp.code, ControlResponseCode::Error as i32);
+        assert_eq!(err_resp.code, ControlResponseCode::Error);
 
         session.close();
         assert_eq!(session.state(), ControlSessionState::Closed);

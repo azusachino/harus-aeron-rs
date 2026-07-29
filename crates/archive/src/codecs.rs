@@ -1,11 +1,33 @@
-//! Archive control protocol SBE / binary codecs.
+//! Bounded codecs for the Aeron Archive v13 SBE control protocol.
 //!
-//! Mirrors `io.aeron.archive.codecs`.
-
-use agrona::atomic_buffer::AtomicBuffer;
+//! The wire authority is `vendor/aeron/aeron-archive/src/main/resources/archive/
+//! aeron-archive-codecs.xml`. SBE messages consist of an eight-byte message header,
+//! a template-specific fixed block, and zero or more length-prefixed variable fields.
 
 pub const SBE_SCHEMA_ID: u16 = 101;
 pub const SBE_SCHEMA_VERSION: u16 = 13;
+pub const PROTOCOL_SEMANTIC_VERSION: i32 = (1 << 16) | (12 << 8);
+pub const VAR_ASCII_MAX_LENGTH: usize = 1_073_741_824;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CodecError {
+    #[error("frame is truncated: need {needed} bytes, have {available}")]
+    Truncated { needed: usize, available: usize },
+    #[error("wrong SBE schema id: expected {expected}, got {actual}")]
+    WrongSchema { expected: u16, actual: u16 },
+    #[error("wrong SBE template id: expected {expected}, got {actual}")]
+    WrongTemplate { expected: u16, actual: u16 },
+    #[error("unsupported SBE block length: need at least {minimum}, got {actual}")]
+    BlockLength { minimum: u16, actual: u16 },
+    #[error("variable field is too long: {length} bytes")]
+    VariableFieldTooLong { length: usize },
+    #[error("variable field is not US-ASCII")]
+    NonAscii,
+    #[error("unknown control response code: {0}")]
+    UnknownResponseCode(i32),
+    #[error("unknown source location: {0}")]
+    UnknownSourceLocation(i32),
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,39 +39,64 @@ pub struct MessageHeader {
 }
 
 impl MessageHeader {
-    pub const SIZE: usize = std::mem::size_of::<Self>();
+    pub const SIZE: usize = 8;
 
-    pub fn encode(&self, buffer: &AtomicBuffer, offset: usize) {
-        buffer.put_u16(offset, self.block_length);
-        buffer.put_u16(offset + 2, self.template_id);
-        buffer.put_u16(offset + 4, self.schema_id);
-        buffer.put_u16(offset + 6, self.version);
+    pub fn encode_into(&self, frame: &mut [u8]) -> Result<(), CodecError> {
+        require(frame, Self::SIZE)?;
+        put_u16(frame, 0, self.block_length);
+        put_u16(frame, 2, self.template_id);
+        put_u16(frame, 4, self.schema_id);
+        put_u16(frame, 6, self.version);
+        Ok(())
     }
 
-    pub fn decode(buffer: &AtomicBuffer, offset: usize) -> Self {
-        Self {
-            block_length: buffer.get_u16(offset),
-            template_id: buffer.get_u16(offset + 2),
-            schema_id: buffer.get_u16(offset + 4),
-            version: buffer.get_u16(offset + 6),
+    pub fn decode_from(frame: &[u8]) -> Result<Self, CodecError> {
+        require(frame, Self::SIZE)?;
+        Ok(Self {
+            block_length: get_u16(frame, 0),
+            template_id: get_u16(frame, 2),
+            schema_id: get_u16(frame, 4),
+            version: get_u16(frame, 6),
+        })
+    }
+
+    fn validate(&self, template_id: u16, minimum_block_length: u16) -> Result<(), CodecError> {
+        if self.schema_id != SBE_SCHEMA_ID {
+            return Err(CodecError::WrongSchema {
+                expected: SBE_SCHEMA_ID,
+                actual: self.schema_id,
+            });
         }
+        if self.template_id != template_id {
+            return Err(CodecError::WrongTemplate {
+                expected: template_id,
+                actual: self.template_id,
+            });
+        }
+        if self.block_length < minimum_block_length {
+            return Err(CodecError::BlockLength {
+                minimum: minimum_block_length,
+                actual: self.block_length,
+            });
+        }
+        Ok(())
     }
 }
 
-const _: () = assert!(std::mem::size_of::<MessageHeader>() == 8);
+const _: () = assert!(std::mem::size_of::<MessageHeader>() == MessageHeader::SIZE);
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlRequestType {
-    Connect = 1,
-    StartRecording = 2,
-    StopRecording = 3,
-    Replay = 4,
-    ListRecordings = 5,
-    CloseSession = 6,
-    ListRecordingsForUri = 7,
-    ExtendRecording = 8,
-    StopReplay = 9,
+    Connect = 2,
+    CloseSession = 3,
+    StartRecording = 4,
+    StopRecording = 5,
+    Replay = 6,
+    StopReplay = 7,
+    ListRecordings = 8,
+    ListRecordingsForUri = 9,
+    ExtendRecording = 11,
 }
 
 #[repr(i32)]
@@ -57,6 +104,41 @@ pub enum ControlRequestType {
 pub enum ControlResponseCode {
     Ok = 0,
     Error = 1,
+    RecordingUnknown = 2,
+    SubscriptionUnknown = 3,
+}
+
+impl TryFrom<i32> for ControlResponseCode {
+    type Error = CodecError;
+
+    fn try_from(value: i32) -> Result<Self, CodecError> {
+        match value {
+            0 => Ok(Self::Ok),
+            1 => Ok(Self::Error),
+            2 => Ok(Self::RecordingUnknown),
+            3 => Ok(Self::SubscriptionUnknown),
+            _ => Err(CodecError::UnknownResponseCode(value)),
+        }
+    }
+}
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceLocation {
+    Local = 0,
+    Remote = 1,
+}
+
+impl TryFrom<i32> for SourceLocation {
+    type Error = CodecError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Local),
+            1 => Ok(Self::Remote),
+            _ => Err(CodecError::UnknownSourceLocation(value)),
+        }
+    }
 }
 
 #[repr(i32)]
@@ -72,124 +154,402 @@ pub enum RecordingSignal {
     ReplicateEnd = 7,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ControlRequestHeader {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectRequest {
+    pub correlation_id: i64,
+    pub response_stream_id: i32,
+    pub version: i32,
+    pub response_channel: String,
+}
+
+impl ConnectRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::Connect as u16;
+    pub const BLOCK_LENGTH: u16 = 16;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.response_channel,
+            |frame| {
+                put_i64(frame, 8, self.correlation_id);
+                put_i32(frame, 16, self.response_stream_id);
+                put_i32(frame, 20, self.version);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (header, variable_offset) =
+            decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            correlation_id: get_i64(frame, 8),
+            response_stream_id: get_i32(frame, 16),
+            version: if header.version >= 2 {
+                get_i32(frame, 20)
+            } else {
+                0
+            },
+            response_channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRecordingRequest {
     pub control_session_id: i64,
     pub correlation_id: i64,
-    pub template_id: i32,
-    pub schema_id: i16,
-    pub version: i16,
+    pub stream_id: i32,
+    pub source_location: SourceLocation,
+    pub channel: String,
 }
 
-impl ControlRequestHeader {
-    pub const SIZE: usize = std::mem::size_of::<Self>();
+impl StartRecordingRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::StartRecording as u16;
+    pub const BLOCK_LENGTH: u16 = 24;
 
-    pub fn encode(&self, buffer: &AtomicBuffer, offset: usize) {
-        buffer.put_i64(offset, self.control_session_id);
-        buffer.put_i64(offset + 8, self.correlation_id);
-        buffer.put_i32(offset + 16, self.template_id);
-        buffer.put_i16(offset + 20, self.schema_id);
-        buffer.put_i16(offset + 22, self.version);
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i32(frame, 24, self.stream_id);
+                put_i32(frame, 28, self.source_location as i32);
+            },
+        )
     }
 
-    pub fn decode(buffer: &AtomicBuffer, offset: usize) -> Self {
-        Self {
-            control_session_id: buffer.get_i64(offset),
-            correlation_id: buffer.get_i64(offset + 8),
-            template_id: buffer.get_i32(offset + 16),
-            schema_id: buffer.get_i16(offset + 20),
-            version: buffer.get_i16(offset + 22),
-        }
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            stream_id: get_i32(frame, 24),
+            source_location: SourceLocation::try_from(get_i32(frame, 28))?,
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
     }
 }
 
-const _: () = assert!(std::mem::size_of::<ControlRequestHeader>() == 24);
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ControlResponseHeader {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlResponse {
     pub control_session_id: i64,
     pub correlation_id: i64,
     pub relevant_id: i64,
-    pub code: i32,
-    pub _pad: i32,
+    pub code: ControlResponseCode,
+    pub version: i32,
+    pub error_message: String,
 }
 
-impl ControlResponseHeader {
-    pub const SIZE: usize = std::mem::size_of::<Self>();
+impl ControlResponse {
+    pub const TEMPLATE_ID: u16 = 1;
+    pub const BLOCK_LENGTH: u16 = 32;
 
-    pub fn encode(&self, buffer: &AtomicBuffer, offset: usize) {
-        buffer.put_i64(offset, self.control_session_id);
-        buffer.put_i64(offset + 8, self.correlation_id);
-        buffer.put_i64(offset + 16, self.relevant_id);
-        buffer.put_i32(offset + 24, self.code);
-        buffer.put_i32(offset + 28, self._pad);
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.error_message,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.relevant_id);
+                put_i32(frame, 32, self.code as i32);
+                put_i32(frame, 36, self.version);
+            },
+        )
     }
 
-    pub fn decode(buffer: &AtomicBuffer, offset: usize) -> Self {
-        Self {
-            control_session_id: buffer.get_i64(offset),
-            correlation_id: buffer.get_i64(offset + 8),
-            relevant_id: buffer.get_i64(offset + 16),
-            code: buffer.get_i32(offset + 24),
-            _pad: buffer.get_i32(offset + 28),
-        }
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (header, variable_offset) =
+            decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            relevant_id: get_i64(frame, 24),
+            code: ControlResponseCode::try_from(get_i32(frame, 32))?,
+            version: if header.version >= 4 {
+                get_i32(frame, 36)
+            } else {
+                0
+            },
+            error_message: decode_ascii(frame, variable_offset)?.0,
+        })
     }
 }
 
-const _: () = assert!(std::mem::size_of::<ControlResponseHeader>() == 32);
+fn encode_var_message(
+    template_id: u16,
+    block_length: u16,
+    value: &str,
+    encode_fixed: impl FnOnce(&mut [u8]),
+) -> Result<Vec<u8>, CodecError> {
+    if !value.is_ascii() {
+        return Err(CodecError::NonAscii);
+    }
+    if value.len() > VAR_ASCII_MAX_LENGTH || value.len() > u32::MAX as usize {
+        return Err(CodecError::VariableFieldTooLong {
+            length: value.len(),
+        });
+    }
+    let variable_offset = MessageHeader::SIZE + usize::from(block_length);
+    let mut frame = vec![0; variable_offset + 4 + value.len()];
+    MessageHeader {
+        block_length,
+        template_id,
+        schema_id: SBE_SCHEMA_ID,
+        version: SBE_SCHEMA_VERSION,
+    }
+    .encode_into(&mut frame)?;
+    encode_fixed(&mut frame);
+    put_u32(&mut frame, variable_offset, value.len() as u32);
+    frame[variable_offset + 4..].copy_from_slice(value.as_bytes());
+    Ok(frame)
+}
+
+fn decode_message(
+    frame: &[u8],
+    template_id: u16,
+    minimum_block_length: u16,
+) -> Result<(MessageHeader, usize), CodecError> {
+    let header = MessageHeader::decode_from(frame)?;
+    header.validate(template_id, minimum_block_length)?;
+    let variable_offset = MessageHeader::SIZE + usize::from(header.block_length);
+    require(frame, variable_offset + 4)?;
+    Ok((header, variable_offset))
+}
+
+fn decode_ascii(frame: &[u8], offset: usize) -> Result<(String, usize), CodecError> {
+    require(frame, offset + 4)?;
+    let length = get_u32(frame, offset) as usize;
+    if length > VAR_ASCII_MAX_LENGTH {
+        return Err(CodecError::VariableFieldTooLong { length });
+    }
+    let end = offset
+        .checked_add(4)
+        .and_then(|start| start.checked_add(length))
+        .ok_or(CodecError::VariableFieldTooLong { length })?;
+    require(frame, end)?;
+    let bytes = &frame[offset + 4..end];
+    if !bytes.is_ascii() {
+        return Err(CodecError::NonAscii);
+    }
+    Ok((String::from_utf8_lossy(bytes).into_owned(), end))
+}
+
+fn require(frame: &[u8], needed: usize) -> Result<(), CodecError> {
+    if frame.len() < needed {
+        Err(CodecError::Truncated {
+            needed,
+            available: frame.len(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn put_u16(frame: &mut [u8], offset: usize, value: u16) {
+    frame[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(frame: &mut [u8], offset: usize, value: u32) {
+    frame[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_i32(frame: &mut [u8], offset: usize, value: i32) {
+    frame[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_i64(frame: &mut [u8], offset: usize, value: i64) {
+    frame[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn get_u16(frame: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([frame[offset], frame[offset + 1]])
+}
+
+fn get_u32(frame: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(frame[offset..offset + 4].try_into().unwrap_or([0; 4]))
+}
+
+fn get_i32(frame: &[u8], offset: usize) -> i32 {
+    i32::from_le_bytes(frame[offset..offset + 4].try_into().unwrap_or([0; 4]))
+}
+
+fn get_i64(frame: &[u8], offset: usize) -> i64 {
+    i64::from_le_bytes(frame[offset..offset + 8].try_into().unwrap_or([0; 8]))
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn should_validate_codecs_header_sizes() {
-        assert_eq!(MessageHeader::SIZE, 8);
-        assert_eq!(ControlRequestHeader::SIZE, 24);
-        assert_eq!(ControlResponseHeader::SIZE, 32);
+    fn complete_messages_roundtrip() {
+        let connect = ConnectRequest {
+            correlation_id: 42,
+            response_stream_id: 1001,
+            version: PROTOCOL_SEMANTIC_VERSION,
+            response_channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ConnectRequest::decode(&connect.encode().unwrap()).unwrap(),
+            connect
+        );
+
+        let start = StartRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 43,
+            stream_id: 1002,
+            source_location: SourceLocation::Local,
+            channel: "aeron:udp?endpoint=127.0.0.1:40123".into(),
+        };
+        assert_eq!(
+            StartRecordingRequest::decode(&start.encode().unwrap()).unwrap(),
+            start
+        );
+
+        let response = ControlResponse {
+            control_session_id: 7,
+            correlation_id: 43,
+            relevant_id: -1,
+            code: ControlResponseCode::Error,
+            version: PROTOCOL_SEMANTIC_VERSION,
+            error_message: "recording unknown".into(),
+        };
+        assert_eq!(
+            ControlResponse::decode(&response.encode().unwrap()).unwrap(),
+            response
+        );
     }
 
     #[test]
-    fn should_encode_and_decode_message_header() {
-        let mut backing = [0u8; 64];
-        let buffer = AtomicBuffer::new(&mut backing);
-        let header = MessageHeader {
-            block_length: 32,
-            template_id: 5,
-            schema_id: SBE_SCHEMA_ID,
-            version: SBE_SCHEMA_VERSION,
-        };
-        header.encode(&buffer, 0);
+    fn malformed_frames_are_rejected_without_panicking() {
+        let connect = ConnectRequest {
+            correlation_id: 1,
+            response_stream_id: 2,
+            version: PROTOCOL_SEMANTIC_VERSION,
+            response_channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&connect, ConnectRequest::decode);
 
-        let decoded = MessageHeader::decode(&buffer, 0);
-        assert_eq!(decoded, header);
+        let start = StartRecordingRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            stream_id: 3,
+            source_location: SourceLocation::Remote,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&start, StartRecordingRequest::decode);
+
+        let response = ControlResponse {
+            control_session_id: 1,
+            correlation_id: 2,
+            relevant_id: 3,
+            code: ControlResponseCode::Ok,
+            version: PROTOCOL_SEMANTIC_VERSION,
+            error_message: String::new(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&response, ControlResponse::decode);
+
+        let mut wrong_schema = connect.clone();
+        wrong_schema[4..6].copy_from_slice(&999_u16.to_le_bytes());
+        assert!(matches!(
+            ConnectRequest::decode(&wrong_schema),
+            Err(CodecError::WrongSchema { .. })
+        ));
+
+        let mut wrong_template = connect.clone();
+        wrong_template[2..4].copy_from_slice(&999_u16.to_le_bytes());
+        assert!(matches!(
+            ConnectRequest::decode(&wrong_template),
+            Err(CodecError::WrongTemplate { .. })
+        ));
+
+        let mut short_block = connect.clone();
+        short_block[0..2].copy_from_slice(&8_u16.to_le_bytes());
+        assert!(matches!(
+            ConnectRequest::decode(&short_block),
+            Err(CodecError::BlockLength { .. })
+        ));
+
+        let mut invalid_length = connect;
+        invalid_length[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            ConnectRequest::decode(&invalid_length),
+            Err(CodecError::VariableFieldTooLong { .. })
+        ));
+
+        let mut unknown_source = start;
+        unknown_source[28..32].copy_from_slice(&99_i32.to_le_bytes());
+        assert!(matches!(
+            StartRecordingRequest::decode(&unknown_source),
+            Err(CodecError::UnknownSourceLocation(99))
+        ));
+
+        let mut unknown_code = response;
+        unknown_code[32..36].copy_from_slice(&99_i32.to_le_bytes());
+        assert!(matches!(
+            ControlResponse::decode(&unknown_code),
+            Err(CodecError::UnknownResponseCode(99))
+        ));
     }
 
     #[test]
-    fn should_encode_and_decode_control_headers() {
-        let mut backing = [0u8; 64];
-        let buffer = AtomicBuffer::new(&mut backing);
-
-        let req = ControlRequestHeader {
-            control_session_id: 100,
-            correlation_id: 200,
-            template_id: 2,
-            schema_id: SBE_SCHEMA_ID as i16,
-            version: SBE_SCHEMA_VERSION as i16,
+    fn matches_java_generated_v13_golden_vectors() {
+        let connect = ConnectRequest {
+            correlation_id: 42,
+            response_stream_id: 1001,
+            version: PROTOCOL_SEMANTIC_VERSION,
+            response_channel: "aeron:ipc".into(),
         };
-        req.encode(&buffer, 0);
-        assert_eq!(ControlRequestHeader::decode(&buffer, 0), req);
+        assert_eq!(
+            to_hex(&connect.encode().unwrap()),
+            "1000020065000d002a00000000000000e9030000000c0100090000006165726f6e3a697063"
+        );
 
-        let resp = ControlResponseHeader {
-            control_session_id: 100,
-            correlation_id: 200,
-            relevant_id: 300,
-            code: ControlResponseCode::Ok as i32,
-            _pad: 0,
+        let response = ControlResponse {
+            control_session_id: 7,
+            correlation_id: 43,
+            relevant_id: -1,
+            code: ControlResponseCode::Error,
+            version: PROTOCOL_SEMANTIC_VERSION,
+            error_message: "recording unknown".into(),
         };
-        resp.encode(&buffer, 32);
-        assert_eq!(ControlResponseHeader::decode(&buffer, 32), resp);
+        assert_eq!(
+            to_hex(&response.encode().unwrap()),
+            "2000010065000d0007000000000000002b00000000000000ffffffffffffffff01000000000c0100110000007265636f7264696e6720756e6b6e6f776e"
+        );
+
+        let start = StartRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 43,
+            stream_id: 1002,
+            source_location: SourceLocation::Local,
+            channel: "aeron:udp?endpoint=127.0.0.1:40123".into(),
+        };
+        assert_eq!(
+            to_hex(&start.encode().unwrap()),
+            "1800040065000d0007000000000000002b00000000000000ea03000000000000220000006165726f6e3a7564703f656e64706f696e743d3132372e302e302e313a3430313233"
+        );
+    }
+
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn assert_all_truncations<T>(frame: &[u8], decode: impl Fn(&[u8]) -> Result<T, CodecError>) {
+        for length in 0..frame.len() {
+            assert!(decode(&frame[..length]).is_err(), "length {length}");
+        }
     }
 }
