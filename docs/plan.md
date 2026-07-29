@@ -124,19 +124,23 @@ depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 ### v0.0.7 — aeron-archive
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
-**Foundation status (2026-07-29):** catalog descriptor persistence, corrected
+**Managed-service status (2026-07-29):** catalog descriptor persistence, corrected
 term-aligned segment-file math, recording-signal values, bounded recording queries, and
-an in-memory recording/replay lifecycle are implemented. The current control boundary
-now uses bounded complete v13 SBE codecs for `ConnectRequest`, `StartRecordingRequest`,
-and `ControlResponse`, including variable ASCII data and pinned Java-generated golden
-vectors. The runtime now records complete aligned frames from a real Media Driver
-subscription into Archive segment files, persists catalog stop metadata, reopens both
-after an Archive-state restart, and replays payloads through a real
-publication/subscription. This closes the first lifecycle proof, not full Archive
-parity: the runtime is an in-process Archive client, the broader control template set
-and process launcher remain future work, and no complete upstream Archive test-file
-family has been ported. Keep all Archive ledger rows `todo` until their corresponding
-upstream test scopes are satisfied.
+an in-memory recording/replay lifecycle are implemented. Bounded complete v13 SBE
+codecs cover connect, start/stop recording, replay/stop replay, listing requests, and
+correlated control responses. `ArchiveService` attaches to a real Media Driver CnC
+file, dispatches those requests from a control subscription, publishes responses on
+the client-selected response stream, and owns recording/replay duty-cycle work. The
+standalone `aeron-archive` binary provides a bounded start/stop process lifecycle.
+
+The real integration proof uses a separate client to connect, record, stop, restart
+the Archive against its persisted catalog and segment files, list the recording, and
+replay its payload through another Aeron stream. This is still not full Archive parity:
+listing currently returns correlated counts/IDs rather than
+`RecordingDescriptor` response templates; replay is eager rather than a stoppable
+session; authentication, replication, extend/truncate/purge, marks/counters, and the
+complete upstream test families remain open. Keep Archive ledger rows `todo` until
+their complete upstream scopes are satisfied.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is
