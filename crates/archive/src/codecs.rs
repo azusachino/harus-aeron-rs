@@ -27,6 +27,8 @@ pub enum CodecError {
     UnknownResponseCode(i32),
     #[error("unknown source location: {0}")]
     UnknownSourceLocation(i32),
+    #[error("unknown boolean value: {0}")]
+    UnknownBoolean(i32),
 }
 
 #[repr(C)]
@@ -60,7 +62,11 @@ impl MessageHeader {
         })
     }
 
-    fn validate(&self, template_id: u16, minimum_block_length: u16) -> Result<(), CodecError> {
+    pub(crate) fn validate(
+        &self,
+        template_id: u16,
+        minimum_block_length: u16,
+    ) -> Result<(), CodecError> {
         if self.schema_id != SBE_SCHEMA_ID {
             return Err(CodecError::WrongSchema {
                 expected: SBE_SCHEMA_ID,
@@ -97,6 +103,17 @@ pub enum ControlRequestType {
     ListRecordings = 8,
     ListRecordingsForUri = 9,
     ExtendRecording = 11,
+    RecordingPosition = 12,
+    TruncateRecording = 13,
+    StopRecordingSubscription = 14,
+    StopPosition = 15,
+    FindLastMatchingRecording = 16,
+    ListRecordingSubscriptions = 17,
+    StartPosition = 52,
+    StartRecordingV2 = 63,
+    ExtendRecordingV2 = 64,
+    MaxRecordedPosition = 67,
+    PurgeRecording = 104,
 }
 
 #[repr(i32)]
@@ -202,6 +219,577 @@ pub struct StartRecordingRequest {
     pub stream_id: i32,
     pub source_location: SourceLocation,
     pub channel: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloseSessionRequest {
+    pub control_session_id: i64,
+}
+
+impl CloseSessionRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::CloseSession as u16;
+    pub const BLOCK_LENGTH: u16 = 8;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+            put_i64(frame, 8, self.control_session_id)
+        })
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopRecordingRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub stream_id: i32,
+    pub channel: String,
+}
+
+impl StopRecordingRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::StopRecording as u16;
+    pub const BLOCK_LENGTH: u16 = 20;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i32(frame, 24, self.stream_id);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            stream_id: get_i32(frame, 24),
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub recording_id: i64,
+    pub position: i64,
+    pub length: i64,
+    pub replay_stream_id: i32,
+    pub file_io_max_length: i32,
+    pub replay_token: i64,
+    pub replay_channel: String,
+}
+
+impl ReplayRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::Replay as u16;
+    pub const BLOCK_LENGTH: u16 = 56;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.replay_channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.recording_id);
+                put_i64(frame, 32, self.position);
+                put_i64(frame, 40, self.length);
+                put_i32(frame, 48, self.replay_stream_id);
+                put_i32(frame, 52, self.file_io_max_length);
+                put_i64(frame, 56, self.replay_token);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (header, variable_offset) =
+            decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            recording_id: get_i64(frame, 24),
+            position: get_i64(frame, 32),
+            length: get_i64(frame, 40),
+            replay_stream_id: get_i32(frame, 48),
+            file_io_max_length: if header.version >= 7 {
+                get_i32(frame, 52)
+            } else {
+                0
+            },
+            replay_token: if header.version >= 10 {
+                get_i64(frame, 56)
+            } else {
+                0
+            },
+            replay_channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopReplayRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub replay_session_id: i64,
+}
+
+impl StopReplayRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::StopReplay as u16;
+    pub const BLOCK_LENGTH: u16 = 24;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+            put_i64(frame, 8, self.control_session_id);
+            put_i64(frame, 16, self.correlation_id);
+            put_i64(frame, 24, self.replay_session_id);
+        })
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            replay_session_id: get_i64(frame, 24),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRecordingsRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub from_recording_id: i64,
+    pub record_count: i32,
+}
+
+impl ListRecordingsRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ListRecordings as u16;
+    pub const BLOCK_LENGTH: u16 = 28;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+            put_i64(frame, 8, self.control_session_id);
+            put_i64(frame, 16, self.correlation_id);
+            put_i64(frame, 24, self.from_recording_id);
+            put_i32(frame, 32, self.record_count);
+        })
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            from_recording_id: get_i64(frame, 24),
+            record_count: get_i32(frame, 32),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRecordingsForUriRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub from_recording_id: i64,
+    pub record_count: i32,
+    pub stream_id: i32,
+    pub channel: String,
+}
+
+impl ListRecordingsForUriRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ListRecordingsForUri as u16;
+    pub const BLOCK_LENGTH: u16 = 32;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.from_recording_id);
+                put_i32(frame, 32, self.record_count);
+                put_i32(frame, 36, self.stream_id);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            from_recording_id: get_i64(frame, 24),
+            record_count: get_i32(frame, 32),
+            stream_id: get_i32(frame, 36),
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRecordingRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub recording_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendRecordingRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub recording_id: i64,
+    pub stream_id: i32,
+    pub source_location: SourceLocation,
+    pub channel: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRecordingRequestV2 {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub stream_id: i32,
+    pub source_location: SourceLocation,
+    pub auto_stop: bool,
+    pub channel: String,
+}
+
+impl StartRecordingRequestV2 {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::StartRecordingV2 as u16;
+    pub const BLOCK_LENGTH: u16 = 28;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i32(frame, 24, self.stream_id);
+                put_i32(frame, 28, self.source_location as i32);
+                put_i32(frame, 32, i32::from(self.auto_stop));
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            stream_id: get_i32(frame, 24),
+            source_location: SourceLocation::try_from(get_i32(frame, 28))?,
+            auto_stop: decode_bool(get_i32(frame, 32))?,
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendRecordingRequestV2 {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub recording_id: i64,
+    pub stream_id: i32,
+    pub source_location: SourceLocation,
+    pub auto_stop: bool,
+    pub channel: String,
+}
+
+impl ExtendRecordingRequestV2 {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ExtendRecordingV2 as u16;
+    pub const BLOCK_LENGTH: u16 = 36;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.recording_id);
+                put_i32(frame, 32, self.stream_id);
+                put_i32(frame, 36, self.source_location as i32);
+                put_i32(frame, 40, i32::from(self.auto_stop));
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            recording_id: get_i64(frame, 24),
+            stream_id: get_i32(frame, 32),
+            source_location: SourceLocation::try_from(get_i32(frame, 36))?,
+            auto_stop: decode_bool(get_i32(frame, 40))?,
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+impl ExtendRecordingRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ExtendRecording as u16;
+    pub const BLOCK_LENGTH: u16 = 32;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.recording_id);
+                put_i32(frame, 32, self.stream_id);
+                put_i32(frame, 36, self.source_location as i32);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            recording_id: get_i64(frame, 24),
+            stream_id: get_i32(frame, 32),
+            source_location: SourceLocation::try_from(get_i32(frame, 36))?,
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateRecordingRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub recording_id: i64,
+    pub position: i64,
+}
+
+impl TruncateRecordingRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::TruncateRecording as u16;
+    pub const BLOCK_LENGTH: u16 = 32;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+            put_i64(frame, 8, self.control_session_id);
+            put_i64(frame, 16, self.correlation_id);
+            put_i64(frame, 24, self.recording_id);
+            put_i64(frame, 32, self.position);
+        })
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            recording_id: get_i64(frame, 24),
+            position: get_i64(frame, 32),
+        })
+    }
+}
+
+macro_rules! recording_position_request {
+    ($name:ident, $request_type:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct $name {
+            pub control_session_id: i64,
+            pub correlation_id: i64,
+            pub recording_id: i64,
+        }
+
+        impl $name {
+            pub const TEMPLATE_ID: u16 = ControlRequestType::$request_type as u16;
+            pub const BLOCK_LENGTH: u16 = 24;
+
+            pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+                encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+                    put_i64(frame, 8, self.control_session_id);
+                    put_i64(frame, 16, self.correlation_id);
+                    put_i64(frame, 24, self.recording_id);
+                })
+            }
+
+            pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+                decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+                Ok(Self {
+                    control_session_id: get_i64(frame, 8),
+                    correlation_id: get_i64(frame, 16),
+                    recording_id: get_i64(frame, 24),
+                })
+            }
+        }
+    };
+}
+
+recording_position_request!(StartPositionRequest, StartPosition);
+recording_position_request!(RecordingPositionRequest, RecordingPosition);
+recording_position_request!(StopPositionRequest, StopPosition);
+recording_position_request!(MaxRecordedPositionRequest, MaxRecordedPosition);
+recording_position_request!(PurgeRecordingRequest, PurgeRecording);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindLastMatchingRecordingRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub min_recording_id: i64,
+    pub session_id: i32,
+    pub stream_id: i32,
+    pub channel: String,
+}
+
+impl FindLastMatchingRecordingRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::FindLastMatchingRecording as u16;
+    pub const BLOCK_LENGTH: u16 = 32;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.min_recording_id);
+                put_i32(frame, 32, self.session_id);
+                put_i32(frame, 36, self.stream_id);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            min_recording_id: get_i64(frame, 24),
+            session_id: get_i32(frame, 32),
+            stream_id: get_i32(frame, 36),
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopRecordingSubscriptionRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub subscription_id: i64,
+}
+
+impl StopRecordingSubscriptionRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::StopRecordingSubscription as u16;
+    pub const BLOCK_LENGTH: u16 = 24;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+            put_i64(frame, 8, self.control_session_id);
+            put_i64(frame, 16, self.correlation_id);
+            put_i64(frame, 24, self.subscription_id);
+        })
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            subscription_id: get_i64(frame, 24),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRecordingSubscriptionsRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub pseudo_index: i32,
+    pub subscription_count: i32,
+    pub apply_stream_id: bool,
+    pub stream_id: i32,
+    pub channel: String,
+}
+
+impl ListRecordingSubscriptionsRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ListRecordingSubscriptions as u16;
+    pub const BLOCK_LENGTH: u16 = 32;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i32(frame, 24, self.pseudo_index);
+                put_i32(frame, 28, self.subscription_count);
+                put_i32(frame, 32, i32::from(self.apply_stream_id));
+                put_i32(frame, 36, self.stream_id);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            pseudo_index: get_i32(frame, 24),
+            subscription_count: get_i32(frame, 28),
+            apply_stream_id: match get_i32(frame, 32) {
+                0 => false,
+                1 => true,
+                value => return Err(CodecError::UnknownBoolean(value)),
+            },
+            stream_id: get_i32(frame, 36),
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+impl ListRecordingRequest {
+    pub const TEMPLATE_ID: u16 = 10;
+    pub const BLOCK_LENGTH: u16 = 24;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+            put_i64(frame, 8, self.control_session_id);
+            put_i64(frame, 16, self.correlation_id);
+            put_i64(frame, 24, self.recording_id);
+        })
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            recording_id: get_i64(frame, 24),
+        })
+    }
 }
 
 impl StartRecordingRequest {
@@ -310,13 +898,43 @@ fn encode_var_message(
     Ok(frame)
 }
 
+fn encode_fixed_message(
+    template_id: u16,
+    block_length: u16,
+    encode_fixed: impl FnOnce(&mut [u8]),
+) -> Result<Vec<u8>, CodecError> {
+    let mut frame = vec![0; MessageHeader::SIZE + usize::from(block_length)];
+    MessageHeader {
+        block_length,
+        template_id,
+        schema_id: SBE_SCHEMA_ID,
+        version: SBE_SCHEMA_VERSION,
+    }
+    .encode_into(&mut frame)?;
+    encode_fixed(&mut frame);
+    Ok(frame)
+}
+
+fn decode_fixed_message(
+    frame: &[u8],
+    template_id: u16,
+    minimum_block_length: u16,
+) -> Result<MessageHeader, CodecError> {
+    let header = MessageHeader::decode_from(frame)?;
+    header.validate(template_id, minimum_block_length)?;
+    require(
+        frame,
+        MessageHeader::SIZE + usize::from(header.block_length),
+    )?;
+    Ok(header)
+}
+
 fn decode_message(
     frame: &[u8],
     template_id: u16,
     minimum_block_length: u16,
 ) -> Result<(MessageHeader, usize), CodecError> {
-    let header = MessageHeader::decode_from(frame)?;
-    header.validate(template_id, minimum_block_length)?;
+    let header = decode_fixed_message(frame, template_id, minimum_block_length)?;
     let variable_offset = MessageHeader::SIZE + usize::from(header.block_length);
     require(frame, variable_offset + 4)?;
     Ok((header, variable_offset))
@@ -338,6 +956,14 @@ fn decode_ascii(frame: &[u8], offset: usize) -> Result<(String, usize), CodecErr
         return Err(CodecError::NonAscii);
     }
     Ok((String::from_utf8_lossy(bytes).into_owned(), end))
+}
+
+fn decode_bool(value: i32) -> Result<bool, CodecError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(CodecError::UnknownBoolean(value)),
+    }
 }
 
 fn require(frame: &[u8], needed: usize) -> Result<(), CodecError> {
@@ -412,6 +1038,224 @@ mod tests {
             start
         );
 
+        let start_v2 = StartRecordingRequestV2 {
+            control_session_id: 7,
+            correlation_id: 53,
+            stream_id: 1002,
+            source_location: SourceLocation::Remote,
+            auto_stop: true,
+            channel: "aeron:udp?endpoint=127.0.0.1:40124".into(),
+        };
+        assert_eq!(
+            StartRecordingRequestV2::decode(&start_v2.encode().unwrap()).unwrap(),
+            start_v2
+        );
+
+        let extend = ExtendRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 54,
+            recording_id: 3,
+            stream_id: 1002,
+            source_location: SourceLocation::Local,
+            channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ExtendRecordingRequest::decode(&extend.encode().unwrap()).unwrap(),
+            extend
+        );
+
+        let extend_v2 = ExtendRecordingRequestV2 {
+            control_session_id: 7,
+            correlation_id: 55,
+            recording_id: 3,
+            stream_id: 1002,
+            source_location: SourceLocation::Local,
+            auto_stop: false,
+            channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ExtendRecordingRequestV2::decode(&extend_v2.encode().unwrap()).unwrap(),
+            extend_v2
+        );
+
+        let truncate = TruncateRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 55,
+            recording_id: 3,
+            position: 64,
+        };
+        assert_eq!(
+            TruncateRecordingRequest::decode(&truncate.encode().unwrap()).unwrap(),
+            truncate
+        );
+
+        let purge = PurgeRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 56,
+            recording_id: 3,
+        };
+        assert_eq!(
+            PurgeRecordingRequest::decode(&purge.encode().unwrap()).unwrap(),
+            purge
+        );
+
+        let close = CloseSessionRequest {
+            control_session_id: 7,
+        };
+        assert_eq!(
+            CloseSessionRequest::decode(&close.encode().unwrap()).unwrap(),
+            close
+        );
+
+        let stop = StopRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 44,
+            stream_id: 1002,
+            channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            StopRecordingRequest::decode(&stop.encode().unwrap()).unwrap(),
+            stop
+        );
+
+        let replay = ReplayRequest {
+            control_session_id: 7,
+            correlation_id: 45,
+            recording_id: 3,
+            position: 64,
+            length: 1024,
+            replay_stream_id: 1003,
+            file_io_max_length: 4096,
+            replay_token: 9,
+            replay_channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ReplayRequest::decode(&replay.encode().unwrap()).unwrap(),
+            replay
+        );
+
+        let stop_replay = StopReplayRequest {
+            control_session_id: 7,
+            correlation_id: 46,
+            replay_session_id: 11,
+        };
+        assert_eq!(
+            StopReplayRequest::decode(&stop_replay.encode().unwrap()).unwrap(),
+            stop_replay
+        );
+
+        let list = ListRecordingsRequest {
+            control_session_id: 7,
+            correlation_id: 47,
+            from_recording_id: 2,
+            record_count: 10,
+        };
+        assert_eq!(
+            ListRecordingsRequest::decode(&list.encode().unwrap()).unwrap(),
+            list
+        );
+
+        let list_uri = ListRecordingsForUriRequest {
+            control_session_id: 7,
+            correlation_id: 48,
+            from_recording_id: 2,
+            record_count: 10,
+            stream_id: 1002,
+            channel: "aeron:udp?endpoint=127.0.0.1:40123".into(),
+        };
+        assert_eq!(
+            ListRecordingsForUriRequest::decode(&list_uri.encode().unwrap()).unwrap(),
+            list_uri
+        );
+
+        let start_position = StartPositionRequest {
+            control_session_id: 7,
+            correlation_id: 49,
+            recording_id: 3,
+        };
+        assert_eq!(
+            StartPositionRequest::decode(&start_position.encode().unwrap()).unwrap(),
+            start_position
+        );
+
+        let recording_position = RecordingPositionRequest {
+            control_session_id: 7,
+            correlation_id: 50,
+            recording_id: 3,
+        };
+        assert_eq!(
+            RecordingPositionRequest::decode(&recording_position.encode().unwrap()).unwrap(),
+            recording_position
+        );
+
+        let stop_position = StopPositionRequest {
+            control_session_id: 7,
+            correlation_id: 51,
+            recording_id: 3,
+        };
+        assert_eq!(
+            StopPositionRequest::decode(&stop_position.encode().unwrap()).unwrap(),
+            stop_position
+        );
+
+        let max_position = MaxRecordedPositionRequest {
+            control_session_id: 7,
+            correlation_id: 52,
+            recording_id: 3,
+        };
+        assert_eq!(
+            MaxRecordedPositionRequest::decode(&max_position.encode().unwrap()).unwrap(),
+            max_position
+        );
+
+        let find_last = FindLastMatchingRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 53,
+            min_recording_id: 1,
+            session_id: 22,
+            stream_id: 1002,
+            channel: "endpoint=127.0.0.1".into(),
+        };
+        assert_eq!(
+            FindLastMatchingRecordingRequest::decode(&find_last.encode().unwrap()).unwrap(),
+            find_last
+        );
+
+        let list_one = ListRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 49,
+            recording_id: 3,
+        };
+        assert_eq!(
+            ListRecordingRequest::decode(&list_one.encode().unwrap()).unwrap(),
+            list_one
+        );
+
+        let stop_subscription = StopRecordingSubscriptionRequest {
+            control_session_id: 7,
+            correlation_id: 50,
+            subscription_id: 99,
+        };
+        assert_eq!(
+            StopRecordingSubscriptionRequest::decode(&stop_subscription.encode().unwrap()).unwrap(),
+            stop_subscription
+        );
+
+        let list_subscriptions = ListRecordingSubscriptionsRequest {
+            control_session_id: 7,
+            correlation_id: 51,
+            pseudo_index: 0,
+            subscription_count: 10,
+            apply_stream_id: true,
+            stream_id: 1002,
+            channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ListRecordingSubscriptionsRequest::decode(&list_subscriptions.encode().unwrap())
+                .unwrap(),
+            list_subscriptions
+        );
+
         let response = ControlResponse {
             control_session_id: 7,
             correlation_id: 43,
@@ -449,6 +1293,36 @@ mod tests {
         .unwrap();
         assert_all_truncations(&start, StartRecordingRequest::decode);
 
+        let mut start_v2 = StartRecordingRequestV2 {
+            control_session_id: 1,
+            correlation_id: 2,
+            stream_id: 3,
+            source_location: SourceLocation::Remote,
+            auto_stop: true,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&start_v2, StartRecordingRequestV2::decode);
+        put_i32(&mut start_v2, 32, 99);
+        assert_eq!(
+            StartRecordingRequestV2::decode(&start_v2),
+            Err(CodecError::UnknownBoolean(99))
+        );
+
+        let extend_v2 = ExtendRecordingRequestV2 {
+            control_session_id: 1,
+            correlation_id: 2,
+            recording_id: 3,
+            stream_id: 4,
+            source_location: SourceLocation::Local,
+            auto_stop: false,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&extend_v2, ExtendRecordingRequestV2::decode);
+
         let response = ControlResponse {
             control_session_id: 1,
             correlation_id: 2,
@@ -460,6 +1334,59 @@ mod tests {
         .encode()
         .unwrap();
         assert_all_truncations(&response, ControlResponse::decode);
+
+        let fixed = ListRecordingsRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            from_recording_id: 3,
+            record_count: 4,
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&fixed, ListRecordingsRequest::decode);
+
+        let position = MaxRecordedPositionRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            recording_id: 3,
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&position, MaxRecordedPositionRequest::decode);
+
+        let find_last = FindLastMatchingRecordingRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            min_recording_id: 0,
+            session_id: 3,
+            stream_id: 4,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&find_last, FindLastMatchingRecordingRequest::decode);
+
+        let extend = ExtendRecordingRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            recording_id: 3,
+            stream_id: 4,
+            source_location: SourceLocation::Local,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&extend, ExtendRecordingRequest::decode);
+
+        let truncate = TruncateRecordingRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            recording_id: 3,
+            position: 64,
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&truncate, TruncateRecordingRequest::decode);
 
         let mut wrong_schema = connect.clone();
         wrong_schema[4..6].copy_from_slice(&999_u16.to_le_bytes());
@@ -502,6 +1429,36 @@ mod tests {
             ControlResponse::decode(&unknown_code),
             Err(CodecError::UnknownResponseCode(99))
         ));
+
+        let stop_subscription = StopRecordingSubscriptionRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            subscription_id: 3,
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&stop_subscription, StopRecordingSubscriptionRequest::decode);
+
+        let mut list_subscriptions = ListRecordingSubscriptionsRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            pseudo_index: 0,
+            subscription_count: 1,
+            apply_stream_id: true,
+            stream_id: 3,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(
+            &list_subscriptions,
+            ListRecordingSubscriptionsRequest::decode,
+        );
+        list_subscriptions[32..36].copy_from_slice(&99_i32.to_le_bytes());
+        assert_eq!(
+            ListRecordingSubscriptionsRequest::decode(&list_subscriptions),
+            Err(CodecError::UnknownBoolean(99))
+        );
     }
 
     #[test]

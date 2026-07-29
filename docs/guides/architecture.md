@@ -29,8 +29,9 @@
    - Transport layers: `UdpChannel`, `UdpChannelTransport`, `SendChannelEndpoint`, `ReceiveChannelEndpoint`, `DataTransportPoller`, `ControlTransportPoller`.
    - Driver agents: `Sender`, `Receiver`, `DriverConductor`, `MediaDriver`.
 4. **`aeron-archive` (`crates/archive`)**:
-   - Stream recording codecs: `ControlRequestHeader`, `RecordingDescriptor`.
-   - Persistence & management: `Catalog`, `ControlSession`, `ArchiveConductor`.
+   - Archive v13 SBE control codecs and bounded `ControlSessionAdapter` dispatch.
+   - Persistent aligned-frame recording/replay through `ArchiveRuntime`.
+   - `ArchiveContext`, managed duty-cycle service, and standalone `aeron-archive` process.
 5. **`aeron-cluster` (`crates/cluster`)**:
    - Raft protocol: `ClusterHeader`, `ClusterRole`, `ClusterMember`, `ClusterStateMachine`.
    - Consensus agent: `ConsensusModule`, `ClusterNode`.

@@ -124,19 +124,62 @@ depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 ### v0.0.7 — aeron-archive
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
-**Foundation status (2026-07-29):** catalog descriptor persistence, corrected
+**Managed-service status (2026-07-29):** catalog descriptor persistence, corrected
 term-aligned segment-file math, recording-signal values, bounded recording queries, and
-an in-memory recording/replay lifecycle are implemented. The current control boundary
-now uses bounded complete v13 SBE codecs for `ConnectRequest`, `StartRecordingRequest`,
-and `ControlResponse`, including variable ASCII data and pinned Java-generated golden
-vectors. The runtime now records complete aligned frames from a real Media Driver
-subscription into Archive segment files, persists catalog stop metadata, reopens both
-after an Archive-state restart, and replays payloads through a real
-publication/subscription. This closes the first lifecycle proof, not full Archive
-parity: the runtime is an in-process Archive client, the broader control template set
-and process launcher remain future work, and no complete upstream Archive test-file
-family has been ported. Keep all Archive ledger rows `todo` until their corresponding
-upstream test scopes are satisfied.
+an in-memory recording/replay lifecycle are implemented. Bounded complete v13 SBE
+codecs cover connect, start/stop recording, replay/stop replay, listing requests, and
+correlated control responses. `ArchiveService` attaches to a real Media Driver CnC
+file, dispatches those requests from a control subscription, publishes responses on
+the client-selected response stream, and owns recording/replay duty-cycle work. The
+standalone `aeron-archive` binary provides a bounded start/stop process lifecycle.
+
+The real integration proof uses a separate client to connect, record, stop, restart
+the Archive against its persisted catalog and segment files, list the recording as a
+complete v13 `RecordingDescriptor`, and replay its payload through another Aeron
+stream. Range and URI listing publish descriptor streams with
+`RECORDING_UNKNOWN` exhaustion semantics. Replay now runs as an incremental session:
+requested position/length bounds are validated, backpressure leaves the cursor in
+place, the correlated start response carries a replay-session ID, and `StopReplay`
+aborts an active session while remaining idempotent after completion. Completed replay
+publications linger briefly so subscribers can consume the final fragment.
+
+Recording control follows the upstream subscription lifecycle: `StartRecording`
+responds immediately with the Aeron subscription registration ID, active
+subscriptions can be listed as template-23 `RecordingSubscriptionDescriptor` frames,
+and either the channel/stream key or subscription ID can stop and finalize a
+recording. Repeated stop and empty/invalid subscription listings report
+`SUBSCRIPTION_UNKNOWN`.
+
+Recording-history queries now use their exact v13 templates: start position (52),
+active recording position (12), stop position (15), max recorded position (67), and
+find-last matching (16). The managed service returns the live writer position only
+while a recording is active, returns `NULL_POSITION` afterward, keeps the catalog
+stop at `NULL_POSITION` while active, reports the live writer position as its
+maximum, and preserves finalized query results across Archive restart. Find-last
+matching follows upstream's exact session, stream, channel-fragment, and
+minimum-recording-ID semantics.
+
+Recording mutation now covers v13 `ExtendRecordingRequest` (11),
+`TruncateRecordingRequest` (13), and `PurgeRecordingRequest` (104). Extension requires
+an image joining at the stopped descriptor's exact position with matching initial
+term, term length, and MTU, then resumes the same recording ID. Truncation accepts
+only aligned positions within the stopped range, clears the retained segment tail,
+deletes later segments, and persists the shorter stop. Purge rejects active
+recordings/replays, deletes every segment, removes catalog visibility, and remains
+deleted after restart.
+
+The v2 start/extend request templates (63/64) also carry upstream's `autoStop`
+option. Auto-stop recordings finalize and remove their recording subscription when
+the separate publishing client reaches end-of-stream; the legacy templates preserve
+manual-stop behavior.
+
+This is still not full Archive parity: shared/ref-counted recording subscriptions
+are not implemented. The current replay path
+supports stopped recordings rather than live follow/bounded-counter replay, and uses
+service-local session IDs rather than upstream's composite replay/publication ID.
+Authentication, replication, detached segment operations, marks/counters, and the
+complete upstream test families remain open. Keep Archive ledger rows `todo` until
+their complete upstream scopes are satisfied.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is
