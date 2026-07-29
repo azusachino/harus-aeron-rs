@@ -104,7 +104,11 @@ pub enum ControlRequestType {
     ListRecordingsForUri = 9,
     ExtendRecording = 11,
     StopRecordingSubscription = 14,
+    StopPosition = 15,
+    FindLastMatchingRecording = 16,
     ListRecordingSubscriptions = 17,
+    StartPosition = 52,
+    MaxRecordedPosition = 67,
 }
 
 #[repr(i32)]
@@ -439,6 +443,85 @@ pub struct ListRecordingRequest {
     pub control_session_id: i64,
     pub correlation_id: i64,
     pub recording_id: i64,
+}
+
+macro_rules! recording_position_request {
+    ($name:ident, $request_type:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct $name {
+            pub control_session_id: i64,
+            pub correlation_id: i64,
+            pub recording_id: i64,
+        }
+
+        impl $name {
+            pub const TEMPLATE_ID: u16 = ControlRequestType::$request_type as u16;
+            pub const BLOCK_LENGTH: u16 = 24;
+
+            pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+                encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+                    put_i64(frame, 8, self.control_session_id);
+                    put_i64(frame, 16, self.correlation_id);
+                    put_i64(frame, 24, self.recording_id);
+                })
+            }
+
+            pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+                decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+                Ok(Self {
+                    control_session_id: get_i64(frame, 8),
+                    correlation_id: get_i64(frame, 16),
+                    recording_id: get_i64(frame, 24),
+                })
+            }
+        }
+    };
+}
+
+recording_position_request!(StartPositionRequest, StartPosition);
+recording_position_request!(StopPositionRequest, StopPosition);
+recording_position_request!(MaxRecordedPositionRequest, MaxRecordedPosition);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindLastMatchingRecordingRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub min_recording_id: i64,
+    pub session_id: i32,
+    pub stream_id: i32,
+    pub channel: String,
+}
+
+impl FindLastMatchingRecordingRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::FindLastMatchingRecording as u16;
+    pub const BLOCK_LENGTH: u16 = 32;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.min_recording_id);
+                put_i32(frame, 32, self.session_id);
+                put_i32(frame, 36, self.stream_id);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            min_recording_id: get_i64(frame, 24),
+            session_id: get_i32(frame, 32),
+            stream_id: get_i32(frame, 36),
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -848,6 +931,49 @@ mod tests {
             list_uri
         );
 
+        let start_position = StartPositionRequest {
+            control_session_id: 7,
+            correlation_id: 49,
+            recording_id: 3,
+        };
+        assert_eq!(
+            StartPositionRequest::decode(&start_position.encode().unwrap()).unwrap(),
+            start_position
+        );
+
+        let stop_position = StopPositionRequest {
+            control_session_id: 7,
+            correlation_id: 50,
+            recording_id: 3,
+        };
+        assert_eq!(
+            StopPositionRequest::decode(&stop_position.encode().unwrap()).unwrap(),
+            stop_position
+        );
+
+        let max_position = MaxRecordedPositionRequest {
+            control_session_id: 7,
+            correlation_id: 51,
+            recording_id: 3,
+        };
+        assert_eq!(
+            MaxRecordedPositionRequest::decode(&max_position.encode().unwrap()).unwrap(),
+            max_position
+        );
+
+        let find_last = FindLastMatchingRecordingRequest {
+            control_session_id: 7,
+            correlation_id: 52,
+            min_recording_id: 1,
+            session_id: 22,
+            stream_id: 1002,
+            channel: "endpoint=127.0.0.1".into(),
+        };
+        assert_eq!(
+            FindLastMatchingRecordingRequest::decode(&find_last.encode().unwrap()).unwrap(),
+            find_last
+        );
+
         let list_one = ListRecordingRequest {
             control_session_id: 7,
             correlation_id: 49,
@@ -941,6 +1067,27 @@ mod tests {
         .encode()
         .unwrap();
         assert_all_truncations(&fixed, ListRecordingsRequest::decode);
+
+        let position = MaxRecordedPositionRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            recording_id: 3,
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&position, MaxRecordedPositionRequest::decode);
+
+        let find_last = FindLastMatchingRecordingRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            min_recording_id: 0,
+            session_id: 3,
+            stream_id: 4,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&find_last, FindLastMatchingRecordingRequest::decode);
 
         let mut wrong_schema = connect.clone();
         wrong_schema[4..6].copy_from_slice(&999_u16.to_le_bytes());

@@ -9,9 +9,18 @@ The foundation exposes complete codecs for the protocol boundary exercised by it
 | `ControlResponse` | 1 | 32 | `errorMessage` |
 | `ConnectRequest` | 2 | 16 | `responseChannel` |
 | `StartRecordingRequest` | 4 | 24 | `channel` |
+| `StopPositionRequest` | 15 | 24 | none |
+| `FindLastMatchingRecordingRequest` | 16 | 32 | `channel` |
+| `StartPositionRequest` | 52 | 24 | none |
+| `MaxRecordedPositionRequest` | 67 | 24 | none |
 
 Every complete frame starts with the eight-byte SBE message header. Variable ASCII fields use a four-byte unsigned little-endian length followed by US-ASCII bytes. Decoders validate the frame boundary, schema, template, minimum block length, enum discriminants, variable length, and ASCII encoding before reading data.
 
-The request ID inventory used by the in-memory foundation is `Connect=2`, `CloseSession=3`, `StartRecording=4`, `StopRecording=5`, `Replay=6`, `StopReplay=7`, `ListRecordings=8`, `ListRecordingsForUri=9`, and `ExtendRecording=11`. Adding a request to the live Archive boundary requires its own template-specific codec; there is deliberately no generic request wire structure.
+The managed boundary also implements `CloseSession=3`, `StopRecording=5`,
+`Replay=6`, `StopReplay=7`, `ListRecordings=8`, `ListRecordingsForUri=9`,
+`ListRecording=10`, `StopRecordingSubscription=14`, and
+`ListRecordingSubscriptions=17`. Adding a request to the live Archive boundary
+requires its own template-specific codec; there is deliberately no generic request
+wire structure.
 
 `test/archive_sbe/ArchiveSbeGoldenVectors.java` generates the three interoperability vectors from the pinned Java SBE-generated codecs. The Rust tests assert those exact bytes.

@@ -97,6 +97,25 @@ impl Catalog {
             .find(|d| d.stream_id == stream_id && d.original_channel.contains(channel))
     }
 
+    pub fn find_last_matching(
+        &self,
+        min_recording_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        channel_fragment: &str,
+    ) -> Option<i64> {
+        self.ordered_descriptors
+            .iter()
+            .rev()
+            .find_map(|descriptor| {
+                (descriptor.recording_id >= min_recording_id
+                    && descriptor.session_id == session_id
+                    && descriptor.stream_id == stream_id
+                    && descriptor.original_channel.contains(channel_fragment))
+                .then_some(descriptor.recording_id)
+            })
+    }
+
     pub fn save_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::Write;
         let mut file = std::fs::File::create(path)?;

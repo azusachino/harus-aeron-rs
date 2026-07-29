@@ -414,6 +414,78 @@ impl ArchiveService {
             ControlRequest::ListRecordingSubscriptions(request) => {
                 self.list_recording_subscriptions(request)?;
             }
+            ControlRequest::StartPosition(request) => {
+                let response = self
+                    .runtime
+                    .start_position(request.recording_id)
+                    .map_or_else(
+                        || {
+                            recording_unknown(
+                                request.control_session_id,
+                                request.correlation_id,
+                                request.recording_id,
+                            )
+                        },
+                        |position| ok(request.control_session_id, request.correlation_id, position),
+                    );
+                self.queue_session_response(request.control_session_id, response)?;
+            }
+            ControlRequest::StopPosition(request) => {
+                let response = self
+                    .runtime
+                    .stop_position(request.recording_id)
+                    .map_or_else(
+                        || {
+                            recording_unknown(
+                                request.control_session_id,
+                                request.correlation_id,
+                                request.recording_id,
+                            )
+                        },
+                        |position| ok(request.control_session_id, request.correlation_id, position),
+                    );
+                self.queue_session_response(request.control_session_id, response)?;
+            }
+            ControlRequest::MaxRecordedPosition(request) => {
+                let response = self
+                    .runtime
+                    .max_recorded_position(request.recording_id)
+                    .map_or_else(
+                        || {
+                            recording_unknown(
+                                request.control_session_id,
+                                request.correlation_id,
+                                request.recording_id,
+                            )
+                        },
+                        |position| ok(request.control_session_id, request.correlation_id, position),
+                    );
+                self.queue_session_response(request.control_session_id, response)?;
+            }
+            ControlRequest::FindLastMatchingRecording(request) => {
+                let response = if request.min_recording_id < 0 {
+                    error(
+                        request.control_session_id,
+                        request.correlation_id,
+                        ControlResponseCode::RecordingUnknown,
+                        "min recording id must be non-negative",
+                    )
+                } else {
+                    ok(
+                        request.control_session_id,
+                        request.correlation_id,
+                        self.runtime
+                            .find_last_matching_recording(
+                                request.min_recording_id,
+                                request.session_id,
+                                request.stream_id,
+                                &request.channel,
+                            )
+                            .unwrap_or(-1),
+                    )
+                };
+                self.queue_session_response(request.control_session_id, response)?;
+            }
         }
         Ok(())
     }
@@ -913,6 +985,18 @@ fn request_key(request: &ControlRequest) -> (u16, i64, i64) {
         }
         ControlRequest::ListRecordingSubscriptions(request) => {
             (17, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::StartPosition(request) => {
+            (52, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::StopPosition(request) => {
+            (15, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::MaxRecordedPosition(request) => {
+            (67, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::FindLastMatchingRecording(request) => {
+            (16, request.control_session_id, request.correlation_id)
         }
     }
 }

@@ -1,9 +1,10 @@
 //! Bounded dispatch for Archive control requests received from an Aeron subscription.
 
 use crate::codecs::{
-    CloseSessionRequest, CodecError, ConnectRequest, ListRecordingRequest,
-    ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest, ListRecordingsRequest,
-    MessageHeader, ReplayRequest, StartRecordingRequest, StopRecordingRequest,
+    CloseSessionRequest, CodecError, ConnectRequest, FindLastMatchingRecordingRequest,
+    ListRecordingRequest, ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest,
+    ListRecordingsRequest, MaxRecordedPositionRequest, MessageHeader, ReplayRequest,
+    StartPositionRequest, StartRecordingRequest, StopPositionRequest, StopRecordingRequest,
     StopRecordingSubscriptionRequest, StopReplayRequest,
 };
 
@@ -20,6 +21,10 @@ pub enum ControlRequest {
     ListRecordingsForUri(ListRecordingsForUriRequest),
     ListRecording(ListRecordingRequest),
     ListRecordingSubscriptions(ListRecordingSubscriptionsRequest),
+    StartPosition(StartPositionRequest),
+    StopPosition(StopPositionRequest),
+    MaxRecordedPosition(MaxRecordedPositionRequest),
+    FindLastMatchingRecording(FindLastMatchingRecordingRequest),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -70,6 +75,20 @@ impl ControlSessionAdapter {
             ListRecordingSubscriptionsRequest::TEMPLATE_ID => {
                 Ok(ControlRequest::ListRecordingSubscriptions(
                     ListRecordingSubscriptionsRequest::decode(frame)?,
+                ))
+            }
+            StartPositionRequest::TEMPLATE_ID => Ok(ControlRequest::StartPosition(
+                StartPositionRequest::decode(frame)?,
+            )),
+            StopPositionRequest::TEMPLATE_ID => Ok(ControlRequest::StopPosition(
+                StopPositionRequest::decode(frame)?,
+            )),
+            MaxRecordedPositionRequest::TEMPLATE_ID => Ok(ControlRequest::MaxRecordedPosition(
+                MaxRecordedPositionRequest::decode(frame)?,
+            )),
+            FindLastMatchingRecordingRequest::TEMPLATE_ID => {
+                Ok(ControlRequest::FindLastMatchingRecording(
+                    FindLastMatchingRecordingRequest::decode(frame)?,
                 ))
             }
             template_id => Err(ControlAdapterError::UnsupportedTemplate(template_id)),

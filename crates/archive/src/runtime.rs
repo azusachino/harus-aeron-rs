@@ -15,6 +15,7 @@ use crate::recording_descriptor::RecordingDescriptor;
 
 const CATALOG_FILE_NAME: &str = "catalog.dat";
 const DEFAULT_SEGMENT_LENGTH: i32 = 128 * 1024 * 1024;
+pub const NULL_POSITION: i64 = -1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveRuntimeError {
@@ -140,7 +141,7 @@ impl ArchiveRuntime {
             0,
             recording_id,
             start_position,
-            start_position,
+            NULL_POSITION,
             now_ms(),
             0,
             image.initial_term_id(),
@@ -196,6 +197,36 @@ impl ArchiveRuntime {
             .update_stop_position(recording_id, stop_position, now_ms());
         self.catalog.save_to_file(&self.catalog_path)?;
         Ok(stop_position)
+    }
+
+    pub fn start_position(&self, recording_id: i64) -> Option<i64> {
+        self.catalog
+            .get_recording(recording_id)
+            .map(|descriptor| descriptor.start_position)
+    }
+
+    pub fn stop_position(&self, recording_id: i64) -> Option<i64> {
+        self.catalog
+            .get_recording(recording_id)
+            .map(|descriptor| descriptor.stop_position)
+    }
+
+    pub fn max_recorded_position(&self, recording_id: i64) -> Option<i64> {
+        self.active.get(&recording_id).map_or_else(
+            || self.stop_position(recording_id),
+            |writer| Some(writer.position),
+        )
+    }
+
+    pub fn find_last_matching_recording(
+        &self,
+        min_recording_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        channel_fragment: &str,
+    ) -> Option<i64> {
+        self.catalog
+            .find_last_matching(min_recording_id, session_id, stream_id, channel_fragment)
     }
 
     pub fn replay(

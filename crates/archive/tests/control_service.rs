@@ -3,9 +3,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aeron_archive::codecs::{
-    ConnectRequest, ControlResponse, ControlResponseCode, ListRecordingRequest,
-    ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest, ListRecordingsRequest,
-    PROTOCOL_SEMANTIC_VERSION, ReplayRequest, SourceLocation, StartRecordingRequest,
+    ConnectRequest, ControlResponse, ControlResponseCode, FindLastMatchingRecordingRequest,
+    ListRecordingRequest, ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest,
+    ListRecordingsRequest, MaxRecordedPositionRequest, PROTOCOL_SEMANTIC_VERSION, ReplayRequest,
+    SourceLocation, StartPositionRequest, StartRecordingRequest, StopPositionRequest,
     StopRecordingSubscriptionRequest, StopReplayRequest,
 };
 use aeron_archive::recording_descriptor::RecordingDescriptor;
@@ -375,6 +376,119 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
         cycle(&mut driver, &mut archive, &mut external);
     }
 
+    let mut list_active = ListRecordingsRequest {
+        control_session_id: session_id,
+        correlation_id: 17,
+        from_recording_id: 0,
+        record_count: 1,
+    }
+    .encode()
+    .expect("list active recording encode");
+    while !offer(&external, control_publication, &mut list_active) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let (active_descriptors, terminal) = await_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        17,
+    );
+    assert!(terminal.is_none());
+    let active_descriptor = &active_descriptors[0];
+    let recording_id = active_descriptor.recording_id;
+
+    let mut start_position = StartPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 18,
+        recording_id,
+    }
+    .encode()
+    .expect("start position encode");
+    while !offer(&external, control_publication, &mut start_position) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            18,
+        )
+        .relevant_id,
+        active_descriptor.start_position
+    );
+
+    let mut stop_position = StopPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 19,
+        recording_id,
+    }
+    .encode()
+    .expect("active stop position encode");
+    while !offer(&external, control_publication, &mut stop_position) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            19,
+        )
+        .relevant_id,
+        -1
+    );
+
+    let mut max_position = MaxRecordedPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 20,
+        recording_id,
+    }
+    .encode()
+    .expect("max recorded position encode");
+    while !offer(&external, control_publication, &mut max_position) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            20,
+        )
+        .relevant_id
+            > active_descriptor.start_position
+    );
+
+    let mut find_last = FindLastMatchingRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 21,
+        min_recording_id: recording_id,
+        session_id: active_descriptor.session_id,
+        stream_id: LIVE_STREAM,
+        channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("find last matching recording encode");
+    while !offer(&external, control_publication, &mut find_last) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            21,
+        )
+        .relevant_id,
+        recording_id
+    );
+
     let mut stop = StopRecordingSubscriptionRequest {
         control_session_id: session_id,
         correlation_id: 3,
@@ -469,7 +583,29 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
     );
     assert!(terminal.is_none());
     assert_eq!(recordings.len(), 1);
-    let recording_id = recordings[0].recording_id;
+    assert_eq!(recordings[0].recording_id, recording_id);
+
+    let mut stopped_max_position = MaxRecordedPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 22,
+        recording_id,
+    }
+    .encode()
+    .expect("stopped max position encode");
+    while !offer(&external, control_publication, &mut stopped_max_position) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            22,
+        )
+        .relevant_id,
+        recordings[0].stop_position
+    );
 
     drop(archive);
     let mut restarted_context = ArchiveContext::new(driver.aeron_dir(), &archive_dir);
@@ -515,6 +651,28 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
     assert_eq!(descriptors[0].stream_id, LIVE_STREAM);
     assert_eq!(descriptors[0].original_channel, "aeron:ipc");
     assert!(descriptors[0].stop_position > 0);
+
+    let mut persisted_stop_position = StopPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 23,
+        recording_id,
+    }
+    .encode()
+    .expect("persisted stop position encode");
+    while !offer(&external, control_publication, &mut persisted_stop_position) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            restart_response_subscription,
+            23,
+        )
+        .relevant_id,
+        descriptors[0].stop_position
+    );
 
     let mut list_range = ListRecordingsRequest {
         control_session_id: session_id,

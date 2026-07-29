@@ -39,4 +39,16 @@ pub struct StopRecordingSubscriptionRequest;
 pub struct ListRecordingSubscriptionsRequest;
 
 #[allow(dead_code)]
+pub struct StartPositionRequest;
+
+#[allow(dead_code)]
+pub struct StopPositionRequest;
+
+#[allow(dead_code)]
+pub struct MaxRecordedPositionRequest;
+
+#[allow(dead_code)]
+pub struct FindLastMatchingRecordingRequest;
+
+#[allow(dead_code)]
 pub struct ControlResponse;
