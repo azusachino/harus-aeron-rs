@@ -143,12 +143,20 @@ place, the correlated start response carries a replay-session ID, and `StopRepla
 aborts an active session while remaining idempotent after completion. Completed replay
 publications linger briefly so subscribers can consume the final fragment.
 
-This is still not full Archive parity: the current replay path supports stopped
-recordings rather than live follow/bounded-counter replay, and uses service-local
-session IDs rather than upstream's composite replay/publication ID. Authentication,
-replication, extend/truncate/purge, marks/counters, and the complete upstream test
-families remain open. Keep Archive ledger rows `todo` until their complete upstream
-scopes are satisfied.
+Recording control follows the upstream subscription lifecycle: `StartRecording`
+responds immediately with the Aeron subscription registration ID, active
+subscriptions can be listed as template-23 `RecordingSubscriptionDescriptor` frames,
+and either the channel/stream key or subscription ID can stop and finalize a
+recording. Repeated stop and empty/invalid subscription listings report
+`SUBSCRIPTION_UNKNOWN`.
+
+This is still not full Archive parity: shared/ref-counted recording subscriptions,
+auto-stop and start-recording-v2 options are not implemented. The current replay path
+supports stopped recordings rather than live follow/bounded-counter replay, and uses
+service-local session IDs rather than upstream's composite replay/publication ID.
+Authentication, replication, extend/truncate/purge, marks/counters, and the complete
+upstream test families remain open. Keep Archive ledger rows `todo` until their
+complete upstream scopes are satisfied.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is

@@ -8,5 +8,6 @@ pub mod conductor;
 pub mod control_session;
 pub mod control_session_adapter;
 pub mod recording_descriptor;
+pub mod recording_subscription_descriptor;
 pub mod runtime;
 pub mod service;

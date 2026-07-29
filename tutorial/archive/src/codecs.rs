@@ -33,4 +33,10 @@ pub struct ListRecordingsForUriRequest;
 pub struct ListRecordingRequest;
 
 #[allow(dead_code)]
+pub struct StopRecordingSubscriptionRequest;
+
+#[allow(dead_code)]
+pub struct ListRecordingSubscriptionsRequest;
+
+#[allow(dead_code)]
 pub struct ControlResponse;

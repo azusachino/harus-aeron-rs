@@ -4,10 +4,12 @@ use std::time::{Duration, Instant};
 
 use aeron_archive::codecs::{
     ConnectRequest, ControlResponse, ControlResponseCode, ListRecordingRequest,
-    ListRecordingsForUriRequest, ListRecordingsRequest, PROTOCOL_SEMANTIC_VERSION, ReplayRequest,
-    SourceLocation, StartRecordingRequest, StopRecordingRequest, StopReplayRequest,
+    ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest, ListRecordingsRequest,
+    PROTOCOL_SEMANTIC_VERSION, ReplayRequest, SourceLocation, StartRecordingRequest,
+    StopRecordingSubscriptionRequest, StopReplayRequest,
 };
 use aeron_archive::recording_descriptor::RecordingDescriptor;
+use aeron_archive::recording_subscription_descriptor::RecordingSubscriptionDescriptor;
 use aeron_archive::service::{ArchiveContext, ArchiveService};
 use aeron_client::conductor::ClientConductor;
 use aeron_client::driver_proxy::DriverProxy;
@@ -154,6 +156,52 @@ fn await_listing(
     panic!("listing {correlation_id} did not arrive");
 }
 
+fn await_subscription_listing(
+    driver: &mut MediaDriver,
+    archive: &mut ArchiveService,
+    client: &mut ClientConductor<'static>,
+    subscription_id: i64,
+    correlation_id: i64,
+) -> (
+    Vec<RecordingSubscriptionDescriptor>,
+    Option<ControlResponse>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut descriptors = Vec::new();
+    while Instant::now() < deadline {
+        cycle(driver, archive, client);
+        let mut terminal = None;
+        if let Some(subscription) = client.subscription_mut(subscription_id) {
+            subscription.poll(
+                |buffer, offset, length, _| {
+                    let mut bytes = vec![0; length];
+                    buffer.get_bytes(offset, &mut bytes);
+                    if let Ok(descriptor) = RecordingSubscriptionDescriptor::decode(&bytes) {
+                        if descriptor.correlation_id == correlation_id
+                            && !descriptors.iter().any(
+                                |existing: &RecordingSubscriptionDescriptor| {
+                                    existing.subscription_id == descriptor.subscription_id
+                                },
+                            )
+                        {
+                            descriptors.push(descriptor);
+                        }
+                    } else if let Ok(response) = ControlResponse::decode(&bytes) {
+                        if response.correlation_id == correlation_id {
+                            terminal = Some(response);
+                        }
+                    }
+                },
+                20,
+            );
+        }
+        if terminal.is_some() || !descriptors.is_empty() {
+            return (descriptors, terminal);
+        }
+    }
+    panic!("recording subscription listing {correlation_id} did not arrive");
+}
+
 fn connect(
     driver: &mut MediaDriver,
     archive: &mut ArchiveService,
@@ -273,7 +321,7 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
     while !offer(&external, control_publication, &mut start) {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    let recording_id = await_response(
+    let recording_subscription_id = await_response(
         &mut driver,
         &mut archive,
         &mut external,
@@ -281,6 +329,36 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
         2,
     )
     .relevant_id;
+
+    let mut list_subscriptions = ListRecordingSubscriptionsRequest {
+        control_session_id: session_id,
+        correlation_id: 13,
+        pseudo_index: 0,
+        subscription_count: 2,
+        apply_stream_id: true,
+        stream_id: LIVE_STREAM,
+        channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("list recording subscriptions encode");
+    while !offer(&external, control_publication, &mut list_subscriptions) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let (subscriptions, terminal) = await_subscription_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        13,
+    );
+    assert_eq!(subscriptions.len(), 1);
+    assert_eq!(subscriptions[0].subscription_id, recording_subscription_id);
+    assert_eq!(subscriptions[0].stream_id, LIVE_STREAM);
+    assert_eq!(subscriptions[0].stripped_channel, "aeron:ipc");
+    assert_eq!(
+        terminal.expect("subscription exhaustion").code,
+        ControlResponseCode::SubscriptionUnknown
+    );
 
     let payloads = [
         b"managed-archive-control-plane".to_vec(),
@@ -297,18 +375,17 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
         cycle(&mut driver, &mut archive, &mut external);
     }
 
-    let mut stop = StopRecordingRequest {
+    let mut stop = StopRecordingSubscriptionRequest {
         control_session_id: session_id,
         correlation_id: 3,
-        stream_id: LIVE_STREAM,
-        channel: "aeron:ipc".into(),
+        subscription_id: recording_subscription_id,
     }
     .encode()
     .expect("stop encode");
     while !offer(&external, control_publication, &mut stop) {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    assert!(
+    assert_eq!(
         await_response(
             &mut driver,
             &mut archive,
@@ -316,9 +393,83 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
             response_subscription,
             3,
         )
-        .relevant_id
-            > 0
+        .code,
+        ControlResponseCode::Ok
     );
+
+    let mut stop_again = StopRecordingSubscriptionRequest {
+        control_session_id: session_id,
+        correlation_id: 15,
+        subscription_id: recording_subscription_id,
+    }
+    .encode()
+    .expect("stop recording subscription again encode");
+    while !offer(&external, control_publication, &mut stop_again) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            15,
+        )
+        .code,
+        ControlResponseCode::SubscriptionUnknown
+    );
+
+    let mut list_stopped_subscription = ListRecordingSubscriptionsRequest {
+        control_session_id: session_id,
+        correlation_id: 16,
+        pseudo_index: 0,
+        subscription_count: 1,
+        apply_stream_id: false,
+        stream_id: 0,
+        channel: String::new(),
+    }
+    .encode()
+    .expect("list stopped subscription encode");
+    while !offer(
+        &external,
+        control_publication,
+        &mut list_stopped_subscription,
+    ) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            16,
+        )
+        .code,
+        ControlResponseCode::SubscriptionUnknown
+    );
+
+    let mut list_recordings = ListRecordingsRequest {
+        control_session_id: session_id,
+        correlation_id: 14,
+        from_recording_id: 0,
+        record_count: 1,
+    }
+    .encode()
+    .expect("list recordings encode");
+    while !offer(&external, control_publication, &mut list_recordings) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let (recordings, terminal) = await_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        14,
+    );
+    assert!(terminal.is_none());
+    assert_eq!(recordings.len(), 1);
+    let recording_id = recordings[0].recording_id;
 
     drop(archive);
     let mut restarted_context = ArchiveContext::new(driver.aeron_dir(), &archive_dir);

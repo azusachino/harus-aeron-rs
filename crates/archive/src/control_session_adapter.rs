@@ -2,8 +2,9 @@
 
 use crate::codecs::{
     CloseSessionRequest, CodecError, ConnectRequest, ListRecordingRequest,
-    ListRecordingsForUriRequest, ListRecordingsRequest, MessageHeader, ReplayRequest,
-    StartRecordingRequest, StopRecordingRequest, StopReplayRequest,
+    ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest, ListRecordingsRequest,
+    MessageHeader, ReplayRequest, StartRecordingRequest, StopRecordingRequest,
+    StopRecordingSubscriptionRequest, StopReplayRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,11 +13,13 @@ pub enum ControlRequest {
     CloseSession(CloseSessionRequest),
     StartRecording(StartRecordingRequest),
     StopRecording(StopRecordingRequest),
+    StopRecordingSubscription(StopRecordingSubscriptionRequest),
     Replay(ReplayRequest),
     StopReplay(StopReplayRequest),
     ListRecordings(ListRecordingsRequest),
     ListRecordingsForUri(ListRecordingsForUriRequest),
     ListRecording(ListRecordingRequest),
+    ListRecordingSubscriptions(ListRecordingSubscriptionsRequest),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -46,6 +49,11 @@ impl ControlSessionAdapter {
             StopRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::StopRecording(
                 StopRecordingRequest::decode(frame)?,
             )),
+            StopRecordingSubscriptionRequest::TEMPLATE_ID => {
+                Ok(ControlRequest::StopRecordingSubscription(
+                    StopRecordingSubscriptionRequest::decode(frame)?,
+                ))
+            }
             ReplayRequest::TEMPLATE_ID => Ok(ControlRequest::Replay(ReplayRequest::decode(frame)?)),
             StopReplayRequest::TEMPLATE_ID => Ok(ControlRequest::StopReplay(
                 StopReplayRequest::decode(frame)?,
@@ -59,6 +67,11 @@ impl ControlSessionAdapter {
             ListRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::ListRecording(
                 ListRecordingRequest::decode(frame)?,
             )),
+            ListRecordingSubscriptionsRequest::TEMPLATE_ID => {
+                Ok(ControlRequest::ListRecordingSubscriptions(
+                    ListRecordingSubscriptionsRequest::decode(frame)?,
+                ))
+            }
             template_id => Err(ControlAdapterError::UnsupportedTemplate(template_id)),
         }
     }

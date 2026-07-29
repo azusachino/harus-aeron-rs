@@ -17,10 +17,12 @@ use agrona::AtomicBuffer;
 use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 
 use crate::codecs::{
-    ControlResponse, ControlResponseCode, PROTOCOL_SEMANTIC_VERSION, StartRecordingRequest,
+    ControlResponse, ControlResponseCode, ListRecordingSubscriptionsRequest,
+    PROTOCOL_SEMANTIC_VERSION, StartRecordingRequest,
 };
 use crate::control_session_adapter::{ControlAdapterError, ControlRequest, ControlSessionAdapter};
 use crate::recording_descriptor::RecordingDescriptor;
+use crate::recording_subscription_descriptor::RecordingSubscriptionDescriptor;
 use crate::runtime::{ArchiveRuntime, ArchiveRuntimeError, ReplayCursor};
 
 pub const DEFAULT_CONTROL_CHANNEL: &str = "aeron:ipc";
@@ -230,25 +232,55 @@ impl ArchiveService {
                 if !self.sessions.contains_key(&request.control_session_id) {
                     return Ok(());
                 }
+                let key = (request.channel.clone(), request.stream_id);
+                if self.active_recordings.contains_key(&key)
+                    || self.pending_starts.iter().any(|pending| {
+                        pending.request.channel == request.channel
+                            && pending.request.stream_id == request.stream_id
+                    })
+                {
+                    self.queue_session_response(
+                        request.control_session_id,
+                        error(
+                            request.control_session_id,
+                            request.correlation_id,
+                            ControlResponseCode::Error,
+                            "recording subscription is already active",
+                        ),
+                    )?;
+                    return Ok(());
+                }
                 let registration_id = self
                     .client
                     .add_subscription(&request.channel, request.stream_id)?;
+                let control_session_id = request.control_session_id;
+                let correlation_id = request.correlation_id;
                 self.pending_starts.push(PendingStart {
                     registration_id,
                     request,
                 });
+                self.queue_session_response(
+                    control_session_id,
+                    ok(control_session_id, correlation_id, registration_id),
+                )?;
             }
             ControlRequest::StopRecording(request) => {
                 let key = (request.channel, request.stream_id);
-                let result = self.active_recordings.remove(&key);
-                let response = if let Some(active) = result {
-                    let stop_position = self.runtime.stop_recording(active.recording_id)?;
-                    let _ = self.client.remove_subscription(active.subscription_id)?;
-                    ok(
+                let response = if self.stop_recording_by_key(&key)? {
+                    ok(request.control_session_id, request.correlation_id, 0)
+                } else {
+                    error(
                         request.control_session_id,
                         request.correlation_id,
-                        stop_position,
+                        ControlResponseCode::SubscriptionUnknown,
+                        "recording subscription unknown",
                     )
+                };
+                self.queue_session_response(request.control_session_id, response)?;
+            }
+            ControlRequest::StopRecordingSubscription(request) => {
+                let response = if self.stop_recording_subscription(request.subscription_id)? {
+                    ok(request.control_session_id, request.correlation_id, 0)
                 } else {
                     error(
                         request.control_session_id,
@@ -379,6 +411,9 @@ impl ArchiveService {
                     )?;
                 }
             }
+            ControlRequest::ListRecordingSubscriptions(request) => {
+                self.list_recording_subscriptions(request)?;
+            }
         }
         Ok(())
     }
@@ -439,16 +474,46 @@ impl ArchiveService {
                     recording_id,
                 },
             );
-            self.queue_session_response(
-                pending.request.control_session_id,
-                ok(
-                    pending.request.control_session_id,
-                    pending.request.correlation_id,
-                    recording_id,
-                ),
-            )?;
         }
         Ok(count)
+    }
+
+    fn stop_recording_by_key(&mut self, key: &(String, i32)) -> Result<bool, ArchiveServiceError> {
+        if let Some(index) = self.pending_starts.iter().position(|pending| {
+            pending.request.channel == key.0 && pending.request.stream_id == key.1
+        }) {
+            let pending = self.pending_starts.swap_remove(index);
+            let _ = self.client.remove_subscription(pending.registration_id)?;
+            return Ok(true);
+        }
+        if let Some(active) = self.active_recordings.remove(key) {
+            self.runtime.stop_recording(active.recording_id)?;
+            let _ = self.client.remove_subscription(active.subscription_id)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn stop_recording_subscription(
+        &mut self,
+        subscription_id: i64,
+    ) -> Result<bool, ArchiveServiceError> {
+        if let Some(index) = self
+            .pending_starts
+            .iter()
+            .position(|pending| pending.registration_id == subscription_id)
+        {
+            let pending = self.pending_starts.swap_remove(index);
+            let _ = self.client.remove_subscription(pending.registration_id)?;
+            return Ok(true);
+        }
+        let key = self.active_recordings.iter().find_map(|(key, active)| {
+            (active.subscription_id == subscription_id).then(|| key.clone())
+        });
+        if let Some(key) = key {
+            return self.stop_recording_by_key(&key);
+        }
+        Ok(false)
     }
 
     fn poll_recordings(&mut self) -> Result<usize, ArchiveServiceError> {
@@ -590,6 +655,91 @@ impl ArchiveService {
     ) -> Result<(), ArchiveServiceError> {
         for descriptor in descriptors {
             self.queue_descriptor(control_session_id, correlation_id, descriptor)?;
+        }
+        Ok(())
+    }
+
+    fn list_recording_subscriptions(
+        &mut self,
+        request: ListRecordingSubscriptionsRequest,
+    ) -> Result<(), ArchiveServiceError> {
+        let mut subscriptions = self
+            .pending_starts
+            .iter()
+            .map(|pending| {
+                (
+                    pending.registration_id,
+                    pending.request.stream_id,
+                    pending.request.channel.clone(),
+                )
+            })
+            .chain(
+                self.active_recordings
+                    .iter()
+                    .map(|(key, active)| (active.subscription_id, key.1, key.0.clone())),
+            )
+            .collect::<Vec<_>>();
+        subscriptions.sort_by_key(|(subscription_id, _, _)| *subscription_id);
+        if request.pseudo_index < 0
+            || request.pseudo_index as usize >= subscriptions.len()
+            || request.subscription_count <= 0
+        {
+            self.queue_session_response(
+                request.control_session_id,
+                error(
+                    request.control_session_id,
+                    request.correlation_id,
+                    ControlResponseCode::SubscriptionUnknown,
+                    "recording subscription unknown",
+                ),
+            )?;
+            return Ok(());
+        }
+
+        let descriptors = subscriptions
+            .into_iter()
+            .skip(request.pseudo_index as usize)
+            .filter(|(_, stream_id, channel)| {
+                (!request.apply_stream_id || *stream_id == request.stream_id)
+                    && channel.contains(&request.channel)
+            })
+            .take(request.subscription_count as usize)
+            .map(
+                |(subscription_id, stream_id, stripped_channel)| RecordingSubscriptionDescriptor {
+                    control_session_id: request.control_session_id,
+                    correlation_id: request.correlation_id,
+                    subscription_id,
+                    stream_id,
+                    stripped_channel,
+                },
+            )
+            .collect::<Vec<_>>();
+        for descriptor in &descriptors {
+            self.queue_recording_subscription_descriptor(descriptor)?;
+        }
+        if descriptors.len() < request.subscription_count as usize {
+            self.queue_session_response(
+                request.control_session_id,
+                error(
+                    request.control_session_id,
+                    request.correlation_id,
+                    ControlResponseCode::SubscriptionUnknown,
+                    "recording subscription unknown",
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn queue_recording_subscription_descriptor(
+        &mut self,
+        descriptor: &RecordingSubscriptionDescriptor,
+    ) -> Result<(), ArchiveServiceError> {
+        if let Some(&publication_id) = self.sessions.get(&descriptor.control_session_id) {
+            self.responses.push_back(QueuedResponse {
+                publication_id,
+                bytes: descriptor.encode().map_err(ControlAdapterError::from)?,
+            });
         }
         Ok(())
     }
@@ -745,6 +895,9 @@ fn request_key(request: &ControlRequest) -> (u16, i64, i64) {
         ControlRequest::StopRecording(request) => {
             (5, request.control_session_id, request.correlation_id)
         }
+        ControlRequest::StopRecordingSubscription(request) => {
+            (14, request.control_session_id, request.correlation_id)
+        }
         ControlRequest::Replay(request) => (6, request.control_session_id, request.correlation_id),
         ControlRequest::StopReplay(request) => {
             (7, request.control_session_id, request.correlation_id)
@@ -757,6 +910,9 @@ fn request_key(request: &ControlRequest) -> (u16, i64, i64) {
         }
         ControlRequest::ListRecording(request) => {
             (10, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::ListRecordingSubscriptions(request) => {
+            (17, request.control_session_id, request.correlation_id)
         }
     }
 }

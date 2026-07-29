@@ -27,6 +27,8 @@ pub enum CodecError {
     UnknownResponseCode(i32),
     #[error("unknown source location: {0}")]
     UnknownSourceLocation(i32),
+    #[error("unknown boolean value: {0}")]
+    UnknownBoolean(i32),
 }
 
 #[repr(C)]
@@ -101,6 +103,8 @@ pub enum ControlRequestType {
     ListRecordings = 8,
     ListRecordingsForUri = 9,
     ExtendRecording = 11,
+    StopRecordingSubscription = 14,
+    ListRecordingSubscriptions = 17,
 }
 
 #[repr(i32)]
@@ -435,6 +439,84 @@ pub struct ListRecordingRequest {
     pub control_session_id: i64,
     pub correlation_id: i64,
     pub recording_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopRecordingSubscriptionRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub subscription_id: i64,
+}
+
+impl StopRecordingSubscriptionRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::StopRecordingSubscription as u16;
+    pub const BLOCK_LENGTH: u16 = 24;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+            put_i64(frame, 8, self.control_session_id);
+            put_i64(frame, 16, self.correlation_id);
+            put_i64(frame, 24, self.subscription_id);
+        })
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            subscription_id: get_i64(frame, 24),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRecordingSubscriptionsRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub pseudo_index: i32,
+    pub subscription_count: i32,
+    pub apply_stream_id: bool,
+    pub stream_id: i32,
+    pub channel: String,
+}
+
+impl ListRecordingSubscriptionsRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ListRecordingSubscriptions as u16;
+    pub const BLOCK_LENGTH: u16 = 32;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i32(frame, 24, self.pseudo_index);
+                put_i32(frame, 28, self.subscription_count);
+                put_i32(frame, 32, i32::from(self.apply_stream_id));
+                put_i32(frame, 36, self.stream_id);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            pseudo_index: get_i32(frame, 24),
+            subscription_count: get_i32(frame, 28),
+            apply_stream_id: match get_i32(frame, 32) {
+                0 => false,
+                1 => true,
+                value => return Err(CodecError::UnknownBoolean(value)),
+            },
+            stream_id: get_i32(frame, 36),
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
 }
 
 impl ListRecordingRequest {
@@ -776,6 +858,31 @@ mod tests {
             list_one
         );
 
+        let stop_subscription = StopRecordingSubscriptionRequest {
+            control_session_id: 7,
+            correlation_id: 50,
+            subscription_id: 99,
+        };
+        assert_eq!(
+            StopRecordingSubscriptionRequest::decode(&stop_subscription.encode().unwrap()).unwrap(),
+            stop_subscription
+        );
+
+        let list_subscriptions = ListRecordingSubscriptionsRequest {
+            control_session_id: 7,
+            correlation_id: 51,
+            pseudo_index: 0,
+            subscription_count: 10,
+            apply_stream_id: true,
+            stream_id: 1002,
+            channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ListRecordingSubscriptionsRequest::decode(&list_subscriptions.encode().unwrap())
+                .unwrap(),
+            list_subscriptions
+        );
+
         let response = ControlResponse {
             control_session_id: 7,
             correlation_id: 43,
@@ -876,6 +983,36 @@ mod tests {
             ControlResponse::decode(&unknown_code),
             Err(CodecError::UnknownResponseCode(99))
         ));
+
+        let stop_subscription = StopRecordingSubscriptionRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            subscription_id: 3,
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&stop_subscription, StopRecordingSubscriptionRequest::decode);
+
+        let mut list_subscriptions = ListRecordingSubscriptionsRequest {
+            control_session_id: 1,
+            correlation_id: 2,
+            pseudo_index: 0,
+            subscription_count: 1,
+            apply_stream_id: true,
+            stream_id: 3,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(
+            &list_subscriptions,
+            ListRecordingSubscriptionsRequest::decode,
+        );
+        list_subscriptions[32..36].copy_from_slice(&99_i32.to_le_bytes());
+        assert_eq!(
+            ListRecordingSubscriptionsRequest::decode(&list_subscriptions),
+            Err(CodecError::UnknownBoolean(99))
+        );
     }
 
     #[test]
