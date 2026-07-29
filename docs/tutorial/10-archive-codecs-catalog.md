@@ -6,7 +6,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 
 - `crates/archive/src/codecs.rs`: bounded complete-message codecs for the v13 connect, start/stop recording, replay/stop replay, listing, and control-response SBE templates. Each frame uses the exact eight-byte message header, template-specific fixed block, and any required length-prefixed variable ASCII field.
 - `crates/archive/src/control_session_adapter.rs`: validates the SBE header and dispatches complete request frames by their real template IDs.
-- `crates/archive/src/recording_descriptor.rs`: `RecordingDescriptor` struct encapsulating recording metadata (`recording_id`, `start_position`, `stop_position`, `stream_id`, `channel`).
+- `crates/archive/src/recording_descriptor.rs`: complete template-22 `RecordingDescriptor` codec with the 80-byte fixed block and three bounded variable ASCII fields.
 
 ## Persistent Catalog Indexing
 
@@ -22,7 +22,8 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 
 The integration test in `crates/archive/tests/control_service.rs` drives the real
 control publication and response subscription from a separate client, then proves
-record, stop, Archive restart, listing, and replay.
+record, stop, Archive restart, list-by-id, ranged and URI-filtered descriptor
+responses, exhaustion signaling, and replay.
 
 ## Verification
 

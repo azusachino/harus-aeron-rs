@@ -3,9 +3,11 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aeron_archive::codecs::{
-    ConnectRequest, ControlResponse, ListRecordingRequest, PROTOCOL_SEMANTIC_VERSION,
-    ReplayRequest, SourceLocation, StartRecordingRequest, StopRecordingRequest,
+    ConnectRequest, ControlResponse, ControlResponseCode, ListRecordingRequest,
+    ListRecordingsForUriRequest, ListRecordingsRequest, PROTOCOL_SEMANTIC_VERSION, ReplayRequest,
+    SourceLocation, StartRecordingRequest, StopRecordingRequest,
 };
+use aeron_archive::recording_descriptor::RecordingDescriptor;
 use aeron_archive::service::{ArchiveContext, ArchiveService};
 use aeron_client::conductor::ClientConductor;
 use aeron_client::driver_proxy::DriverProxy;
@@ -104,6 +106,50 @@ fn await_response(
         }
     }
     panic!("response {correlation_id} did not arrive");
+}
+
+fn await_listing(
+    driver: &mut MediaDriver,
+    archive: &mut ArchiveService,
+    client: &mut ClientConductor<'static>,
+    subscription_id: i64,
+    correlation_id: i64,
+) -> (Vec<RecordingDescriptor>, Option<ControlResponse>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut descriptors = Vec::new();
+    while Instant::now() < deadline {
+        cycle(driver, archive, client);
+        let mut terminal = None;
+        if let Some(subscription) = client.subscription_mut(subscription_id) {
+            subscription.poll(
+                |buffer, offset, length, _| {
+                    let mut bytes = vec![0; length];
+                    buffer.get_bytes(offset, &mut bytes);
+                    if let Ok(descriptor) = RecordingDescriptor::decode(&bytes) {
+                        if descriptor.correlation_id == correlation_id
+                            && !descriptors.iter().any(|existing: &RecordingDescriptor| {
+                                existing.recording_id == descriptor.recording_id
+                            })
+                        {
+                            descriptors.push(descriptor);
+                        }
+                    } else if let Ok(response) = ControlResponse::decode(&bytes) {
+                        if response.correlation_id == correlation_id {
+                            terminal = Some(response);
+                        }
+                    }
+                },
+                20,
+            );
+        }
+        if terminal.is_some() {
+            return (descriptors, terminal);
+        }
+        if !descriptors.is_empty() {
+            return (descriptors, None);
+        }
+    }
+    panic!("listing {correlation_id} did not arrive");
 }
 
 fn connect(
@@ -295,17 +341,68 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
     while !offer(&external, control_publication, &mut list) {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    assert_eq!(
-        await_response(
-            &mut driver,
-            &mut archive,
-            &mut external,
-            restart_response_subscription,
-            5,
-        )
-        .relevant_id,
-        recording_id
+    let (descriptors, terminal) = await_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        restart_response_subscription,
+        5,
     );
+    assert!(terminal.is_none());
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].recording_id, recording_id);
+    assert_eq!(descriptors[0].control_session_id, session_id);
+    assert_eq!(descriptors[0].correlation_id, 5);
+    assert_eq!(descriptors[0].stream_id, LIVE_STREAM);
+    assert_eq!(descriptors[0].original_channel, "aeron:ipc");
+    assert!(descriptors[0].stop_position > 0);
+
+    let mut list_range = ListRecordingsRequest {
+        control_session_id: session_id,
+        correlation_id: 7,
+        from_recording_id: recording_id,
+        record_count: 2,
+    }
+    .encode()
+    .expect("list range encode");
+    while !offer(&external, control_publication, &mut list_range) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let (descriptors, terminal) = await_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        restart_response_subscription,
+        7,
+    );
+    assert_eq!(descriptors.len(), 1);
+    let terminal = terminal.expect("range exhaustion response");
+    assert_eq!(terminal.code, ControlResponseCode::RecordingUnknown);
+    assert_eq!(terminal.relevant_id, recording_id + 1);
+
+    let mut list_uri = ListRecordingsForUriRequest {
+        control_session_id: session_id,
+        correlation_id: 8,
+        from_recording_id: recording_id,
+        record_count: 1,
+        stream_id: LIVE_STREAM,
+        channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("list uri encode");
+    while !offer(&external, control_publication, &mut list_uri) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let (descriptors, terminal) = await_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        restart_response_subscription,
+        8,
+    );
+    assert!(terminal.is_none());
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].recording_id, recording_id);
 
     let replay_subscription = external
         .add_subscription("aeron:ipc", REPLAY_STREAM)

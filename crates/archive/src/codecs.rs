@@ -60,7 +60,11 @@ impl MessageHeader {
         })
     }
 
-    fn validate(&self, template_id: u16, minimum_block_length: u16) -> Result<(), CodecError> {
+    pub(crate) fn validate(
+        &self,
+        template_id: u16,
+        minimum_block_length: u16,
+    ) -> Result<(), CodecError> {
         if self.schema_id != SBE_SCHEMA_ID {
             return Err(CodecError::WrongSchema {
                 expected: SBE_SCHEMA_ID,

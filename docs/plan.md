@@ -134,13 +134,14 @@ the client-selected response stream, and owns recording/replay duty-cycle work. 
 standalone `aeron-archive` binary provides a bounded start/stop process lifecycle.
 
 The real integration proof uses a separate client to connect, record, stop, restart
-the Archive against its persisted catalog and segment files, list the recording, and
-replay its payload through another Aeron stream. This is still not full Archive parity:
-listing currently returns correlated counts/IDs rather than
-`RecordingDescriptor` response templates; replay is eager rather than a stoppable
-session; authentication, replication, extend/truncate/purge, marks/counters, and the
-complete upstream test families remain open. Keep Archive ledger rows `todo` until
-their complete upstream scopes are satisfied.
+the Archive against its persisted catalog and segment files, list the recording as a
+complete v13 `RecordingDescriptor`, and replay its payload through another Aeron
+stream. Range and URI listing publish descriptor streams with
+`RECORDING_UNKNOWN` exhaustion semantics. This is still not full Archive parity:
+replay is eager rather than a stoppable session; authentication, replication,
+extend/truncate/purge, marks/counters, and the complete upstream test families remain
+open. Keep Archive ledger rows `todo` until their complete upstream scopes are
+satisfied.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is

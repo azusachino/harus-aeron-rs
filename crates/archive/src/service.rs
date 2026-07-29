@@ -20,6 +20,7 @@ use crate::codecs::{
     ControlResponse, ControlResponseCode, PROTOCOL_SEMANTIC_VERSION, StartRecordingRequest,
 };
 use crate::control_session_adapter::{ControlAdapterError, ControlRequest, ControlSessionAdapter};
+use crate::recording_descriptor::RecordingDescriptor;
 use crate::runtime::{ArchiveRuntime, ArchiveRuntimeError};
 
 pub const DEFAULT_CONTROL_CHANNEL: &str = "aeron:ipc";
@@ -263,21 +264,41 @@ impl ArchiveService {
                 )?;
             }
             ControlRequest::ListRecordings(request) => {
-                let count = self
+                let descriptors = self
                     .runtime
                     .catalog()
                     .recordings()
                     .iter()
                     .filter(|descriptor| descriptor.recording_id >= request.from_recording_id)
                     .take(request.record_count.max(0) as usize)
-                    .count() as i64;
-                self.queue_session_response(
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.queue_descriptors(
                     request.control_session_id,
-                    ok(request.control_session_id, request.correlation_id, count),
+                    request.correlation_id,
+                    &descriptors,
                 )?;
+                if descriptors.len() < request.record_count.max(0) as usize {
+                    let next_recording_id = self
+                        .runtime
+                        .catalog()
+                        .recordings()
+                        .last()
+                        .map_or(request.from_recording_id, |descriptor| {
+                            descriptor.recording_id + 1
+                        });
+                    self.queue_session_response(
+                        request.control_session_id,
+                        recording_unknown(
+                            request.control_session_id,
+                            request.correlation_id,
+                            next_recording_id,
+                        ),
+                    )?;
+                }
             }
             ControlRequest::ListRecordingsForUri(request) => {
-                let count = self
+                let descriptors = self
                     .runtime
                     .catalog()
                     .recordings()
@@ -288,33 +309,54 @@ impl ArchiveService {
                             && descriptor.original_channel.contains(&request.channel)
                     })
                     .take(request.record_count.max(0) as usize)
-                    .count() as i64;
-                self.queue_session_response(
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.queue_descriptors(
                     request.control_session_id,
-                    ok(request.control_session_id, request.correlation_id, count),
+                    request.correlation_id,
+                    &descriptors,
                 )?;
+                if descriptors.len() < request.record_count.max(0) as usize {
+                    let next_recording_id = self
+                        .runtime
+                        .catalog()
+                        .recordings()
+                        .last()
+                        .map_or(request.from_recording_id, |descriptor| {
+                            descriptor.recording_id + 1
+                        });
+                    self.queue_session_response(
+                        request.control_session_id,
+                        recording_unknown(
+                            request.control_session_id,
+                            request.correlation_id,
+                            next_recording_id,
+                        ),
+                    )?;
+                }
             }
             ControlRequest::ListRecording(request) => {
-                let response = if self
+                let descriptor = self
                     .runtime
                     .catalog()
                     .get_recording(request.recording_id)
-                    .is_some()
-                {
-                    ok(
+                    .cloned();
+                if let Some(descriptor) = descriptor {
+                    self.queue_descriptor(
                         request.control_session_id,
                         request.correlation_id,
-                        request.recording_id,
-                    )
+                        &descriptor,
+                    )?;
                 } else {
-                    error(
+                    self.queue_session_response(
                         request.control_session_id,
-                        request.correlation_id,
-                        ControlResponseCode::RecordingUnknown,
-                        "recording unknown",
-                    )
-                };
-                self.queue_session_response(request.control_session_id, response)?;
+                        recording_unknown(
+                            request.control_session_id,
+                            request.correlation_id,
+                            request.recording_id,
+                        ),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -459,6 +501,36 @@ impl ArchiveService {
         Ok(())
     }
 
+    fn queue_descriptors(
+        &mut self,
+        control_session_id: i64,
+        correlation_id: i64,
+        descriptors: &[RecordingDescriptor],
+    ) -> Result<(), ArchiveServiceError> {
+        for descriptor in descriptors {
+            self.queue_descriptor(control_session_id, correlation_id, descriptor)?;
+        }
+        Ok(())
+    }
+
+    fn queue_descriptor(
+        &mut self,
+        control_session_id: i64,
+        correlation_id: i64,
+        descriptor: &RecordingDescriptor,
+    ) -> Result<(), ArchiveServiceError> {
+        if let Some(&publication_id) = self.sessions.get(&control_session_id) {
+            let mut descriptor = descriptor.clone();
+            descriptor.control_session_id = control_session_id;
+            descriptor.correlation_id = correlation_id;
+            self.responses.push_back(QueuedResponse {
+                publication_id,
+                bytes: descriptor.encode().map_err(ControlAdapterError::from)?,
+            });
+        }
+        Ok(())
+    }
+
     fn flush_responses(&mut self) -> Result<usize, ArchiveServiceError> {
         let mut sent = 0;
         let queued = self.responses.len();
@@ -564,6 +636,21 @@ fn error(
         code,
         version: PROTOCOL_SEMANTIC_VERSION,
         error_message: message.into(),
+    }
+}
+
+fn recording_unknown(
+    control_session_id: i64,
+    correlation_id: i64,
+    recording_id: i64,
+) -> ControlResponse {
+    ControlResponse {
+        control_session_id,
+        correlation_id,
+        relevant_id: recording_id,
+        code: ControlResponseCode::RecordingUnknown,
+        version: PROTOCOL_SEMANTIC_VERSION,
+        error_message: "recording unknown".into(),
     }
 }
 
