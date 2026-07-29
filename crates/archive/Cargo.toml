@@ -13,5 +13,5 @@ agrona.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+aeron-driver.workspace = true
 proptest.workspace = true
-
