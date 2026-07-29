@@ -110,6 +110,8 @@ pub enum ControlRequestType {
     FindLastMatchingRecording = 16,
     ListRecordingSubscriptions = 17,
     StartPosition = 52,
+    StartRecordingV2 = 63,
+    ExtendRecordingV2 = 64,
     MaxRecordedPosition = 67,
     PurgeRecording = 104,
 }
@@ -456,6 +458,93 @@ pub struct ExtendRecordingRequest {
     pub stream_id: i32,
     pub source_location: SourceLocation,
     pub channel: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRecordingRequestV2 {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub stream_id: i32,
+    pub source_location: SourceLocation,
+    pub auto_stop: bool,
+    pub channel: String,
+}
+
+impl StartRecordingRequestV2 {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::StartRecordingV2 as u16;
+    pub const BLOCK_LENGTH: u16 = 28;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i32(frame, 24, self.stream_id);
+                put_i32(frame, 28, self.source_location as i32);
+                put_i32(frame, 32, i32::from(self.auto_stop));
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            stream_id: get_i32(frame, 24),
+            source_location: SourceLocation::try_from(get_i32(frame, 28))?,
+            auto_stop: decode_bool(get_i32(frame, 32))?,
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendRecordingRequestV2 {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub recording_id: i64,
+    pub stream_id: i32,
+    pub source_location: SourceLocation,
+    pub auto_stop: bool,
+    pub channel: String,
+}
+
+impl ExtendRecordingRequestV2 {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ExtendRecordingV2 as u16;
+    pub const BLOCK_LENGTH: u16 = 36;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.recording_id);
+                put_i32(frame, 32, self.stream_id);
+                put_i32(frame, 36, self.source_location as i32);
+                put_i32(frame, 40, i32::from(self.auto_stop));
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (_, variable_offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            recording_id: get_i64(frame, 24),
+            stream_id: get_i32(frame, 32),
+            source_location: SourceLocation::try_from(get_i32(frame, 36))?,
+            auto_stop: decode_bool(get_i32(frame, 40))?,
+            channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
 }
 
 impl ExtendRecordingRequest {
@@ -869,6 +958,14 @@ fn decode_ascii(frame: &[u8], offset: usize) -> Result<(String, usize), CodecErr
     Ok((String::from_utf8_lossy(bytes).into_owned(), end))
 }
 
+fn decode_bool(value: i32) -> Result<bool, CodecError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(CodecError::UnknownBoolean(value)),
+    }
+}
+
 fn require(frame: &[u8], needed: usize) -> Result<(), CodecError> {
     if frame.len() < needed {
         Err(CodecError::Truncated {
@@ -941,6 +1038,19 @@ mod tests {
             start
         );
 
+        let start_v2 = StartRecordingRequestV2 {
+            control_session_id: 7,
+            correlation_id: 53,
+            stream_id: 1002,
+            source_location: SourceLocation::Remote,
+            auto_stop: true,
+            channel: "aeron:udp?endpoint=127.0.0.1:40124".into(),
+        };
+        assert_eq!(
+            StartRecordingRequestV2::decode(&start_v2.encode().unwrap()).unwrap(),
+            start_v2
+        );
+
         let extend = ExtendRecordingRequest {
             control_session_id: 7,
             correlation_id: 54,
@@ -952,6 +1062,20 @@ mod tests {
         assert_eq!(
             ExtendRecordingRequest::decode(&extend.encode().unwrap()).unwrap(),
             extend
+        );
+
+        let extend_v2 = ExtendRecordingRequestV2 {
+            control_session_id: 7,
+            correlation_id: 55,
+            recording_id: 3,
+            stream_id: 1002,
+            source_location: SourceLocation::Local,
+            auto_stop: false,
+            channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ExtendRecordingRequestV2::decode(&extend_v2.encode().unwrap()).unwrap(),
+            extend_v2
         );
 
         let truncate = TruncateRecordingRequest {
@@ -1168,6 +1292,36 @@ mod tests {
         .encode()
         .unwrap();
         assert_all_truncations(&start, StartRecordingRequest::decode);
+
+        let mut start_v2 = StartRecordingRequestV2 {
+            control_session_id: 1,
+            correlation_id: 2,
+            stream_id: 3,
+            source_location: SourceLocation::Remote,
+            auto_stop: true,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&start_v2, StartRecordingRequestV2::decode);
+        put_i32(&mut start_v2, 32, 99);
+        assert_eq!(
+            StartRecordingRequestV2::decode(&start_v2),
+            Err(CodecError::UnknownBoolean(99))
+        );
+
+        let extend_v2 = ExtendRecordingRequestV2 {
+            control_session_id: 1,
+            correlation_id: 2,
+            recording_id: 3,
+            stream_id: 4,
+            source_location: SourceLocation::Local,
+            auto_stop: false,
+            channel: "aeron:ipc".into(),
+        }
+        .encode()
+        .unwrap();
+        assert_all_truncations(&extend_v2, ExtendRecordingRequestV2::decode);
 
         let response = ControlResponse {
             control_session_id: 1,

@@ -3,12 +3,13 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aeron_archive::codecs::{
-    ConnectRequest, ControlResponse, ControlResponseCode, ExtendRecordingRequest,
+    ConnectRequest, ControlResponse, ControlResponseCode, ExtendRecordingRequestV2,
     FindLastMatchingRecordingRequest, ListRecordingRequest, ListRecordingSubscriptionsRequest,
     ListRecordingsForUriRequest, ListRecordingsRequest, MaxRecordedPositionRequest,
     PROTOCOL_SEMANTIC_VERSION, PurgeRecordingRequest, RecordingPositionRequest, ReplayRequest,
-    SourceLocation, StartPositionRequest, StartRecordingRequest, StopPositionRequest,
-    StopRecordingSubscriptionRequest, StopReplayRequest, TruncateRecordingRequest,
+    SourceLocation, StartPositionRequest, StartRecordingRequest, StartRecordingRequestV2,
+    StopPositionRequest, StopRecordingSubscriptionRequest, StopReplayRequest,
+    TruncateRecordingRequest,
 };
 use aeron_archive::recording_descriptor::RecordingDescriptor;
 use aeron_archive::recording_subscription_descriptor::RecordingSubscriptionDescriptor;
@@ -310,11 +311,12 @@ fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
         .add_publication("aeron:ipc", LIVE_STREAM + 10)
         .expect("live publication");
 
-    let mut start = StartRecordingRequest {
+    let mut start = StartRecordingRequestV2 {
         control_session_id: session_id,
         correlation_id: 102,
         stream_id: LIVE_STREAM + 10,
         source_location: SourceLocation::Local,
+        auto_stop: true,
         channel: "aeron:ipc".into(),
     }
     .encode()
@@ -322,7 +324,7 @@ fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
     while !offer(&external, control_publication, &mut start) {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    let first_subscription_id = await_response(
+    let _first_subscription_id = await_response(
         &mut driver,
         &mut archive,
         &mut external,
@@ -344,31 +346,18 @@ fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
     for _ in 0..20 {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    let mut stop = StopRecordingSubscriptionRequest {
-        control_session_id: session_id,
-        correlation_id: 103,
-        subscription_id: first_subscription_id,
-    }
-    .encode()
-    .expect("stop encode");
-    while !offer(&external, control_publication, &mut stop) {
+    assert!(
+        external
+            .remove_publication(live_publication)
+            .expect("remove initial publication")
+    );
+    for _ in 0..50 {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    assert_eq!(
-        await_response(
-            &mut driver,
-            &mut archive,
-            &mut external,
-            response_subscription,
-            103,
-        )
-        .code,
-        ControlResponseCode::Ok
-    );
 
     let mut list = ListRecordingsRequest {
         control_session_id: session_id,
-        correlation_id: 104,
+        correlation_id: 103,
         from_recording_id: 0,
         record_count: 1,
     }
@@ -382,21 +371,13 @@ fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
         &mut archive,
         &mut external,
         response_subscription,
-        104,
+        103,
     );
     assert!(terminal.is_none());
     let recording_id = descriptors[0].recording_id;
     let pre_extend_stop = descriptors[0].stop_position;
     let initial_term_id = descriptors[0].initial_term_id;
     let term_length = descriptors[0].term_buffer_length;
-    assert!(
-        external
-            .remove_publication(live_publication)
-            .expect("remove initial publication")
-    );
-    for _ in 0..20 {
-        cycle(&mut driver, &mut archive, &mut external);
-    }
     let term_id = initial_term_id.wrapping_add((pre_extend_stop / i64::from(term_length)) as i32);
     let term_offset = pre_extend_stop % i64::from(term_length);
     let extension_channel = format!(
@@ -409,12 +390,13 @@ fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
         cycle(&mut driver, &mut archive, &mut external);
     }
 
-    let mut extend = ExtendRecordingRequest {
+    let mut extend = ExtendRecordingRequestV2 {
         control_session_id: session_id,
-        correlation_id: 105,
+        correlation_id: 104,
         recording_id,
         stream_id: LIVE_STREAM + 10,
         source_location: SourceLocation::Local,
+        auto_stop: true,
         channel: "aeron:ipc".into(),
     }
     .encode()
@@ -422,12 +404,12 @@ fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
     while !offer(&external, control_publication, &mut extend) {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    let extension_subscription_id = await_response(
+    let _extension_subscription_id = await_response(
         &mut driver,
         &mut archive,
         &mut external,
         response_subscription,
-        105,
+        104,
     )
     .relevant_id;
     for _ in 0..20 {
@@ -443,31 +425,18 @@ fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
     for _ in 0..20 {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    let mut stop_extension = StopRecordingSubscriptionRequest {
-        control_session_id: session_id,
-        correlation_id: 106,
-        subscription_id: extension_subscription_id,
-    }
-    .encode()
-    .expect("stop extension encode");
-    while !offer(&external, control_publication, &mut stop_extension) {
+    assert!(
+        external
+            .remove_publication(extension_publication)
+            .expect("remove extension publication")
+    );
+    for _ in 0..50 {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    assert_eq!(
-        await_response(
-            &mut driver,
-            &mut archive,
-            &mut external,
-            response_subscription,
-            106,
-        )
-        .code,
-        ControlResponseCode::Ok
-    );
 
     let mut stop_position = StopPositionRequest {
         control_session_id: session_id,
-        correlation_id: 107,
+        correlation_id: 105,
         recording_id,
     }
     .encode()
@@ -481,7 +450,7 @@ fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
             &mut archive,
             &mut external,
             response_subscription,
-            107,
+            105,
         )
         .relevant_id
             > pre_extend_stop

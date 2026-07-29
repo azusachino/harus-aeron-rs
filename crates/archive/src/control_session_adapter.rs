@@ -2,11 +2,12 @@
 
 use crate::codecs::{
     CloseSessionRequest, CodecError, ConnectRequest, ExtendRecordingRequest,
-    FindLastMatchingRecordingRequest, ListRecordingRequest, ListRecordingSubscriptionsRequest,
-    ListRecordingsForUriRequest, ListRecordingsRequest, MaxRecordedPositionRequest, MessageHeader,
-    PurgeRecordingRequest, RecordingPositionRequest, ReplayRequest, StartPositionRequest,
-    StartRecordingRequest, StopPositionRequest, StopRecordingRequest,
-    StopRecordingSubscriptionRequest, StopReplayRequest, TruncateRecordingRequest,
+    ExtendRecordingRequestV2, FindLastMatchingRecordingRequest, ListRecordingRequest,
+    ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest, ListRecordingsRequest,
+    MaxRecordedPositionRequest, MessageHeader, PurgeRecordingRequest, RecordingPositionRequest,
+    ReplayRequest, StartPositionRequest, StartRecordingRequest, StartRecordingRequestV2,
+    StopPositionRequest, StopRecordingRequest, StopRecordingSubscriptionRequest, StopReplayRequest,
+    TruncateRecordingRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,7 +15,9 @@ pub enum ControlRequest {
     Connect(ConnectRequest),
     CloseSession(CloseSessionRequest),
     StartRecording(StartRecordingRequest),
+    StartRecordingV2(StartRecordingRequestV2),
     ExtendRecording(ExtendRecordingRequest),
+    ExtendRecordingV2(ExtendRecordingRequestV2),
     TruncateRecording(TruncateRecordingRequest),
     PurgeRecording(PurgeRecordingRequest),
     StopRecording(StopRecordingRequest),
@@ -58,6 +61,12 @@ impl ControlSessionAdapter {
             )),
             ExtendRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::ExtendRecording(
                 ExtendRecordingRequest::decode(frame)?,
+            )),
+            StartRecordingRequestV2::TEMPLATE_ID => Ok(ControlRequest::StartRecordingV2(
+                StartRecordingRequestV2::decode(frame)?,
+            )),
+            ExtendRecordingRequestV2::TEMPLATE_ID => Ok(ControlRequest::ExtendRecordingV2(
+                ExtendRecordingRequestV2::decode(frame)?,
             )),
             TruncateRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::TruncateRecording(
                 TruncateRecordingRequest::decode(frame)?,
@@ -116,7 +125,7 @@ impl ControlSessionAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::{PROTOCOL_SEMANTIC_VERSION, SourceLocation};
+    use crate::codecs::{PROTOCOL_SEMANTIC_VERSION, SourceLocation, StartRecordingRequestV2};
 
     #[test]
     fn dispatches_by_real_sbe_template_id() {
@@ -141,6 +150,19 @@ mod tests {
         assert_eq!(
             ControlSessionAdapter::decode(&start.encode().unwrap()).unwrap(),
             ControlRequest::StartRecording(start)
+        );
+
+        let start_v2 = StartRecordingRequestV2 {
+            control_session_id: 2,
+            correlation_id: 4,
+            stream_id: 102,
+            source_location: SourceLocation::Local,
+            auto_stop: true,
+            channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ControlSessionAdapter::decode(&start_v2.encode().unwrap()).unwrap(),
+            ControlRequest::StartRecordingV2(start_v2)
         );
     }
 

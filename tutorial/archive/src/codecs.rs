@@ -12,7 +12,13 @@ pub struct ConnectRequest;
 pub struct StartRecordingRequest;
 
 #[allow(dead_code)]
+pub struct StartRecordingRequestV2;
+
+#[allow(dead_code)]
 pub struct ExtendRecordingRequest;
+
+#[allow(dead_code)]
+pub struct ExtendRecordingRequestV2;
 
 #[allow(dead_code)]
 pub struct TruncateRecordingRequest;

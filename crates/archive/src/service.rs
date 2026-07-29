@@ -17,8 +17,8 @@ use agrona::AtomicBuffer;
 use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 
 use crate::codecs::{
-    ControlResponse, ControlResponseCode, ListRecordingSubscriptionsRequest,
-    PROTOCOL_SEMANTIC_VERSION, StartRecordingRequest,
+    ControlResponse, ControlResponseCode, ExtendRecordingRequest,
+    ListRecordingSubscriptionsRequest, PROTOCOL_SEMANTIC_VERSION, StartRecordingRequest,
 };
 use crate::control_session_adapter::{ControlAdapterError, ControlRequest, ControlSessionAdapter};
 use crate::recording_descriptor::RecordingDescriptor;
@@ -91,6 +91,7 @@ struct PendingStart {
     registration_id: i64,
     request: StartRecordingRequest,
     recording_id: Option<i64>,
+    auto_stop: bool,
 }
 
 struct PendingReplay {
@@ -105,6 +106,7 @@ struct PendingReplay {
 struct ActiveRecording {
     subscription_id: i64,
     recording_id: i64,
+    auto_stop: bool,
 }
 
 struct ActiveReplay {
@@ -230,113 +232,36 @@ impl ArchiveService {
                 }
             }
             ControlRequest::StartRecording(request) => {
-                if !self.sessions.contains_key(&request.control_session_id) {
-                    return Ok(());
-                }
-                let key = (request.channel.clone(), request.stream_id);
-                if self.active_recordings.contains_key(&key)
-                    || self.pending_starts.iter().any(|pending| {
-                        pending.request.channel == request.channel
-                            && pending.request.stream_id == request.stream_id
-                    })
-                {
-                    self.queue_session_response(
-                        request.control_session_id,
-                        error(
-                            request.control_session_id,
-                            request.correlation_id,
-                            ControlResponseCode::Error,
-                            "recording subscription is already active",
-                        ),
-                    )?;
-                    return Ok(());
-                }
-                let registration_id = self
-                    .client
-                    .add_subscription(&request.channel, request.stream_id)?;
-                let control_session_id = request.control_session_id;
-                let correlation_id = request.correlation_id;
-                self.pending_starts.push(PendingStart {
-                    registration_id,
-                    request,
-                    recording_id: None,
-                });
-                self.queue_session_response(
-                    control_session_id,
-                    ok(control_session_id, correlation_id, registration_id),
-                )?;
+                self.start_recording(request, false)?;
             }
-            ControlRequest::ExtendRecording(request) => {
-                if !self.sessions.contains_key(&request.control_session_id) {
-                    return Ok(());
-                }
-                let descriptor = self.runtime.catalog().get_recording(request.recording_id);
-                if descriptor.is_none_or(|descriptor| descriptor.stream_id != request.stream_id) {
-                    self.queue_session_response(
-                        request.control_session_id,
-                        recording_unknown(
-                            request.control_session_id,
-                            request.correlation_id,
-                            request.recording_id,
-                        ),
-                    )?;
-                    return Ok(());
-                }
-                if self
-                    .runtime
-                    .recording_position(request.recording_id)
-                    .is_some_and(|position| position != crate::runtime::NULL_POSITION)
-                {
-                    self.queue_session_response(
-                        request.control_session_id,
-                        error(
-                            request.control_session_id,
-                            request.correlation_id,
-                            ControlResponseCode::Error,
-                            "cannot extend active recording",
-                        ),
-                    )?;
-                    return Ok(());
-                }
-                let key = (request.channel.clone(), request.stream_id);
-                if self.active_recordings.contains_key(&key)
-                    || self.pending_starts.iter().any(|pending| {
-                        pending.request.channel == request.channel
-                            && pending.request.stream_id == request.stream_id
-                    })
-                {
-                    self.queue_session_response(
-                        request.control_session_id,
-                        error(
-                            request.control_session_id,
-                            request.correlation_id,
-                            ControlResponseCode::Error,
-                            "recording subscription is already active",
-                        ),
-                    )?;
-                    return Ok(());
-                }
-                let registration_id = self
-                    .client
-                    .add_subscription(&request.channel, request.stream_id)?;
-                self.pending_starts.push(PendingStart {
-                    registration_id,
-                    request: StartRecordingRequest {
+            ControlRequest::StartRecordingV2(request) => {
+                let auto_stop = request.auto_stop;
+                self.start_recording(
+                    StartRecordingRequest {
                         control_session_id: request.control_session_id,
                         correlation_id: request.correlation_id,
                         stream_id: request.stream_id,
                         source_location: request.source_location,
                         channel: request.channel,
                     },
-                    recording_id: Some(request.recording_id),
-                });
-                self.queue_session_response(
-                    request.control_session_id,
-                    ok(
-                        request.control_session_id,
-                        request.correlation_id,
-                        registration_id,
-                    ),
+                    auto_stop,
+                )?;
+            }
+            ControlRequest::ExtendRecording(request) => {
+                self.extend_recording(request, false)?;
+            }
+            ControlRequest::ExtendRecordingV2(request) => {
+                let auto_stop = request.auto_stop;
+                self.extend_recording(
+                    ExtendRecordingRequest {
+                        control_session_id: request.control_session_id,
+                        correlation_id: request.correlation_id,
+                        recording_id: request.recording_id,
+                        stream_id: request.stream_id,
+                        source_location: request.source_location,
+                        channel: request.channel,
+                    },
+                    auto_stop,
                 )?;
             }
             ControlRequest::TruncateRecording(request) => {
@@ -652,6 +577,128 @@ impl ArchiveService {
         Ok(count)
     }
 
+    fn start_recording(
+        &mut self,
+        request: StartRecordingRequest,
+        auto_stop: bool,
+    ) -> Result<(), ArchiveServiceError> {
+        if !self.sessions.contains_key(&request.control_session_id) {
+            return Ok(());
+        }
+        let key = (request.channel.clone(), request.stream_id);
+        if self.active_recordings.contains_key(&key)
+            || self.pending_starts.iter().any(|pending| {
+                pending.request.channel == request.channel
+                    && pending.request.stream_id == request.stream_id
+            })
+        {
+            self.queue_session_response(
+                request.control_session_id,
+                error(
+                    request.control_session_id,
+                    request.correlation_id,
+                    ControlResponseCode::Error,
+                    "recording subscription is already active",
+                ),
+            )?;
+            return Ok(());
+        }
+        let registration_id = self
+            .client
+            .add_subscription(&request.channel, request.stream_id)?;
+        let control_session_id = request.control_session_id;
+        let correlation_id = request.correlation_id;
+        self.pending_starts.push(PendingStart {
+            registration_id,
+            request,
+            recording_id: None,
+            auto_stop,
+        });
+        self.queue_session_response(
+            control_session_id,
+            ok(control_session_id, correlation_id, registration_id),
+        )
+    }
+
+    fn extend_recording(
+        &mut self,
+        request: ExtendRecordingRequest,
+        auto_stop: bool,
+    ) -> Result<(), ArchiveServiceError> {
+        if !self.sessions.contains_key(&request.control_session_id) {
+            return Ok(());
+        }
+        let descriptor = self.runtime.catalog().get_recording(request.recording_id);
+        if descriptor.is_none_or(|descriptor| descriptor.stream_id != request.stream_id) {
+            self.queue_session_response(
+                request.control_session_id,
+                recording_unknown(
+                    request.control_session_id,
+                    request.correlation_id,
+                    request.recording_id,
+                ),
+            )?;
+            return Ok(());
+        }
+        if self
+            .runtime
+            .recording_position(request.recording_id)
+            .is_some_and(|position| position != crate::runtime::NULL_POSITION)
+        {
+            self.queue_session_response(
+                request.control_session_id,
+                error(
+                    request.control_session_id,
+                    request.correlation_id,
+                    ControlResponseCode::Error,
+                    "cannot extend active recording",
+                ),
+            )?;
+            return Ok(());
+        }
+        let key = (request.channel.clone(), request.stream_id);
+        if self.active_recordings.contains_key(&key)
+            || self.pending_starts.iter().any(|pending| {
+                pending.request.channel == request.channel
+                    && pending.request.stream_id == request.stream_id
+            })
+        {
+            self.queue_session_response(
+                request.control_session_id,
+                error(
+                    request.control_session_id,
+                    request.correlation_id,
+                    ControlResponseCode::Error,
+                    "recording subscription is already active",
+                ),
+            )?;
+            return Ok(());
+        }
+        let registration_id = self
+            .client
+            .add_subscription(&request.channel, request.stream_id)?;
+        self.pending_starts.push(PendingStart {
+            registration_id,
+            request: StartRecordingRequest {
+                control_session_id: request.control_session_id,
+                correlation_id: request.correlation_id,
+                stream_id: request.stream_id,
+                source_location: request.source_location,
+                channel: request.channel,
+            },
+            recording_id: Some(request.recording_id),
+            auto_stop,
+        });
+        self.queue_session_response(
+            request.control_session_id,
+            ok(
+                request.control_session_id,
+                request.correlation_id,
+                registration_id,
+            ),
+        )
+    }
+
     fn finish_starts(&mut self) -> Result<usize, ArchiveServiceError> {
         let mut ready = Vec::new();
         for (index, pending) in self.pending_starts.iter().enumerate() {
@@ -709,6 +756,7 @@ impl ArchiveService {
                 ActiveRecording {
                     subscription_id: pending.registration_id,
                     recording_id,
+                    auto_stop: pending.auto_stop,
                 },
             );
         }
@@ -756,16 +804,36 @@ impl ArchiveService {
     fn poll_recordings(&mut self) -> Result<usize, ArchiveServiceError> {
         let recordings = self
             .active_recordings
-            .values()
-            .map(|active| (active.subscription_id, active.recording_id))
+            .iter()
+            .map(|(key, active)| {
+                (
+                    key.clone(),
+                    active.subscription_id,
+                    active.recording_id,
+                    active.auto_stop,
+                )
+            })
             .collect::<Vec<_>>();
         let mut work = 0;
-        for (subscription_id, recording_id) in recordings {
+        let mut stopped = Vec::new();
+        for (key, subscription_id, recording_id, auto_stop) in recordings {
             if let Some(subscription) = self.client.subscription_mut(subscription_id) {
                 work += self
                     .runtime
                     .poll_recording(recording_id, subscription, 20)?;
+                if auto_stop
+                    && (subscription.images().is_empty()
+                        || subscription
+                            .images()
+                            .iter()
+                            .all(|image| image.is_end_of_stream() || image.is_closed()))
+                {
+                    stopped.push(key);
+                }
             }
+        }
+        for key in stopped {
+            work += usize::from(self.stop_recording_by_key(&key)?);
         }
         Ok(work)
     }
@@ -1149,8 +1217,14 @@ fn request_key(request: &ControlRequest) -> (u16, i64, i64) {
         ControlRequest::StartRecording(request) => {
             (4, request.control_session_id, request.correlation_id)
         }
+        ControlRequest::StartRecordingV2(request) => {
+            (63, request.control_session_id, request.correlation_id)
+        }
         ControlRequest::ExtendRecording(request) => {
             (11, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::ExtendRecordingV2(request) => {
+            (64, request.control_session_id, request.correlation_id)
         }
         ControlRequest::TruncateRecording(request) => {
             (13, request.control_session_id, request.correlation_id)
