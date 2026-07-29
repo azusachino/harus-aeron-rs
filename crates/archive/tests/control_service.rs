@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 use aeron_archive::codecs::{
     ConnectRequest, ControlResponse, ControlResponseCode, FindLastMatchingRecordingRequest,
     ListRecordingRequest, ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest,
-    ListRecordingsRequest, MaxRecordedPositionRequest, PROTOCOL_SEMANTIC_VERSION, ReplayRequest,
-    SourceLocation, StartPositionRequest, StartRecordingRequest, StopPositionRequest,
-    StopRecordingSubscriptionRequest, StopReplayRequest,
+    ListRecordingsRequest, MaxRecordedPositionRequest, PROTOCOL_SEMANTIC_VERSION,
+    RecordingPositionRequest, ReplayRequest, SourceLocation, StartPositionRequest,
+    StartRecordingRequest, StopPositionRequest, StopRecordingSubscriptionRequest,
+    StopReplayRequest,
 };
 use aeron_archive::recording_descriptor::RecordingDescriptor;
 use aeron_archive::recording_subscription_descriptor::RecordingSubscriptionDescriptor;
@@ -442,6 +443,32 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
         -1
     );
 
+    let mut unknown_recording_position = RecordingPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 26,
+        recording_id: recording_id + 1,
+    }
+    .encode()
+    .expect("unknown recording position encode");
+    while !offer(
+        &external,
+        control_publication,
+        &mut unknown_recording_position,
+    ) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            26,
+        )
+        .code,
+        ControlResponseCode::RecordingUnknown
+    );
+
     let mut max_position = MaxRecordedPositionRequest {
         control_session_id: session_id,
         correlation_id: 20,
@@ -459,6 +486,28 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
             &mut external,
             response_subscription,
             20,
+        )
+        .relevant_id
+            > active_descriptor.start_position
+    );
+
+    let mut recording_position = RecordingPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 24,
+        recording_id,
+    }
+    .encode()
+    .expect("recording position encode");
+    while !offer(&external, control_publication, &mut recording_position) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            24,
         )
         .relevant_id
             > active_descriptor.start_position
@@ -584,6 +633,32 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
     assert!(terminal.is_none());
     assert_eq!(recordings.len(), 1);
     assert_eq!(recordings[0].recording_id, recording_id);
+
+    let mut stopped_recording_position = RecordingPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 25,
+        recording_id,
+    }
+    .encode()
+    .expect("stopped recording position encode");
+    while !offer(
+        &external,
+        control_publication,
+        &mut stopped_recording_position,
+    ) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            25,
+        )
+        .relevant_id,
+        -1
+    );
 
     let mut stopped_max_position = MaxRecordedPositionRequest {
         control_session_id: session_id,

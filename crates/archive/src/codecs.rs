@@ -103,6 +103,7 @@ pub enum ControlRequestType {
     ListRecordings = 8,
     ListRecordingsForUri = 9,
     ExtendRecording = 11,
+    RecordingPosition = 12,
     StopRecordingSubscription = 14,
     StopPosition = 15,
     FindLastMatchingRecording = 16,
@@ -479,6 +480,7 @@ macro_rules! recording_position_request {
 }
 
 recording_position_request!(StartPositionRequest, StartPosition);
+recording_position_request!(RecordingPositionRequest, RecordingPosition);
 recording_position_request!(StopPositionRequest, StopPosition);
 recording_position_request!(MaxRecordedPositionRequest, MaxRecordedPosition);
 
@@ -941,9 +943,19 @@ mod tests {
             start_position
         );
 
-        let stop_position = StopPositionRequest {
+        let recording_position = RecordingPositionRequest {
             control_session_id: 7,
             correlation_id: 50,
+            recording_id: 3,
+        };
+        assert_eq!(
+            RecordingPositionRequest::decode(&recording_position.encode().unwrap()).unwrap(),
+            recording_position
+        );
+
+        let stop_position = StopPositionRequest {
+            control_session_id: 7,
+            correlation_id: 51,
             recording_id: 3,
         };
         assert_eq!(
@@ -953,7 +965,7 @@ mod tests {
 
         let max_position = MaxRecordedPositionRequest {
             control_session_id: 7,
-            correlation_id: 51,
+            correlation_id: 52,
             recording_id: 3,
         };
         assert_eq!(
@@ -963,7 +975,7 @@ mod tests {
 
         let find_last = FindLastMatchingRecordingRequest {
             control_session_id: 7,
-            correlation_id: 52,
+            correlation_id: 53,
             min_recording_id: 1,
             session_id: 22,
             stream_id: 1002,

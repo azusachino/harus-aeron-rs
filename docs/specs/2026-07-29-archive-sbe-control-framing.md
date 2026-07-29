@@ -9,6 +9,7 @@ The foundation exposes complete codecs for the protocol boundary exercised by it
 | `ControlResponse` | 1 | 32 | `errorMessage` |
 | `ConnectRequest` | 2 | 16 | `responseChannel` |
 | `StartRecordingRequest` | 4 | 24 | `channel` |
+| `RecordingPositionRequest` | 12 | 24 | none |
 | `StopPositionRequest` | 15 | 24 | none |
 | `FindLastMatchingRecordingRequest` | 16 | 32 | `channel` |
 | `StartPositionRequest` | 52 | 24 | none |

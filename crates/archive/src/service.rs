@@ -430,6 +430,22 @@ impl ArchiveService {
                     );
                 self.queue_session_response(request.control_session_id, response)?;
             }
+            ControlRequest::RecordingPosition(request) => {
+                let response = self
+                    .runtime
+                    .recording_position(request.recording_id)
+                    .map_or_else(
+                        || {
+                            recording_unknown(
+                                request.control_session_id,
+                                request.correlation_id,
+                                request.recording_id,
+                            )
+                        },
+                        |position| ok(request.control_session_id, request.correlation_id, position),
+                    );
+                self.queue_session_response(request.control_session_id, response)?;
+            }
             ControlRequest::StopPosition(request) => {
                 let response = self
                     .runtime
@@ -988,6 +1004,9 @@ fn request_key(request: &ControlRequest) -> (u16, i64, i64) {
         }
         ControlRequest::StartPosition(request) => {
             (52, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::RecordingPosition(request) => {
+            (12, request.control_session_id, request.correlation_id)
         }
         ControlRequest::StopPosition(request) => {
             (15, request.control_session_id, request.correlation_id)

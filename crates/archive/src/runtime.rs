@@ -211,6 +211,15 @@ impl ArchiveRuntime {
             .map(|descriptor| descriptor.stop_position)
     }
 
+    pub fn recording_position(&self, recording_id: i64) -> Option<i64> {
+        self.catalog.get_recording(recording_id)?;
+        Some(
+            self.active
+                .get(&recording_id)
+                .map_or(NULL_POSITION, |writer| writer.position),
+        )
+    }
+
     pub fn max_recorded_position(&self, recording_id: i64) -> Option<i64> {
         self.active.get(&recording_id).map_or_else(
             || self.stop_position(recording_id),

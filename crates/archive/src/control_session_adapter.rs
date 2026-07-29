@@ -3,9 +3,9 @@
 use crate::codecs::{
     CloseSessionRequest, CodecError, ConnectRequest, FindLastMatchingRecordingRequest,
     ListRecordingRequest, ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest,
-    ListRecordingsRequest, MaxRecordedPositionRequest, MessageHeader, ReplayRequest,
-    StartPositionRequest, StartRecordingRequest, StopPositionRequest, StopRecordingRequest,
-    StopRecordingSubscriptionRequest, StopReplayRequest,
+    ListRecordingsRequest, MaxRecordedPositionRequest, MessageHeader, RecordingPositionRequest,
+    ReplayRequest, StartPositionRequest, StartRecordingRequest, StopPositionRequest,
+    StopRecordingRequest, StopRecordingSubscriptionRequest, StopReplayRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub enum ControlRequest {
     ListRecording(ListRecordingRequest),
     ListRecordingSubscriptions(ListRecordingSubscriptionsRequest),
     StartPosition(StartPositionRequest),
+    RecordingPosition(RecordingPositionRequest),
     StopPosition(StopPositionRequest),
     MaxRecordedPosition(MaxRecordedPositionRequest),
     FindLastMatchingRecording(FindLastMatchingRecordingRequest),
@@ -79,6 +80,9 @@ impl ControlSessionAdapter {
             }
             StartPositionRequest::TEMPLATE_ID => Ok(ControlRequest::StartPosition(
                 StartPositionRequest::decode(frame)?,
+            )),
+            RecordingPositionRequest::TEMPLATE_ID => Ok(ControlRequest::RecordingPosition(
+                RecordingPositionRequest::decode(frame)?,
             )),
             StopPositionRequest::TEMPLATE_ID => Ok(ControlRequest::StopPosition(
                 StopPositionRequest::decode(frame)?,

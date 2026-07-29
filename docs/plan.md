@@ -151,11 +151,13 @@ recording. Repeated stop and empty/invalid subscription listings report
 `SUBSCRIPTION_UNKNOWN`.
 
 Recording-history queries now use their exact v13 templates: start position (52),
-stop position (15), max recorded position (67), and find-last matching (16). The
-managed service returns `NULL_POSITION` for an active recording's catalog stop,
-reports the live writer position as its maximum, and preserves finalized query
-results across Archive restart. Find-last matching follows upstream's exact session,
-stream, channel-fragment, and minimum-recording-ID semantics.
+active recording position (12), stop position (15), max recorded position (67), and
+find-last matching (16). The managed service returns the live writer position only
+while a recording is active, returns `NULL_POSITION` afterward, keeps the catalog
+stop at `NULL_POSITION` while active, reports the live writer position as its
+maximum, and preserves finalized query results across Archive restart. Find-last
+matching follows upstream's exact session, stream, channel-fragment, and
+minimum-recording-ID semantics.
 
 This is still not full Archive parity: shared/ref-counted recording subscriptions,
 auto-stop and start-recording-v2 options are not implemented. The current replay path

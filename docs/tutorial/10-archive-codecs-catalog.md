@@ -29,8 +29,9 @@ stopping replay before completion. It also verifies that start-recording returns
 subscription registration ID, template-23 listing exposes it, and stopping by that ID
 removes the subscription while finalizing its catalog recording. Position queries
 prove the catalog start, the active `NULL_POSITION` stop, the live writer maximum,
-the finalized stop position before and after restart, and exact-session find-last
-matching through the same external control client.
+the active-only recording position and its stopped `NULL_POSITION`, the finalized
+stop position before and after restart, and exact-session find-last matching through
+the same external control client.
 
 ## Verification
 

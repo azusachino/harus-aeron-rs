@@ -42,6 +42,9 @@ pub struct ListRecordingSubscriptionsRequest;
 pub struct StartPositionRequest;
 
 #[allow(dead_code)]
+pub struct RecordingPositionRequest;
+
+#[allow(dead_code)]
 pub struct StopPositionRequest;
 
 #[allow(dead_code)]
