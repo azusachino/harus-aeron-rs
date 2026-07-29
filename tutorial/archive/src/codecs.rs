@@ -12,6 +12,15 @@ pub struct ConnectRequest;
 pub struct StartRecordingRequest;
 
 #[allow(dead_code)]
+pub struct ExtendRecordingRequest;
+
+#[allow(dead_code)]
+pub struct TruncateRecordingRequest;
+
+#[allow(dead_code)]
+pub struct PurgeRecordingRequest;
+
+#[allow(dead_code)]
 pub struct CloseSessionRequest;
 
 #[allow(dead_code)]

@@ -6,7 +6,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aeron_client::logbuffer::{FRAME_ALIGNMENT, HEADER_LENGTH};
+use aeron_client::logbuffer::{FRAME_ALIGNMENT, HEADER_LENGTH, mtu_length};
 use aeron_client::publication::{CLOSED, ConcurrentPublication, NOT_CONNECTED};
 use aeron_client::subscription::Subscription;
 
@@ -27,6 +27,18 @@ pub enum ArchiveRuntimeError {
     UnknownRecording(i64),
     #[error("recording is already active: {0}")]
     RecordingActive(i64),
+    #[error("recording extension does not match descriptor: {0}")]
+    InvalidExtension(String),
+    #[error(
+        "invalid truncate position {position} for recording {recording_id}: range is {start}..={stop} and alignment is {alignment}"
+    )]
+    InvalidTruncatePosition {
+        recording_id: i64,
+        position: i64,
+        start: i64,
+        stop: i64,
+        alignment: i32,
+    },
     #[error(
         "invalid replay position {position} for recording {recording_id}: range is {start}..={stop}"
     )]
@@ -60,6 +72,10 @@ pub struct ReplayCursor {
 }
 
 impl ReplayCursor {
+    pub fn recording_id(&self) -> i64 {
+        self.descriptor.recording_id
+    }
+
     pub fn position(&self) -> i64 {
         self.position
     }
@@ -197,6 +213,101 @@ impl ArchiveRuntime {
             .update_stop_position(recording_id, stop_position, now_ms());
         self.catalog.save_to_file(&self.catalog_path)?;
         Ok(stop_position)
+    }
+
+    pub fn extend_recording(
+        &mut self,
+        recording_id: i64,
+        control_session_id: i64,
+        correlation_id: i64,
+        subscription: &Subscription,
+    ) -> Result<(), ArchiveRuntimeError> {
+        if self.active.contains_key(&recording_id) {
+            return Err(ArchiveRuntimeError::RecordingActive(recording_id));
+        }
+        let image = subscription
+            .images()
+            .first()
+            .ok_or(ArchiveRuntimeError::NoImage)?;
+        let descriptor = self
+            .catalog
+            .get_recording(recording_id)
+            .ok_or(ArchiveRuntimeError::UnknownRecording(recording_id))?
+            .clone();
+        let image_mtu_length = mtu_length(&image.log_buffers().meta_data_buffer());
+        if image.position() != descriptor.stop_position
+            || image.initial_term_id() != descriptor.initial_term_id
+            || image.term_length() != descriptor.term_buffer_length as usize
+            || image_mtu_length != descriptor.mtu_length
+        {
+            return Err(ArchiveRuntimeError::InvalidExtension(format!(
+                "join={} stop={} initial-term={} expected-initial-term={} term-length={} expected-term-length={} mtu={} expected-mtu={}",
+                image.position(),
+                descriptor.stop_position,
+                image.initial_term_id(),
+                descriptor.initial_term_id,
+                image.term_length(),
+                descriptor.term_buffer_length,
+                image_mtu_length,
+                descriptor.mtu_length
+            )));
+        }
+        let writer =
+            RecordingWriter::open_at(&self.archive_dir, &descriptor, descriptor.stop_position)?;
+        self.catalog.extend_recording(
+            recording_id,
+            control_session_id,
+            correlation_id,
+            image.session_id(),
+        );
+        self.catalog.save_to_file(&self.catalog_path)?;
+        self.active.insert(recording_id, writer);
+        Ok(())
+    }
+
+    pub fn truncate_recording(
+        &mut self,
+        recording_id: i64,
+        position: i64,
+    ) -> Result<(), ArchiveRuntimeError> {
+        if self.active.contains_key(&recording_id) {
+            return Err(ArchiveRuntimeError::RecordingActive(recording_id));
+        }
+        let descriptor = self
+            .catalog
+            .get_recording(recording_id)
+            .ok_or(ArchiveRuntimeError::UnknownRecording(recording_id))?
+            .clone();
+        if position < descriptor.start_position
+            || position > descriptor.stop_position
+            || position & i64::from(FRAME_ALIGNMENT - 1) != 0
+        {
+            return Err(ArchiveRuntimeError::InvalidTruncatePosition {
+                recording_id,
+                position,
+                start: descriptor.start_position,
+                stop: descriptor.stop_position,
+                alignment: FRAME_ALIGNMENT,
+            });
+        }
+        truncate_segments(&self.archive_dir, &descriptor, position)?;
+        self.catalog
+            .update_stop_position(recording_id, position, now_ms());
+        self.catalog.save_to_file(&self.catalog_path)?;
+        Ok(())
+    }
+
+    pub fn purge_recording(&mut self, recording_id: i64) -> Result<(), ArchiveRuntimeError> {
+        if self.active.contains_key(&recording_id) {
+            return Err(ArchiveRuntimeError::RecordingActive(recording_id));
+        }
+        if self.catalog.get_recording(recording_id).is_none() {
+            return Err(ArchiveRuntimeError::UnknownRecording(recording_id));
+        }
+        delete_recording_segments(&self.archive_dir, recording_id)?;
+        self.catalog.remove_recording(recording_id);
+        self.catalog.save_to_file(&self.catalog_path)?;
+        Ok(())
     }
 
     pub fn start_position(&self, recording_id: i64) -> Option<i64> {
@@ -353,6 +464,22 @@ impl RecordingWriter {
         })
     }
 
+    fn open_at(
+        archive_dir: &Path,
+        descriptor: &RecordingDescriptor,
+        position: i64,
+    ) -> Result<Self, ArchiveRuntimeError> {
+        let segment_base = descriptor.segment_position(position);
+        let file = open_segment(archive_dir, descriptor, segment_base)?;
+        Ok(Self {
+            archive_dir: archive_dir.to_path_buf(),
+            descriptor: descriptor.clone(),
+            file,
+            segment_base,
+            position,
+        })
+    }
+
     fn write_frame(
         &mut self,
         buffer: &agrona::AtomicBuffer,
@@ -402,6 +529,72 @@ fn open_segment(
     Ok(file)
 }
 
+fn truncate_segments(
+    archive_dir: &Path,
+    descriptor: &RecordingDescriptor,
+    position: i64,
+) -> Result<(), std::io::Error> {
+    let retained_segment_base = descriptor.segment_position(position);
+    if position == descriptor.start_position {
+        delete_recording_segments(archive_dir, descriptor.recording_id)?;
+        return Ok(());
+    }
+
+    let retained_path = archive_dir.join(format!(
+        "{}-{retained_segment_base}.rec",
+        descriptor.recording_id
+    ));
+    let retained_offset = position - retained_segment_base;
+    if retained_offset > 0 && position < descriptor.stop_position {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(retained_path)?;
+        let offset = retained_offset as u64;
+        file.seek(SeekFrom::Start(offset))?;
+        let zeroes = [0_u8; 8192];
+        let mut remaining = u64::from(descriptor.segment_file_length as u32) - offset;
+        while remaining > 0 {
+            let length = remaining.min(zeroes.len() as u64) as usize;
+            file.write_all(&zeroes[..length])?;
+            remaining -= length as u64;
+        }
+        file.sync_all()?;
+    }
+
+    for entry in std::fs::read_dir(archive_dir)? {
+        let entry = entry?;
+        if segment_base_from_name(
+            &entry.file_name().to_string_lossy(),
+            descriptor.recording_id,
+        )
+        .is_some_and(|segment_base| {
+            segment_base > retained_segment_base
+                || (retained_offset == 0 && segment_base == retained_segment_base)
+        }) {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn delete_recording_segments(archive_dir: &Path, recording_id: i64) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(archive_dir)? {
+        let entry = entry?;
+        if segment_base_from_name(&entry.file_name().to_string_lossy(), recording_id).is_some() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn segment_base_from_name(name: &str, recording_id: i64) -> Option<i64> {
+    name.strip_prefix(&format!("{recording_id}-"))?
+        .strip_suffix(".rec")?
+        .parse()
+        .ok()
+}
+
 fn align(value: i32, alignment: i32) -> i32 {
     (value + alignment - 1) & -alignment
 }
@@ -410,4 +603,75 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor() -> RecordingDescriptor {
+        RecordingDescriptor::new(
+            1,
+            2,
+            7,
+            0,
+            320,
+            3,
+            4,
+            5,
+            128,
+            64,
+            32,
+            6,
+            8,
+            "aeron:ipc".into(),
+            "aeron:ipc".into(),
+            "source".into(),
+        )
+    }
+
+    fn segment_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "aeron-archive-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    fn write_segments(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        for base in [0, 128, 256] {
+            std::fs::write(path.join(format!("7-{base}.rec")), vec![1_u8; 128]).unwrap();
+        }
+    }
+
+    #[test]
+    fn truncate_zeroes_the_retained_tail_and_deletes_later_segments() {
+        let path = segment_test_dir("truncate-tail");
+        let _ = std::fs::remove_dir_all(&path);
+        write_segments(&path);
+
+        truncate_segments(&path, &descriptor(), 64).unwrap();
+
+        let retained = std::fs::read(path.join("7-0.rec")).unwrap();
+        assert_eq!(&retained[..64], &[1_u8; 64]);
+        assert_eq!(&retained[64..], &[0_u8; 64]);
+        assert!(!path.join("7-128.rec").exists());
+        assert!(!path.join("7-256.rec").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn truncate_at_a_segment_boundary_deletes_that_segment_and_later_segments() {
+        let path = segment_test_dir("truncate-boundary");
+        let _ = std::fs::remove_dir_all(&path);
+        write_segments(&path);
+
+        truncate_segments(&path, &descriptor(), 128).unwrap();
+
+        assert!(path.join("7-0.rec").exists());
+        assert!(!path.join("7-128.rec").exists());
+        assert!(!path.join("7-256.rec").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }

@@ -159,13 +159,22 @@ maximum, and preserves finalized query results across Archive restart. Find-last
 matching follows upstream's exact session, stream, channel-fragment, and
 minimum-recording-ID semantics.
 
+Recording mutation now covers v13 `ExtendRecordingRequest` (11),
+`TruncateRecordingRequest` (13), and `PurgeRecordingRequest` (104). Extension requires
+an image joining at the stopped descriptor's exact position with matching initial
+term, term length, and MTU, then resumes the same recording ID. Truncation accepts
+only aligned positions within the stopped range, clears the retained segment tail,
+deletes later segments, and persists the shorter stop. Purge rejects active
+recordings/replays, deletes every segment, removes catalog visibility, and remains
+deleted after restart.
+
 This is still not full Archive parity: shared/ref-counted recording subscriptions,
-auto-stop and start-recording-v2 options are not implemented. The current replay path
+auto-stop and v2 start/extend options are not implemented. The current replay path
 supports stopped recordings rather than live follow/bounded-counter replay, and uses
 service-local session IDs rather than upstream's composite replay/publication ID.
-Authentication, replication, extend/truncate/purge, marks/counters, and the complete
-upstream test families remain open. Keep Archive ledger rows `todo` until their
-complete upstream scopes are satisfied.
+Authentication, replication, detached segment operations, marks/counters, and the
+complete upstream test families remain open. Keep Archive ledger rows `todo` until
+their complete upstream scopes are satisfied.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is

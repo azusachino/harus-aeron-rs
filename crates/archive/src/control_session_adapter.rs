@@ -1,11 +1,12 @@
 //! Bounded dispatch for Archive control requests received from an Aeron subscription.
 
 use crate::codecs::{
-    CloseSessionRequest, CodecError, ConnectRequest, FindLastMatchingRecordingRequest,
-    ListRecordingRequest, ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest,
-    ListRecordingsRequest, MaxRecordedPositionRequest, MessageHeader, RecordingPositionRequest,
-    ReplayRequest, StartPositionRequest, StartRecordingRequest, StopPositionRequest,
-    StopRecordingRequest, StopRecordingSubscriptionRequest, StopReplayRequest,
+    CloseSessionRequest, CodecError, ConnectRequest, ExtendRecordingRequest,
+    FindLastMatchingRecordingRequest, ListRecordingRequest, ListRecordingSubscriptionsRequest,
+    ListRecordingsForUriRequest, ListRecordingsRequest, MaxRecordedPositionRequest, MessageHeader,
+    PurgeRecordingRequest, RecordingPositionRequest, ReplayRequest, StartPositionRequest,
+    StartRecordingRequest, StopPositionRequest, StopRecordingRequest,
+    StopRecordingSubscriptionRequest, StopReplayRequest, TruncateRecordingRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +14,9 @@ pub enum ControlRequest {
     Connect(ConnectRequest),
     CloseSession(CloseSessionRequest),
     StartRecording(StartRecordingRequest),
+    ExtendRecording(ExtendRecordingRequest),
+    TruncateRecording(TruncateRecordingRequest),
+    PurgeRecording(PurgeRecordingRequest),
     StopRecording(StopRecordingRequest),
     StopRecordingSubscription(StopRecordingSubscriptionRequest),
     Replay(ReplayRequest),
@@ -51,6 +55,15 @@ impl ControlSessionAdapter {
             )),
             StartRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::StartRecording(
                 StartRecordingRequest::decode(frame)?,
+            )),
+            ExtendRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::ExtendRecording(
+                ExtendRecordingRequest::decode(frame)?,
+            )),
+            TruncateRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::TruncateRecording(
+                TruncateRecordingRequest::decode(frame)?,
+            )),
+            PurgeRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::PurgeRecording(
+                PurgeRecordingRequest::decode(frame)?,
             )),
             StopRecordingRequest::TEMPLATE_ID => Ok(ControlRequest::StopRecording(
                 StopRecordingRequest::decode(frame)?,

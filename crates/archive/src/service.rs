@@ -90,6 +90,7 @@ struct PendingConnect {
 struct PendingStart {
     registration_id: i64,
     request: StartRecordingRequest,
+    recording_id: Option<i64>,
 }
 
 struct PendingReplay {
@@ -258,11 +259,130 @@ impl ArchiveService {
                 self.pending_starts.push(PendingStart {
                     registration_id,
                     request,
+                    recording_id: None,
                 });
                 self.queue_session_response(
                     control_session_id,
                     ok(control_session_id, correlation_id, registration_id),
                 )?;
+            }
+            ControlRequest::ExtendRecording(request) => {
+                if !self.sessions.contains_key(&request.control_session_id) {
+                    return Ok(());
+                }
+                let descriptor = self.runtime.catalog().get_recording(request.recording_id);
+                if descriptor.is_none_or(|descriptor| descriptor.stream_id != request.stream_id) {
+                    self.queue_session_response(
+                        request.control_session_id,
+                        recording_unknown(
+                            request.control_session_id,
+                            request.correlation_id,
+                            request.recording_id,
+                        ),
+                    )?;
+                    return Ok(());
+                }
+                if self
+                    .runtime
+                    .recording_position(request.recording_id)
+                    .is_some_and(|position| position != crate::runtime::NULL_POSITION)
+                {
+                    self.queue_session_response(
+                        request.control_session_id,
+                        error(
+                            request.control_session_id,
+                            request.correlation_id,
+                            ControlResponseCode::Error,
+                            "cannot extend active recording",
+                        ),
+                    )?;
+                    return Ok(());
+                }
+                let key = (request.channel.clone(), request.stream_id);
+                if self.active_recordings.contains_key(&key)
+                    || self.pending_starts.iter().any(|pending| {
+                        pending.request.channel == request.channel
+                            && pending.request.stream_id == request.stream_id
+                    })
+                {
+                    self.queue_session_response(
+                        request.control_session_id,
+                        error(
+                            request.control_session_id,
+                            request.correlation_id,
+                            ControlResponseCode::Error,
+                            "recording subscription is already active",
+                        ),
+                    )?;
+                    return Ok(());
+                }
+                let registration_id = self
+                    .client
+                    .add_subscription(&request.channel, request.stream_id)?;
+                self.pending_starts.push(PendingStart {
+                    registration_id,
+                    request: StartRecordingRequest {
+                        control_session_id: request.control_session_id,
+                        correlation_id: request.correlation_id,
+                        stream_id: request.stream_id,
+                        source_location: request.source_location,
+                        channel: request.channel,
+                    },
+                    recording_id: Some(request.recording_id),
+                });
+                self.queue_session_response(
+                    request.control_session_id,
+                    ok(
+                        request.control_session_id,
+                        request.correlation_id,
+                        registration_id,
+                    ),
+                )?;
+            }
+            ControlRequest::TruncateRecording(request) => {
+                let response = if self
+                    .active_replays
+                    .values()
+                    .any(|replay| replay.cursor.recording_id() == request.recording_id)
+                {
+                    error(
+                        request.control_session_id,
+                        request.correlation_id,
+                        ControlResponseCode::Error,
+                        "cannot truncate recording with active replay",
+                    )
+                } else {
+                    mutation_response(
+                        request.control_session_id,
+                        request.correlation_id,
+                        request.recording_id,
+                        self.runtime
+                            .truncate_recording(request.recording_id, request.position),
+                    )
+                };
+                self.queue_session_response(request.control_session_id, response)?;
+            }
+            ControlRequest::PurgeRecording(request) => {
+                let response = if self
+                    .active_replays
+                    .values()
+                    .any(|replay| replay.cursor.recording_id() == request.recording_id)
+                {
+                    error(
+                        request.control_session_id,
+                        request.correlation_id,
+                        ControlResponseCode::Error,
+                        "cannot purge recording with active replay",
+                    )
+                } else {
+                    mutation_response(
+                        request.control_session_id,
+                        request.correlation_id,
+                        request.recording_id,
+                        self.runtime.purge_recording(request.recording_id),
+                    )
+                };
+                self.queue_session_response(request.control_session_id, response)?;
             }
             ControlRequest::StopRecording(request) => {
                 let key = (request.channel, request.stream_id);
@@ -546,7 +666,36 @@ impl ArchiveService {
         let count = ready.len();
         for index in ready.into_iter().rev() {
             let pending = self.pending_starts.swap_remove(index);
-            let recording_id = {
+            let recording_id = if let Some(recording_id) = pending.recording_id {
+                let result = {
+                    let subscription = self
+                        .client
+                        .subscription(pending.registration_id)
+                        .ok_or_else(|| {
+                            ArchiveServiceError::InvalidContext("subscription vanished".into())
+                        })?;
+                    self.runtime.extend_recording(
+                        recording_id,
+                        pending.request.control_session_id,
+                        pending.request.correlation_id,
+                        subscription,
+                    )
+                };
+                if let Err(runtime_error) = result {
+                    let _ = self.client.remove_subscription(pending.registration_id)?;
+                    self.queue_session_response(
+                        pending.request.control_session_id,
+                        error(
+                            pending.request.control_session_id,
+                            pending.request.correlation_id,
+                            ControlResponseCode::Error,
+                            &runtime_error.to_string(),
+                        ),
+                    )?;
+                    continue;
+                }
+                recording_id
+            } else {
                 let subscription = self
                     .client
                     .subscription(pending.registration_id)
@@ -973,12 +1122,41 @@ fn recording_unknown(
     }
 }
 
+fn mutation_response(
+    control_session_id: i64,
+    correlation_id: i64,
+    recording_id: i64,
+    result: Result<(), ArchiveRuntimeError>,
+) -> ControlResponse {
+    match result {
+        Ok(()) => ok(control_session_id, correlation_id, 0),
+        Err(ArchiveRuntimeError::UnknownRecording(_)) => {
+            recording_unknown(control_session_id, correlation_id, recording_id)
+        }
+        Err(archive_error) => error(
+            control_session_id,
+            correlation_id,
+            ControlResponseCode::Error,
+            &archive_error.to_string(),
+        ),
+    }
+}
+
 fn request_key(request: &ControlRequest) -> (u16, i64, i64) {
     match request {
         ControlRequest::Connect(request) => (2, 0, request.correlation_id),
         ControlRequest::CloseSession(request) => (3, request.control_session_id, -1),
         ControlRequest::StartRecording(request) => {
             (4, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::ExtendRecording(request) => {
+            (11, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::TruncateRecording(request) => {
+            (13, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::PurgeRecording(request) => {
+            (104, request.control_session_id, request.correlation_id)
         }
         ControlRequest::StopRecording(request) => {
             (5, request.control_session_id, request.correlation_id)

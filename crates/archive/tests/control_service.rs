@@ -3,12 +3,12 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aeron_archive::codecs::{
-    ConnectRequest, ControlResponse, ControlResponseCode, FindLastMatchingRecordingRequest,
-    ListRecordingRequest, ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest,
-    ListRecordingsRequest, MaxRecordedPositionRequest, PROTOCOL_SEMANTIC_VERSION,
-    RecordingPositionRequest, ReplayRequest, SourceLocation, StartPositionRequest,
-    StartRecordingRequest, StopPositionRequest, StopRecordingSubscriptionRequest,
-    StopReplayRequest,
+    ConnectRequest, ControlResponse, ControlResponseCode, ExtendRecordingRequest,
+    FindLastMatchingRecordingRequest, ListRecordingRequest, ListRecordingSubscriptionsRequest,
+    ListRecordingsForUriRequest, ListRecordingsRequest, MaxRecordedPositionRequest,
+    PROTOCOL_SEMANTIC_VERSION, PurgeRecordingRequest, RecordingPositionRequest, ReplayRequest,
+    SourceLocation, StartPositionRequest, StartRecordingRequest, StopPositionRequest,
+    StopRecordingSubscriptionRequest, StopReplayRequest, TruncateRecordingRequest,
 };
 use aeron_archive::recording_descriptor::RecordingDescriptor;
 use aeron_archive::recording_subscription_descriptor::RecordingSubscriptionDescriptor;
@@ -269,6 +269,449 @@ fn standalone_archive_process_starts_stops_and_restarts() {
     }
 
     driver.stop().expect("stop driver");
+    std::fs::remove_dir_all(archive_dir).expect("cleanup");
+}
+
+#[test]
+fn extends_truncates_and_purges_a_recording_over_the_control_plane() {
+    let archive_dir = archive_dir();
+    let _ = std::fs::remove_dir_all(&archive_dir);
+    let mut driver = MediaDriver::launch(Configuration {
+        ipc_term_buffer_length: TERM_MIN_LENGTH as usize,
+        ..Configuration::default()
+    })
+    .expect("driver");
+    let mut archive = ArchiveService::launch(ArchiveContext::new(driver.aeron_dir(), &archive_dir))
+        .expect("archive");
+    let mut external = client(&driver, 8_002);
+    let control_publication = external
+        .add_publication("aeron:ipc", CONTROL_STREAM)
+        .expect("control publication");
+    let response_subscription = external
+        .add_subscription("aeron:ipc", RESPONSE_STREAM + 10)
+        .expect("response subscription");
+    await_resources(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        response_subscription,
+    );
+    let session_id = connect(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        response_subscription,
+        101,
+        RESPONSE_STREAM + 10,
+    );
+    let live_publication = external
+        .add_publication("aeron:ipc", LIVE_STREAM + 10)
+        .expect("live publication");
+
+    let mut start = StartRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 102,
+        stream_id: LIVE_STREAM + 10,
+        source_location: SourceLocation::Local,
+        channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("start encode");
+    while !offer(&external, control_publication, &mut start) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let first_subscription_id = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        102,
+    )
+    .relevant_id;
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+
+    let initial_payloads = [b"before-extend-1".to_vec(), b"before-extend-2".to_vec()];
+    for payload in &initial_payloads {
+        let mut bytes = payload.clone();
+        while !offer(&external, live_publication, &mut bytes) {
+            cycle(&mut driver, &mut archive, &mut external);
+        }
+    }
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let mut stop = StopRecordingSubscriptionRequest {
+        control_session_id: session_id,
+        correlation_id: 103,
+        subscription_id: first_subscription_id,
+    }
+    .encode()
+    .expect("stop encode");
+    while !offer(&external, control_publication, &mut stop) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            103,
+        )
+        .code,
+        ControlResponseCode::Ok
+    );
+
+    let mut list = ListRecordingsRequest {
+        control_session_id: session_id,
+        correlation_id: 104,
+        from_recording_id: 0,
+        record_count: 1,
+    }
+    .encode()
+    .expect("list encode");
+    while !offer(&external, control_publication, &mut list) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let (descriptors, terminal) = await_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        104,
+    );
+    assert!(terminal.is_none());
+    let recording_id = descriptors[0].recording_id;
+    let pre_extend_stop = descriptors[0].stop_position;
+    let initial_term_id = descriptors[0].initial_term_id;
+    let term_length = descriptors[0].term_buffer_length;
+    assert!(
+        external
+            .remove_publication(live_publication)
+            .expect("remove initial publication")
+    );
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let term_id = initial_term_id.wrapping_add((pre_extend_stop / i64::from(term_length)) as i32);
+    let term_offset = pre_extend_stop % i64::from(term_length);
+    let extension_channel = format!(
+        "aeron:ipc?initial-term-id={initial_term_id}|term-id={term_id}|term-offset={term_offset}|term-length={term_length}|mtu=1408"
+    );
+    let extension_publication = external
+        .add_publication(&extension_channel, LIVE_STREAM + 10)
+        .expect("extension publication");
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+
+    let mut extend = ExtendRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 105,
+        recording_id,
+        stream_id: LIVE_STREAM + 10,
+        source_location: SourceLocation::Local,
+        channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("extend encode");
+    while !offer(&external, control_publication, &mut extend) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let extension_subscription_id = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        105,
+    )
+    .relevant_id;
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let extension_payloads = [b"after-extend-1".to_vec(), b"after-extend-2".to_vec()];
+    for payload in &extension_payloads {
+        let mut bytes = payload.clone();
+        while !offer(&external, extension_publication, &mut bytes) {
+            cycle(&mut driver, &mut archive, &mut external);
+        }
+    }
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let mut stop_extension = StopRecordingSubscriptionRequest {
+        control_session_id: session_id,
+        correlation_id: 106,
+        subscription_id: extension_subscription_id,
+    }
+    .encode()
+    .expect("stop extension encode");
+    while !offer(&external, control_publication, &mut stop_extension) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            106,
+        )
+        .code,
+        ControlResponseCode::Ok
+    );
+
+    let mut stop_position = StopPositionRequest {
+        control_session_id: session_id,
+        correlation_id: 107,
+        recording_id,
+    }
+    .encode()
+    .expect("stop position encode");
+    while !offer(&external, control_publication, &mut stop_position) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            107,
+        )
+        .relevant_id
+            > pre_extend_stop
+    );
+
+    let mut invalid_truncate = TruncateRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 115,
+        recording_id,
+        position: pre_extend_stop + 1,
+    }
+    .encode()
+    .expect("invalid truncate encode");
+    while !offer(&external, control_publication, &mut invalid_truncate) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            115,
+        )
+        .code,
+        ControlResponseCode::Error
+    );
+
+    let mut truncate = TruncateRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 108,
+        recording_id,
+        position: pre_extend_stop,
+    }
+    .encode()
+    .expect("truncate encode");
+    while !offer(&external, control_publication, &mut truncate) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            108,
+        )
+        .code,
+        ControlResponseCode::Ok
+    );
+
+    drop(archive);
+    let mut restarted_context = ArchiveContext::new(driver.aeron_dir(), &archive_dir);
+    restarted_context.client_id += 1;
+    let mut archive = ArchiveService::launch(restarted_context).expect("restart archive");
+    let restarted_response_subscription = external
+        .add_subscription("aeron:ipc", RESPONSE_STREAM + 11)
+        .expect("restart response subscription");
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let session_id = connect(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        restarted_response_subscription,
+        109,
+        RESPONSE_STREAM + 11,
+    );
+    let replay_subscription = external
+        .add_subscription("aeron:ipc", REPLAY_STREAM + 10)
+        .expect("replay subscription");
+    let mut replay = ReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 110,
+        recording_id,
+        position: -1,
+        length: -1,
+        replay_stream_id: REPLAY_STREAM + 10,
+        file_io_max_length: 0,
+        replay_token: 0,
+        replay_channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("replay encode");
+    while !offer(&external, control_publication, &mut replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let replay_session_id = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        restarted_response_subscription,
+        110,
+    )
+    .relevant_id;
+    assert!(replay_session_id > 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut replayed = Vec::new();
+    while Instant::now() < deadline && replayed.len() < initial_payloads.len() {
+        cycle(&mut driver, &mut archive, &mut external);
+        if let Some(subscription) = external.subscription_mut(replay_subscription) {
+            subscription.poll(
+                |buffer, offset, length, _| {
+                    let mut payload = vec![0; length];
+                    buffer.get_bytes(offset, &mut payload);
+                    replayed.push(payload);
+                },
+                10,
+            );
+        }
+    }
+    assert_eq!(replayed, initial_payloads);
+    let mut stop_replay = StopReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 113,
+        replay_session_id,
+    }
+    .encode()
+    .expect("stop replay encode");
+    while !offer(&external, control_publication, &mut stop_replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            restarted_response_subscription,
+            113,
+        )
+        .code,
+        ControlResponseCode::Ok
+    );
+
+    let mut purge = PurgeRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 111,
+        recording_id,
+    }
+    .encode()
+    .expect("purge encode");
+    while !offer(&external, control_publication, &mut purge) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let purge_response = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        restarted_response_subscription,
+        111,
+    );
+    assert_eq!(
+        purge_response.code,
+        ControlResponseCode::Ok,
+        "{purge_response:?}"
+    );
+
+    drop(archive);
+    let mut purged_context = ArchiveContext::new(driver.aeron_dir(), &archive_dir);
+    purged_context.client_id += 2;
+    let mut archive = ArchiveService::launch(purged_context).expect("restart purged archive");
+    let purged_response_subscription = external
+        .add_subscription("aeron:ipc", RESPONSE_STREAM + 12)
+        .expect("purged response subscription");
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let session_id = connect(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        purged_response_subscription,
+        114,
+        RESPONSE_STREAM + 12,
+    );
+    let mut list_purged = ListRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 112,
+        recording_id,
+    }
+    .encode()
+    .expect("list purged encode");
+    while !offer(&external, control_publication, &mut list_purged) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            purged_response_subscription,
+            112,
+        )
+        .code,
+        ControlResponseCode::RecordingUnknown
+    );
+    let mut purge_again = PurgeRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 116,
+        recording_id,
+    }
+    .encode()
+    .expect("purge unknown encode");
+    while !offer(&external, control_publication, &mut purge_again) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            purged_response_subscription,
+            116,
+        )
+        .code,
+        ControlResponseCode::RecordingUnknown
+    );
+    assert!(
+        std::fs::read_dir(&archive_dir)
+            .expect("archive directory")
+            .all(|entry| !entry
+                .expect("archive entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{recording_id}-")))
+    );
+
     std::fs::remove_dir_all(archive_dir).expect("cleanup");
 }
 

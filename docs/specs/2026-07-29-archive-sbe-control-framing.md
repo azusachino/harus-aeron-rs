@@ -9,11 +9,14 @@ The foundation exposes complete codecs for the protocol boundary exercised by it
 | `ControlResponse` | 1 | 32 | `errorMessage` |
 | `ConnectRequest` | 2 | 16 | `responseChannel` |
 | `StartRecordingRequest` | 4 | 24 | `channel` |
+| `ExtendRecordingRequest` | 11 | 32 | `channel` |
 | `RecordingPositionRequest` | 12 | 24 | none |
+| `TruncateRecordingRequest` | 13 | 32 | none |
 | `StopPositionRequest` | 15 | 24 | none |
 | `FindLastMatchingRecordingRequest` | 16 | 32 | `channel` |
 | `StartPositionRequest` | 52 | 24 | none |
 | `MaxRecordedPositionRequest` | 67 | 24 | none |
+| `PurgeRecordingRequest` | 104 | 24 | none |
 
 Every complete frame starts with the eight-byte SBE message header. Variable ASCII fields use a four-byte unsigned little-endian length followed by US-ASCII bytes. Decoders validate the frame boundary, schema, template, minimum block length, enum discriminants, variable length, and ASCII encoding before reading data.
 

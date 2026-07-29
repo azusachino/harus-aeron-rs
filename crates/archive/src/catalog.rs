@@ -86,6 +86,43 @@ impl Catalog {
         false
     }
 
+    pub fn extend_recording(
+        &mut self,
+        recording_id: i64,
+        control_session_id: i64,
+        correlation_id: i64,
+        session_id: i32,
+    ) -> bool {
+        let update = |descriptor: &mut RecordingDescriptor| {
+            descriptor.control_session_id = control_session_id;
+            descriptor.correlation_id = correlation_id;
+            descriptor.session_id = session_id;
+            descriptor.stop_position = -1;
+            descriptor.stop_timestamp = 0;
+        };
+        if let Some(descriptor) = self.descriptors.get_mut(&recording_id) {
+            update(descriptor);
+            if let Some(ordered) = self
+                .ordered_descriptors
+                .iter_mut()
+                .find(|descriptor| descriptor.recording_id == recording_id)
+            {
+                update(ordered);
+            }
+            return true;
+        }
+        false
+    }
+
+    pub fn remove_recording(&mut self, recording_id: i64) -> bool {
+        if self.descriptors.remove(&recording_id).is_none() {
+            return false;
+        }
+        self.ordered_descriptors
+            .retain(|descriptor| descriptor.recording_id != recording_id);
+        true
+    }
+
     pub fn find_recording_for_stream(
         &self,
         stream_id: i32,
