@@ -137,11 +137,18 @@ The real integration proof uses a separate client to connect, record, stop, rest
 the Archive against its persisted catalog and segment files, list the recording as a
 complete v13 `RecordingDescriptor`, and replay its payload through another Aeron
 stream. Range and URI listing publish descriptor streams with
-`RECORDING_UNKNOWN` exhaustion semantics. This is still not full Archive parity:
-replay is eager rather than a stoppable session; authentication, replication,
-extend/truncate/purge, marks/counters, and the complete upstream test families remain
-open. Keep Archive ledger rows `todo` until their complete upstream scopes are
-satisfied.
+`RECORDING_UNKNOWN` exhaustion semantics. Replay now runs as an incremental session:
+requested position/length bounds are validated, backpressure leaves the cursor in
+place, the correlated start response carries a replay-session ID, and `StopReplay`
+aborts an active session while remaining idempotent after completion. Completed replay
+publications linger briefly so subscribers can consume the final fragment.
+
+This is still not full Archive parity: the current replay path supports stopped
+recordings rather than live follow/bounded-counter replay, and uses service-local
+session IDs rather than upstream's composite replay/publication ID. Authentication,
+replication, extend/truncate/purge, marks/counters, and the complete upstream test
+families remain open. Keep Archive ledger rows `todo` until their complete upstream
+scopes are satisfied.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is

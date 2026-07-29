@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use aeron_archive::codecs::{
     ConnectRequest, ControlResponse, ControlResponseCode, ListRecordingRequest,
     ListRecordingsForUriRequest, ListRecordingsRequest, PROTOCOL_SEMANTIC_VERSION, ReplayRequest,
-    SourceLocation, StartRecordingRequest, StopRecordingRequest,
+    SourceLocation, StartRecordingRequest, StopRecordingRequest, StopReplayRequest,
 };
 use aeron_archive::recording_descriptor::RecordingDescriptor;
 use aeron_archive::service::{ArchiveContext, ArchiveService};
@@ -22,6 +22,8 @@ const RESPONSE_STREAM: i32 = 701;
 const RESTART_RESPONSE_STREAM: i32 = 704;
 const LIVE_STREAM: i32 = 702;
 const REPLAY_STREAM: i32 = 703;
+const BOUNDED_REPLAY_STREAM: i32 = 705;
+const INVALID_REPLAY_STREAM: i32 = 706;
 
 fn client(driver: &MediaDriver, client_id: i64) -> ClientConductor<'static> {
     let ring = ManyToOneRingBuffer::new(driver.cnc().to_driver_buffer()).expect("driver ring");
@@ -280,10 +282,16 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
     )
     .relevant_id;
 
-    let payload = b"managed-archive-control-plane".to_vec();
-    let mut payload_bytes = payload.clone();
-    while !offer(&external, live_publication, &mut payload_bytes) {
-        cycle(&mut driver, &mut archive, &mut external);
+    let payloads = [
+        b"managed-archive-control-plane".to_vec(),
+        b"bounded-second".to_vec(),
+        b"stoppable-third".to_vec(),
+    ];
+    for payload in &payloads {
+        let mut payload_bytes = payload.clone();
+        while !offer(&external, live_publication, &mut payload_bytes) {
+            cycle(&mut driver, &mut archive, &mut external);
+        }
     }
     for _ in 0..20 {
         cycle(&mut driver, &mut archive, &mut external);
@@ -423,24 +431,143 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
     while !offer(&external, control_publication, &mut replay) {
         cycle(&mut driver, &mut archive, &mut external);
     }
-    let _ = await_response(
+    let replay_session_id = await_response(
         &mut driver,
         &mut archive,
         &mut external,
         restart_response_subscription,
         6,
+    )
+    .relevant_id;
+    let mut stop_replay = StopReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 9,
+        replay_session_id,
+    }
+    .encode()
+    .expect("stop replay encode");
+    while !offer(&external, control_publication, &mut stop_replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let stop_response = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        restart_response_subscription,
+        9,
     );
+    assert_eq!(stop_response.code, ControlResponseCode::Ok);
+    assert_eq!(stop_response.relevant_id, 0);
+
     let mut replayed = Vec::new();
     if let Some(subscription) = external.subscription_mut(replay_subscription) {
         subscription.poll(
             |buffer, offset, length, _| {
-                replayed.resize(length, 0);
-                buffer.get_bytes(offset, &mut replayed);
+                let mut payload = vec![0; length];
+                buffer.get_bytes(offset, &mut payload);
+                replayed.push(payload);
             },
             10,
         );
     }
-    assert_eq!(replayed, payload);
+    assert_eq!(replayed, vec![payloads[0].clone()]);
+
+    let bounded_subscription = external
+        .add_subscription("aeron:ipc", BOUNDED_REPLAY_STREAM)
+        .expect("bounded replay subscription");
+    let mut bounded_replay = ReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 10,
+        recording_id,
+        position: 64,
+        length: 64,
+        replay_stream_id: BOUNDED_REPLAY_STREAM,
+        file_io_max_length: 0,
+        replay_token: 0,
+        replay_channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("bounded replay encode");
+    while !offer(&external, control_publication, &mut bounded_replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let bounded_session_id = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        restart_response_subscription,
+        10,
+    )
+    .relevant_id;
+    assert_ne!(bounded_session_id, replay_session_id);
+    for _ in 0..5 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let mut bounded_payloads = Vec::new();
+    if let Some(subscription) = external.subscription_mut(bounded_subscription) {
+        subscription.poll(
+            |buffer, offset, length, _| {
+                let mut payload = vec![0; length];
+                buffer.get_bytes(offset, &mut payload);
+                bounded_payloads.push(payload);
+            },
+            10,
+        );
+    }
+    assert_eq!(bounded_payloads, vec![payloads[1].clone()]);
+
+    let mut stop_completed_replay = StopReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 11,
+        replay_session_id: bounded_session_id,
+    }
+    .encode()
+    .expect("stop completed replay encode");
+    while !offer(&external, control_publication, &mut stop_completed_replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            restart_response_subscription,
+            11,
+        )
+        .code,
+        ControlResponseCode::Ok
+    );
+
+    let _invalid_subscription = external
+        .add_subscription("aeron:ipc", INVALID_REPLAY_STREAM)
+        .expect("invalid replay subscription");
+    let mut invalid_replay = ReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 12,
+        recording_id,
+        position: 1,
+        length: 64,
+        replay_stream_id: INVALID_REPLAY_STREAM,
+        file_io_max_length: 0,
+        replay_token: 0,
+        replay_channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("invalid replay encode");
+    while !offer(&external, control_publication, &mut invalid_replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            restart_response_subscription,
+            12,
+        )
+        .code,
+        ControlResponseCode::Error
+    );
 
     std::fs::remove_dir_all(archive_dir).expect("cleanup");
 }

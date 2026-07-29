@@ -16,14 +16,15 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 
 - `crates/archive/src/control_session.rs`: `ControlSession` state machine (`Init`, `Connected`, `Closed`).
 - `crates/archive/src/conductor.rs`: `ArchiveConductor` for processing client connection requests (`on_connect`) and stream recording sessions (`on_start_recording`).
-- `crates/archive/src/runtime.rs`: persistent recording of aligned frames from a real subscription and replay through a real publication after catalog restart.
-- `crates/archive/src/service.rs`: `ArchiveContext`, the CnC-backed managed duty cycle, request correlation/deduplication, and response publication.
+- `crates/archive/src/runtime.rs`: persistent recording of aligned frames from a real subscription plus an incremental `ReplayCursor` that validates position/length bounds and advances only after successful publication offers.
+- `crates/archive/src/service.rs`: `ArchiveContext`, the CnC-backed managed duty cycle, request correlation/deduplication, response publication, replay-session IDs, `StopReplay`, and final-fragment publication linger.
 - `crates/archive/src/bin/aeron-archive.rs`: standalone process that attaches to an existing Media Driver and stops cleanly when standard input closes.
 
 The integration test in `crates/archive/tests/control_service.rs` drives the real
 control publication and response subscription from a separate client, then proves
 record, stop, Archive restart, list-by-id, ranged and URI-filtered descriptor
-responses, exhaustion signaling, and replay.
+responses, exhaustion signaling, bounded replay, invalid-position rejection, and
+stopping replay before completion.
 
 ## Verification
 

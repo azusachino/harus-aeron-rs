@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aeron_client::logbuffer::{FRAME_ALIGNMENT, HEADER_LENGTH};
-use aeron_client::publication::ConcurrentPublication;
+use aeron_client::publication::{CLOSED, ConcurrentPublication, NOT_CONNECTED};
 use aeron_client::subscription::Subscription;
 
 use crate::catalog::Catalog;
@@ -26,6 +26,17 @@ pub enum ArchiveRuntimeError {
     UnknownRecording(i64),
     #[error("recording is already active: {0}")]
     RecordingActive(i64),
+    #[error(
+        "invalid replay position {position} for recording {recording_id}: range is {start}..={stop}"
+    )]
+    InvalidReplayPosition {
+        recording_id: i64,
+        position: i64,
+        start: i64,
+        stop: i64,
+    },
+    #[error("invalid replay length: {0}")]
+    InvalidReplayLength(i64),
     #[error("invalid recorded frame at position {position}: length {length}")]
     InvalidFrame { position: i64, length: i32 },
     #[error("replay publication rejected payload at position {position}: result {result}")]
@@ -38,6 +49,57 @@ pub struct ArchiveRuntime {
     catalog: Catalog,
     active: HashMap<i64, RecordingWriter>,
     segment_length: i32,
+}
+
+pub struct ReplayCursor {
+    archive_dir: PathBuf,
+    descriptor: RecordingDescriptor,
+    position: i64,
+    limit: i64,
+}
+
+impl ReplayCursor {
+    pub fn position(&self) -> i64 {
+        self.position
+    }
+
+    pub fn limit(&self) -> i64 {
+        self.limit
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.position >= self.limit
+    }
+
+    pub fn poll(
+        &mut self,
+        publication: &ConcurrentPublication,
+        fragment_limit: usize,
+    ) -> Result<usize, ArchiveRuntimeError> {
+        let mut messages = 0;
+        while !self.is_complete() && messages < fragment_limit {
+            let position = self.position;
+            let (mut payload, aligned_length) =
+                read_recorded_payload(&self.archive_dir, &self.descriptor, position)?;
+            let payload_length = payload.len();
+            let buffer = agrona::AtomicBuffer::new(&mut payload);
+            let result = publication.offer(&buffer, 0, payload_length).map_err(|_| {
+                ArchiveRuntimeError::ReplayOffer {
+                    position,
+                    result: i64::MIN,
+                }
+            })?;
+            if result == CLOSED || result == NOT_CONNECTED {
+                return Err(ArchiveRuntimeError::ReplayOffer { position, result });
+            }
+            if result < 0 {
+                break;
+            }
+            self.position += i64::from(aligned_length);
+            messages += 1;
+        }
+        Ok(messages)
+    }
 }
 
 impl ArchiveRuntime {
@@ -141,51 +203,90 @@ impl ArchiveRuntime {
         recording_id: i64,
         publication: &ConcurrentPublication,
     ) -> Result<usize, ArchiveRuntimeError> {
+        let mut cursor = self.start_replay(recording_id, -1, -1)?;
+        let mut messages = 0;
+        while !cursor.is_complete() {
+            let work = cursor.poll(publication, usize::MAX)?;
+            if work == 0 {
+                return Err(ArchiveRuntimeError::ReplayOffer {
+                    position: cursor.position(),
+                    result: aeron_client::publication::BACK_PRESSURED,
+                });
+            }
+            messages += work;
+        }
+        Ok(messages)
+    }
+
+    pub fn start_replay(
+        &self,
+        recording_id: i64,
+        requested_position: i64,
+        requested_length: i64,
+    ) -> Result<ReplayCursor, ArchiveRuntimeError> {
         if self.active.contains_key(&recording_id) {
             return Err(ArchiveRuntimeError::RecordingActive(recording_id));
         }
         let descriptor = self
             .catalog
             .get_recording(recording_id)
-            .ok_or(ArchiveRuntimeError::UnknownRecording(recording_id))?;
-        let mut position = descriptor.start_position;
-        let mut messages = 0;
-        while position < descriptor.stop_position {
-            let segment_base = descriptor.segment_position(position);
-            let segment_offset = (position - segment_base) as u64;
-            let mut file = File::open(
-                self.archive_dir
-                    .join(descriptor.segment_file_name(position)),
-            )?;
-            file.seek(SeekFrom::Start(segment_offset))?;
-            let mut length_bytes = [0; 4];
-            file.read_exact(&mut length_bytes)?;
-            let frame_length = i32::from_le_bytes(length_bytes);
-            if frame_length < HEADER_LENGTH {
-                return Err(ArchiveRuntimeError::InvalidFrame {
-                    position,
-                    length: frame_length,
-                });
-            }
-            let payload_length = (frame_length - HEADER_LENGTH) as usize;
-            file.seek(SeekFrom::Current((HEADER_LENGTH - 4) as i64))?;
-            let mut payload = vec![0; payload_length];
-            file.read_exact(&mut payload)?;
-            let buffer = agrona::AtomicBuffer::new(&mut payload);
-            let result = publication.offer(&buffer, 0, payload_length).map_err(|_| {
-                ArchiveRuntimeError::ReplayOffer {
-                    position,
-                    result: i64::MIN,
-                }
-            })?;
-            if result < 0 {
-                return Err(ArchiveRuntimeError::ReplayOffer { position, result });
-            }
-            position += i64::from(align(frame_length, FRAME_ALIGNMENT));
-            messages += 1;
+            .ok_or(ArchiveRuntimeError::UnknownRecording(recording_id))?
+            .clone();
+        let position = if requested_position == -1 {
+            descriptor.start_position
+        } else {
+            requested_position
+        };
+        if position < descriptor.start_position || position > descriptor.stop_position {
+            return Err(ArchiveRuntimeError::InvalidReplayPosition {
+                recording_id,
+                position,
+                start: descriptor.start_position,
+                stop: descriptor.stop_position,
+            });
         }
-        Ok(messages)
+        let available = descriptor.stop_position - position;
+        let length = match requested_length {
+            -1 | -2 => available,
+            value if value >= 0 => value.min(available),
+            value => return Err(ArchiveRuntimeError::InvalidReplayLength(value)),
+        };
+        let limit = position.saturating_add(length);
+        if position < descriptor.stop_position {
+            let _ = read_recorded_payload(&self.archive_dir, &descriptor, position)?;
+        }
+        Ok(ReplayCursor {
+            archive_dir: self.archive_dir.clone(),
+            descriptor,
+            position,
+            limit,
+        })
     }
+}
+
+fn read_recorded_payload(
+    archive_dir: &Path,
+    descriptor: &RecordingDescriptor,
+    position: i64,
+) -> Result<(Vec<u8>, i32), ArchiveRuntimeError> {
+    let segment_base = descriptor.segment_position(position);
+    let segment_offset = (position - segment_base) as u64;
+    let mut file = File::open(archive_dir.join(descriptor.segment_file_name(position)))?;
+    file.seek(SeekFrom::Start(segment_offset))?;
+    let mut length_bytes = [0; 4];
+    file.read_exact(&mut length_bytes)?;
+    let frame_length = i32::from_le_bytes(length_bytes);
+    if frame_length < HEADER_LENGTH {
+        return Err(ArchiveRuntimeError::InvalidFrame {
+            position,
+            length: frame_length,
+        });
+    }
+    let payload_length = (frame_length - HEADER_LENGTH) as usize;
+    file.seek(SeekFrom::Current((HEADER_LENGTH - 4) as i64))?;
+    let mut payload = vec![0; payload_length];
+    file.read_exact(&mut payload)?;
+    Ok((payload, align(frame_length, FRAME_ALIGNMENT)))
 }
 
 struct RecordingWriter {

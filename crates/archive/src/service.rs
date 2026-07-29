@@ -7,7 +7,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aeron_client::cnc_file::{CNC_FILE, CncFile};
 use aeron_client::conductor::ClientConductor;
@@ -21,11 +21,12 @@ use crate::codecs::{
 };
 use crate::control_session_adapter::{ControlAdapterError, ControlRequest, ControlSessionAdapter};
 use crate::recording_descriptor::RecordingDescriptor;
-use crate::runtime::{ArchiveRuntime, ArchiveRuntimeError};
+use crate::runtime::{ArchiveRuntime, ArchiveRuntimeError, ReplayCursor};
 
 pub const DEFAULT_CONTROL_CHANNEL: &str = "aeron:ipc";
 pub const DEFAULT_CONTROL_STREAM_ID: i32 = 10;
 pub const DEFAULT_ARCHIVE_CLIENT_ID: i64 = 7_001;
+const REPLAY_LINGER_DURATION: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct ArchiveContext {
@@ -94,11 +95,23 @@ struct PendingReplay {
     control_session_id: i64,
     correlation_id: i64,
     recording_id: i64,
+    position: i64,
+    length: i64,
 }
 
 struct ActiveRecording {
     subscription_id: i64,
     recording_id: i64,
+}
+
+struct ActiveReplay {
+    publication_id: i64,
+    cursor: ReplayCursor,
+}
+
+struct LingeringReplayPublication {
+    publication_id: i64,
+    deadline: Instant,
 }
 
 struct QueuedResponse {
@@ -112,11 +125,14 @@ pub struct ArchiveService {
     runtime: ArchiveRuntime,
     control_subscription_id: i64,
     next_control_session_id: i64,
+    next_replay_session_id: i64,
     sessions: HashMap<i64, i64>,
     pending_connects: Vec<PendingConnect>,
     pending_starts: Vec<PendingStart>,
     pending_replays: Vec<PendingReplay>,
     active_recordings: HashMap<(String, i32), ActiveRecording>,
+    active_replays: HashMap<i64, ActiveReplay>,
+    lingering_replay_publications: Vec<LingeringReplayPublication>,
     responses: VecDeque<QueuedResponse>,
     observed_requests: HashSet<(u16, i64, i64)>,
 }
@@ -134,11 +150,14 @@ impl ArchiveService {
             runtime,
             control_subscription_id,
             next_control_session_id: 1,
+            next_replay_session_id: 1,
             sessions: HashMap::new(),
             pending_connects: Vec::new(),
             pending_starts: Vec::new(),
             pending_replays: Vec::new(),
             active_recordings: HashMap::new(),
+            active_replays: HashMap::new(),
+            lingering_replay_publications: Vec::new(),
             responses: VecDeque::new(),
             observed_requests: HashSet::new(),
         })
@@ -160,6 +179,8 @@ impl ArchiveService {
         work += self.poll_recordings()?;
         work += self.finish_replays()?;
         work += self.flush_responses()?;
+        work += self.poll_replays()?;
+        work += self.poll_replay_linger()?;
         Ok(work)
     }
 
@@ -250,17 +271,17 @@ impl ArchiveService {
                     control_session_id: request.control_session_id,
                     correlation_id: request.correlation_id,
                     recording_id: request.recording_id,
+                    position: request.position,
+                    length: request.length,
                 });
             }
             ControlRequest::StopReplay(request) => {
+                if let Some(active) = self.active_replays.remove(&request.replay_session_id) {
+                    let _ = self.client.remove_publication(active.publication_id)?;
+                }
                 self.queue_session_response(
                     request.control_session_id,
-                    error(
-                        request.control_session_id,
-                        request.correlation_id,
-                        ControlResponseCode::SubscriptionUnknown,
-                        "replay is not active",
-                    ),
+                    ok(request.control_session_id, request.correlation_id, 0),
                 )?;
             }
             ControlRequest::ListRecordings(request) => {
@@ -457,34 +478,94 @@ impl ArchiveService {
         let count = ready.len();
         for index in ready.into_iter().rev() {
             let pending = self.pending_replays.swap_remove(index);
-            let result = {
-                let publication =
-                    self.client
-                        .publication(pending.publication_id)
-                        .ok_or_else(|| {
-                            ArchiveServiceError::InvalidContext(
-                                "replay publication vanished".into(),
-                            )
-                        })?;
-                self.runtime.replay(pending.recording_id, publication)
-            };
+            let result =
+                self.runtime
+                    .start_replay(pending.recording_id, pending.position, pending.length);
             let response = match result {
-                Ok(_) => ok(
-                    pending.control_session_id,
-                    pending.correlation_id,
-                    pending.publication_id,
-                ),
+                Ok(cursor) => {
+                    let replay_session_id = self.next_replay_session_id;
+                    self.next_replay_session_id += 1;
+                    self.active_replays.insert(
+                        replay_session_id,
+                        ActiveReplay {
+                            publication_id: pending.publication_id,
+                            cursor,
+                        },
+                    );
+                    ok(
+                        pending.control_session_id,
+                        pending.correlation_id,
+                        replay_session_id,
+                    )
+                }
                 Err(ArchiveRuntimeError::UnknownRecording(_)) => error(
                     pending.control_session_id,
                     pending.correlation_id,
                     ControlResponseCode::RecordingUnknown,
                     "recording unknown",
                 ),
-                Err(error) => return Err(error.into()),
+                Err(runtime_error) => error(
+                    pending.control_session_id,
+                    pending.correlation_id,
+                    ControlResponseCode::Error,
+                    &runtime_error.to_string(),
+                ),
             };
             self.queue_session_response(pending.control_session_id, response)?;
         }
         Ok(count)
+    }
+
+    fn poll_replays(&mut self) -> Result<usize, ArchiveServiceError> {
+        let replay_session_ids = self.active_replays.keys().copied().collect::<Vec<_>>();
+        let mut work = 0;
+        let mut completed = Vec::new();
+        for replay_session_id in replay_session_ids {
+            let Some(active) = self.active_replays.get_mut(&replay_session_id) else {
+                continue;
+            };
+            let Some(publication) = self.client.publication(active.publication_id) else {
+                completed.push(replay_session_id);
+                continue;
+            };
+            match active.cursor.poll(publication, 1) {
+                Ok(count) => work += count,
+                Err(ArchiveRuntimeError::ReplayOffer { .. }) => {
+                    completed.push(replay_session_id);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            if active.cursor.is_complete() {
+                completed.push(replay_session_id);
+            }
+        }
+        for replay_session_id in completed {
+            if let Some(active) = self.active_replays.remove(&replay_session_id) {
+                self.lingering_replay_publications
+                    .push(LingeringReplayPublication {
+                        publication_id: active.publication_id,
+                        deadline: Instant::now() + REPLAY_LINGER_DURATION,
+                    });
+            }
+        }
+        Ok(work)
+    }
+
+    fn poll_replay_linger(&mut self) -> Result<usize, ArchiveServiceError> {
+        let now = Instant::now();
+        let expired = self
+            .lingering_replay_publications
+            .iter()
+            .filter(|publication| publication.deadline <= now)
+            .map(|publication| publication.publication_id)
+            .collect::<Vec<_>>();
+        self.lingering_replay_publications
+            .retain(|publication| publication.deadline > now);
+        for publication_id in &expired {
+            let _ = self.client.remove_publication(*publication_id)?;
+        }
+        Ok(expired.len())
     }
 
     fn queue_session_response(
