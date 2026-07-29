@@ -124,6 +124,17 @@ depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 ### v0.0.7 — aeron-archive
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
+**Foundation status (2026-07-29):** catalog descriptor persistence, corrected
+term-aligned segment-file math, recording-signal values, bounded recording queries, and
+an in-memory recording/replay lifecycle are implemented. The current control boundary
+now uses bounded complete v13 SBE codecs for `ConnectRequest`, `StartRecordingRequest`,
+and `ControlResponse`, including variable ASCII data and pinned Java-generated golden
+vectors. This is still not Archive runtime parity: no real driver → segment file →
+restart → replay path exists, and the remaining schema templates are added only as
+their runtime operations land. Keep all 30 Archive module files and 20 Archive
+system-test files `todo` until the real lifecycle boundary is closed and corresponding
+upstream test files are ported.
+
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is
 the milestone that matters most for the sibling-project comparison: run the same

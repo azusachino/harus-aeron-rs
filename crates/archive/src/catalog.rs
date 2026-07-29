@@ -63,6 +63,29 @@ impl Catalog {
         &self.header
     }
 
+    pub fn update_stop_position(
+        &mut self,
+        recording_id: i64,
+        stop_position: i64,
+        stop_timestamp: i64,
+    ) -> bool {
+        if let Some(descriptor) = self.descriptors.get_mut(&recording_id) {
+            descriptor.stop_position = stop_position;
+            descriptor.stop_timestamp = stop_timestamp;
+
+            if let Some(ordered) = self
+                .ordered_descriptors
+                .iter_mut()
+                .find(|d| d.recording_id == recording_id)
+            {
+                ordered.stop_position = stop_position;
+                ordered.stop_timestamp = stop_timestamp;
+            }
+            return true;
+        }
+        false
+    }
+
     pub fn find_recording_for_stream(
         &self,
         stream_id: i32,
@@ -71,7 +94,7 @@ impl Catalog {
         self.ordered_descriptors
             .iter()
             .rev()
-            .find(|d| d.stream_id == stream_id && d.original_channel == channel)
+            .find(|d| d.stream_id == stream_id && d.original_channel.contains(channel))
     }
 
     pub fn save_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
