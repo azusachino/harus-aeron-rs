@@ -221,6 +221,13 @@ The current replay path supports stopped recordings, active `length=-1` follow, 
 `length=-2` snapshots, and v13 template-18 counter-bounded replay. The real control-plane
 test bounds a stopped replay to the counter's position. It uses service-local session IDs
 rather than upstream's composite replay/publication ID.
+
+The archive system-test ledger now records bounded equivalents for the core restart,
+listing, replay, truncation, basic recording, and extension flows, backed by the real
+control-service and runtime integration tests. These rows explicitly leave exclusive
+publication, client callback adapters, response-channel mode, authentication,
+replication/merge, detached-segment migration, and long-listing concurrency open; the
+remaining archive system-test rows stay `todo` until those boundaries are implemented.
 Authentication, replication, detached segment operations, marks/counters, and the
 complete upstream test families remain open. Keep Archive ledger rows `todo` until
 their complete upstream scopes are satisfied.
