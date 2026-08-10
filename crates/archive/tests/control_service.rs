@@ -1408,7 +1408,6 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
 }
 
 #[test]
-#[ignore = "current MediaDriver rejects multiple IPC publications sharing one stream"]
 fn records_each_joined_image_under_one_shared_subscription() {
     const SHARED_STREAM: i32 = 707;
     const SHARED_RESPONSE_STREAM: i32 = 708;

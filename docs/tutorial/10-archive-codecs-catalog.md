@@ -41,8 +41,8 @@ and segment deletion.
 
 `crates/archive/tests/runtime_lifecycle.rs` also constructs two joined images under
 one subscription and verifies that each image is polled into its own recording
-session. The control-service multi-image probe remains an ignored boundary test until
-the Rust Media Driver accepts multiple IPC publications sharing one stream.
+session. The control-service multi-image test exercises the same behavior through
+real MediaDriver channels.
 
 ## Verification
 
