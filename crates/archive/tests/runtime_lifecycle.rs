@@ -180,6 +180,7 @@ fn records_each_image_into_its_own_session_under_one_subscription() {
 fn records_persists_restarts_and_replays_through_real_driver_clients() {
     const LIVE_STREAM: i32 = 9101;
     const REPLAY_STREAM: i32 = 9102;
+    const ACTIVE_REPLAY_STREAM: i32 = 9103;
     let archive_dir = archive_dir();
     let _ = std::fs::remove_dir_all(&archive_dir);
 
@@ -215,6 +216,14 @@ fn records_persists_restarts_and_replays_through_real_driver_clients() {
         )
         .expect("start recording");
 
+    let active_replay_publication_id = publisher
+        .add_publication("aeron:ipc", ACTIVE_REPLAY_STREAM)
+        .expect("active replay publication");
+    let active_replay_subscription_id = archive_client
+        .add_subscription("aeron:ipc", ACTIVE_REPLAY_STREAM)
+        .expect("active replay subscription");
+    service(&mut driver, &mut [&mut publisher, &mut archive_client]);
+
     let payloads: [&[u8]; 3] = [b"first", b"second-message", b"third"];
     for payload in payloads {
         let mut bytes = payload.to_vec();
@@ -242,6 +251,50 @@ fn records_persists_restarts_and_replays_through_real_driver_clients() {
             .expect("record"),
         payloads.len()
     );
+
+    let mut active_replay = archive
+        .start_replay(recording_id, -1, -1)
+        .expect("replay active recording snapshot");
+    assert_eq!(
+        active_replay.limit(),
+        archive
+            .recording_position(recording_id)
+            .expect("active recording position")
+    );
+    assert_eq!(
+        active_replay
+            .poll(
+                publisher
+                    .publication(active_replay_publication_id)
+                    .expect("active replay publication ready"),
+                10,
+            )
+            .expect("poll active replay"),
+        payloads.len()
+    );
+    let mut active_replayed = Vec::new();
+    assert_eq!(
+        archive_client
+            .subscription_mut(active_replay_subscription_id)
+            .expect("active replay subscription ready")
+            .poll(
+                |buffer, offset, length, _| {
+                    let mut bytes = vec![0; length];
+                    buffer.get_bytes(offset, &mut bytes);
+                    active_replayed.push(bytes);
+                },
+                10,
+            ),
+        payloads.len()
+    );
+    assert_eq!(
+        active_replayed,
+        payloads
+            .iter()
+            .map(|payload| payload.to_vec())
+            .collect::<Vec<_>>()
+    );
+
     let stop_position = archive.stop_recording(recording_id).expect("stop");
     assert!(stop_position > 0);
     drop(archive);

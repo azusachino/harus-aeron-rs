@@ -377,35 +377,34 @@ impl ArchiveRuntime {
         requested_position: i64,
         requested_length: i64,
     ) -> Result<ReplayCursor, ArchiveRuntimeError> {
-        if self.active.contains_key(&recording_id) {
-            return Err(ArchiveRuntimeError::RecordingActive(recording_id));
-        }
+        let active_position = self.active.get(&recording_id).map(|writer| writer.position);
         let descriptor = self
             .catalog
             .get_recording(recording_id)
             .ok_or(ArchiveRuntimeError::UnknownRecording(recording_id))?
             .clone();
+        let available_stop = active_position.unwrap_or(descriptor.stop_position);
         let position = if requested_position == -1 {
             descriptor.start_position
         } else {
             requested_position
         };
-        if position < descriptor.start_position || position > descriptor.stop_position {
+        if position < descriptor.start_position || position > available_stop {
             return Err(ArchiveRuntimeError::InvalidReplayPosition {
                 recording_id,
                 position,
                 start: descriptor.start_position,
-                stop: descriptor.stop_position,
+                stop: available_stop,
             });
         }
-        let available = descriptor.stop_position - position;
+        let available = available_stop - position;
         let length = match requested_length {
             -1 | -2 => available,
             value if value >= 0 => value.min(available),
             value => return Err(ArchiveRuntimeError::InvalidReplayLength(value)),
         };
         let limit = position.saturating_add(length);
-        if position < descriptor.stop_position {
+        if position < available_stop {
             let _ = read_recorded_payload(&self.archive_dir, &descriptor, position)?;
         }
         Ok(ReplayCursor {

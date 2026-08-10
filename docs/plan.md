@@ -179,9 +179,10 @@ service boundary. `Subscription::poll_image` keeps joined images isolated, and t
 runtime and control-service tests prove two images under one subscription produce
 separate descriptors and recording files. The Rust Media Driver now permits distinct
 IPC publication sessions on one stream while retaining same-session clash checks.
-The current replay path
-supports stopped recordings rather than live follow/bounded-counter replay, and uses
-service-local session IDs rather than upstream's composite replay/publication ID.
+The current replay path supports stopped recordings and bounded snapshots of the
+currently written range of active recordings, but does not follow future writes or
+support bounded-counter replay. It uses service-local session IDs rather than
+upstream's composite replay/publication ID.
 Authentication, replication, detached segment operations, marks/counters, and the
 complete upstream test families remain open. Keep Archive ledger rows `todo` until
 their complete upstream scopes are satisfied.
