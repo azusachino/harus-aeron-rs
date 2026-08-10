@@ -5,6 +5,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 ## Archive Control Protocol & Flyweights
 
 - `crates/archive/src/archive_exception.rs`: upstream Archive error-code constants and stable string formatting for unknown codes.
+- `crates/archive/src/checksum.rs`: CRC-32 and CRC-32C implementations, aliases, and type-safe custom checksum construction.
 - `crates/archive/src/codecs.rs`: bounded complete-message codecs for the v13 connect, start/stop/extend/truncate/purge recording, replay/stop replay, listing, recording-history position queries, find-last matching, and control-response SBE templates. Each frame uses the exact eight-byte message header, template-specific fixed block, and any required length-prefixed variable ASCII field.
 - `crates/archive/src/control_session_adapter.rs`: validates the SBE header and dispatches complete request frames by their real template IDs.
 - `crates/archive/src/recording_descriptor.rs`: complete template-22 `RecordingDescriptor` codec with the 80-byte fixed block and three bounded variable ASCII fields.

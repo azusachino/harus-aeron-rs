@@ -24,7 +24,7 @@
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/RecordingSessionTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/RecordingWriterTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ReplaySessionTest.java"}
-{"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/checksum/ChecksumsTest.java"}
+{"layer": "archive", "rust_equivalent": "crates/archive/src/checksum.rs (Rust generic constructor replaces Java reflection)", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/checksum/ChecksumsTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/client/AeronArchiveTest.java"}
 {"layer": "archive", "rust_equivalent": "crates/archive/src/archive_exception.rs", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/client/ArchiveExceptionTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/status/RecordingPosTest.java"}
