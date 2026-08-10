@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use aeron_client::uri::{ChannelUri, ChannelUriError, ChannelUriStringBuilder};
+
 use crate::catalog::Catalog;
 use crate::control_session::ControlSession;
 use crate::recording_descriptor::RecordingDescriptor;
@@ -33,6 +35,48 @@ pub struct ArchiveConductor {
     replay_sessions: HashMap<i64, ReplaySession>,
     next_control_session_id: i64,
     next_replay_id: i64,
+}
+
+/// Build the recording channel form used by Archive descriptors and replay.
+///
+/// Aeron keeps transport and session-identifying parameters while dropping
+/// publication-only settings that should not affect recording identity.
+pub fn stripped_channel(channel: &str) -> Result<String, ChannelUriError> {
+    let uri = ChannelUri::parse(channel)?;
+    let mut builder = ChannelUriStringBuilder::new();
+    builder.media(uri.media());
+
+    for key in [
+        "endpoint",
+        "interface",
+        "control",
+        "control-mode",
+        "tags",
+        "rejoin",
+        "group",
+        "tether",
+        "fc",
+        "gtag",
+        "cc",
+        "so-rcvbuf",
+        "so-sndbuf",
+        "rcv-wnd",
+        "channel-snd-ts-offset",
+        "channel-rcv-ts-offset",
+        "media-rcv-ts-offset",
+        "session-id",
+        "alias",
+        "response-correlation-id",
+        "response-endpoint",
+        "ttl",
+        "stream-id",
+    ] {
+        if let Some(value) = uri.get(key) {
+            builder.custom_param(key, value);
+        }
+    }
+
+    Ok(builder.build())
 }
 
 impl Default for ArchiveConductor {
@@ -254,5 +298,24 @@ mod tests {
         // Stop recording
         assert!(conductor.on_stop_recording(rec_id));
         assert!(!conductor.on_stop_recording(rec_id));
+    }
+
+    #[test]
+    fn stripped_channel_copies_recording_identity_parameters() {
+        let original = "aeron:udp?term-length=1g|mtu=2048|session-id=tag:424242424242|rcv-wnd=32k|so-sndbuf=2m|so-rcvbuf=1m|endpoint=some-host:7777|interface=192.168.0.1/24|control-mode=dynamic|control=localhost:5555|tether=false|reliable=false|linger=1321ms|sparse=false|cc=cubic|alias=test-stripped-channel|fc=tagged,g:1111/3,t:4s|gtag=2222|tags=17,432|tag=5|ttl=3|eos=true|rejoin=false|ssc=true|group=true|response-correlation-id=88888888881|response-endpoint=publisher:10101|media-rcv-ts-offset=reserved|channel-rcv-ts-offset=136|channel-snd-ts-offset=144|init-term-id=300|term-id=341|term-offset=4096|nak-delay=100ns|untethered-window-limit-timeout=3s|untethered-linger-timeout=2s|untethered-resting-timeout=1s|max-resend=13|stream-id=-654|pub-wnd=32m";
+
+        let stripped = ChannelUri::parse(&stripped_channel(original).unwrap()).unwrap();
+        assert_eq!(stripped.media(), "udp");
+        assert_eq!(stripped.get("endpoint"), Some("some-host:7777"));
+        assert_eq!(stripped.get("interface"), Some("192.168.0.1/24"));
+        assert_eq!(stripped.get("control"), Some("localhost:5555"));
+        assert_eq!(stripped.get("tags"), Some("17,432"));
+        assert_eq!(stripped.get("session-id"), Some("tag:424242424242"));
+        assert_eq!(stripped.get("stream-id"), Some("-654"));
+        assert_eq!(stripped.get("response-endpoint"), Some("publisher:10101"));
+        assert!(stripped.get("term-length").is_none());
+        assert!(stripped.get("reliable").is_none());
+        assert!(stripped.get("pub-wnd").is_none());
+        assert!(stripped.get("tag").is_none());
     }
 }

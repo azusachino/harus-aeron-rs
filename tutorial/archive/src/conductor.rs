@@ -9,4 +9,8 @@ impl ArchiveConductor {
     pub fn new() {
         todo!("implement ArchiveConductor")
     }
+
+    pub fn stripped_channel(_channel: &str) -> String {
+        todo!("build the recording identity channel URI")
+    }
 }
