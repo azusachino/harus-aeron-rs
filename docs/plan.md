@@ -130,7 +130,8 @@ CRC-32/CRC-32C checksum factories, delete-session position parsing and close
 signaling, ReplicateRequest2/ReplayTokenRequest adapter decoding, v6-compatible
 replay/replication request framing, ControlSession abort/listing lifecycle,
 ArchiveConductor stripped-channel identity construction, read-only catalog views,
-bounded read-only ArchiveTool `describe` and `describe-all` inspection,
+bounded read-only ArchiveTool `describe` and `describe-all` inspection, including
+separate mark-file directory link resolution,
 incremental ListRecordingsSession descriptor/unknown/abort behavior,
 retryable ListRecordingByIdSession descriptor publication with catalog validity
 re-checks,

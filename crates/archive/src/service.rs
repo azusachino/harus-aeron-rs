@@ -18,6 +18,9 @@ use aeron_client::error::AeronError;
 use agrona::AtomicBuffer;
 use agrona::ring_buffer::mpsc::ManyToOneRingBuffer;
 
+use crate::archive_mark_file::{
+    ArchiveMarkFile, ArchiveMarkFileConfig, ArchiveMarkFileError, FILENAME, LINK_FILENAME,
+};
 use crate::codecs::{
     ControlResponse, ControlResponseCode, ExtendRecordingRequest,
     ListRecordingSubscriptionsRequest, PROTOCOL_SEMANTIC_VERSION, StartRecordingRequest,
@@ -36,6 +39,7 @@ const REPLAY_LINGER_DURATION: Duration = Duration::from_millis(100);
 pub struct ArchiveContext {
     pub aeron_directory: PathBuf,
     pub archive_directory: PathBuf,
+    pub mark_file_directory: Option<PathBuf>,
     pub control_channel: String,
     pub control_stream_id: i32,
     pub client_id: i64,
@@ -47,11 +51,17 @@ impl ArchiveContext {
         Self {
             aeron_directory: aeron_directory.into(),
             archive_directory: archive_directory.into(),
+            mark_file_directory: None,
             control_channel: DEFAULT_CONTROL_CHANNEL.into(),
             control_stream_id: DEFAULT_CONTROL_STREAM_ID,
             client_id: DEFAULT_ARCHIVE_CLIENT_ID,
             idle_duration: Duration::from_millis(1),
         }
+    }
+
+    pub fn mark_file_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.mark_file_directory = Some(directory.into());
+        self
     }
 
     fn validate(&self) -> Result<(), ArchiveServiceError> {
@@ -77,6 +87,10 @@ pub enum ArchiveServiceError {
     Runtime(#[from] ArchiveRuntimeError),
     #[error(transparent)]
     Adapter(#[from] ControlAdapterError),
+    #[error(transparent)]
+    MarkFile(#[from] ArchiveMarkFileError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("invalid Archive context: {0}")]
     InvalidContext(String),
     #[error("Archive service thread panicked")]
@@ -132,6 +146,7 @@ struct QueuedResponse {
 
 pub struct ArchiveService {
     context: ArchiveContext,
+    mark_file: ArchiveMarkFile,
     cnc: CncFile,
     client: ClientConductor<'static>,
     runtime: ArchiveRuntime,
@@ -157,8 +172,10 @@ impl ArchiveService {
         let control_subscription_id =
             client.add_subscription(&context.control_channel, context.control_stream_id)?;
         let runtime = ArchiveRuntime::open(&context.archive_directory)?;
+        let mark_file = create_mark_file(&context)?;
         Ok(Self {
             context,
+            mark_file,
             cnc,
             client,
             runtime,
@@ -186,6 +203,8 @@ impl ArchiveService {
     }
 
     pub fn do_work(&mut self) -> Result<usize, ArchiveServiceError> {
+        self.mark_file
+            .update_activity_timestamp(current_time_millis());
         let mut work = self.client.do_work()?;
         work += self.poll_control_requests()?;
         work += self.finish_connects()?;
@@ -1326,6 +1345,7 @@ impl ManagedArchive {
                     std::thread::park_timeout(idle_duration);
                 }
             }
+            service.mark_file.signal_terminated()?;
             Ok(())
         });
         Ok(Self {
@@ -1343,6 +1363,50 @@ impl ManagedArchive {
         }
         Ok(())
     }
+}
+
+impl Drop for ArchiveService {
+    fn drop(&mut self) {
+        let _ = self.mark_file.signal_terminated();
+    }
+}
+
+fn create_mark_file(context: &ArchiveContext) -> Result<ArchiveMarkFile, ArchiveServiceError> {
+    let mark_directory = context
+        .mark_file_directory
+        .as_deref()
+        .unwrap_or(&context.archive_directory);
+    std::fs::create_dir_all(mark_directory)?;
+
+    if mark_directory == context.archive_directory {
+        let _ = std::fs::remove_file(context.archive_directory.join(LINK_FILENAME));
+    } else {
+        std::fs::create_dir_all(&context.archive_directory)?;
+        std::fs::write(
+            context.archive_directory.join(LINK_FILENAME),
+            mark_directory.to_string_lossy().as_bytes(),
+        )?;
+    }
+
+    let config = ArchiveMarkFileConfig {
+        start_timestamp: current_time_millis(),
+        control_stream_id: context.control_stream_id,
+        archive_id: 0,
+        control_channel: context.control_channel.clone(),
+        aeron_directory: context.aeron_directory.to_string_lossy().into_owned(),
+        ..ArchiveMarkFileConfig::default()
+    };
+    let mut mark_file = ArchiveMarkFile::create(mark_directory.join(FILENAME), &config)?;
+    mark_file.signal_ready(config.start_timestamp)?;
+    Ok(mark_file)
+}
+
+fn current_time_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(i64::MAX as u128) as i64
+        })
 }
 
 impl Drop for ManagedArchive {
@@ -1534,5 +1598,28 @@ mod tests {
             Err(ArchiveServiceError::InvalidContext(message))
                 if message == "control channel must not be empty"
         ));
+    }
+
+    #[test]
+    fn context_creates_a_link_for_a_separate_mark_file_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "aeron-archive-mark-link-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let archive_directory = root.join("archive");
+        let mark_file_directory = root.join("mark");
+        let context = ArchiveContext::new("/tmp/aeron", &archive_directory)
+            .mark_file_directory(&mark_file_directory);
+
+        let mark_file = create_mark_file(&context).expect("create separate mark file");
+        assert_eq!(mark_file.path(), mark_file_directory.join(FILENAME));
+        assert_eq!(
+            std::fs::read_to_string(archive_directory.join(LINK_FILENAME))
+                .expect("read mark-file link"),
+            mark_file_directory.to_string_lossy()
+        );
+        drop(mark_file);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

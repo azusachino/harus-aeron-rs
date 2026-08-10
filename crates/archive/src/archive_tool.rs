@@ -4,6 +4,7 @@ use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::archive_mark_file::{ArchiveMarkFile, ArchiveMarkFileError, FILENAME, LINK_FILENAME};
 use crate::catalog::{Catalog, RecordingState};
 use crate::recording_descriptor::RecordingDescriptor;
 
@@ -13,6 +14,7 @@ const CATALOG_FILE_NAME: &str = "catalog.dat";
 pub enum ArchiveToolError {
     InvalidArguments(String),
     Io(std::io::Error),
+    MarkFile(ArchiveMarkFileError),
     RecordingNotFound(i64),
 }
 
@@ -21,6 +23,7 @@ impl fmt::Display for ArchiveToolError {
         match self {
             Self::InvalidArguments(message) => formatter.write_str(message),
             Self::Io(error) => error.fmt(formatter),
+            Self::MarkFile(error) => error.fmt(formatter),
             Self::RecordingNotFound(recording_id) => {
                 write!(
                     formatter,
@@ -36,6 +39,7 @@ impl std::error::Error for ArchiveToolError {
         match self {
             Self::Io(error) => Some(error),
             Self::InvalidArguments(_) | Self::RecordingNotFound(_) => None,
+            Self::MarkFile(error) => Some(error),
         }
     }
 }
@@ -43,6 +47,12 @@ impl std::error::Error for ArchiveToolError {
 impl From<std::io::Error> for ArchiveToolError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<ArchiveMarkFileError> for ArchiveToolError {
+    fn from(error: ArchiveMarkFileError) -> Self {
+        Self::MarkFile(error)
     }
 }
 
@@ -77,6 +87,7 @@ fn describe(
     output: &mut impl Write,
     include_invalid: bool,
 ) -> Result<(), ArchiveToolError> {
+    let _mark_file = open_mark_file(archive_dir)?;
     let catalog = load_catalog(archive_dir)?;
     for descriptor in catalog.recordings() {
         if include_invalid
@@ -99,6 +110,7 @@ fn describe_recording(
     output: &mut impl Write,
     recording_id: i64,
 ) -> Result<(), ArchiveToolError> {
+    let _mark_file = open_mark_file(archive_dir)?;
     let catalog = load_catalog(archive_dir)?;
     let descriptor = catalog
         .get_recording(recording_id)
@@ -111,6 +123,30 @@ fn load_catalog(archive_dir: &Path) -> Result<Catalog, ArchiveToolError> {
     Ok(Catalog::load_from_file(
         &archive_dir.join(CATALOG_FILE_NAME),
     )?)
+}
+
+pub fn resolve_mark_file(archive_dir: &Path) -> Result<Option<PathBuf>, ArchiveToolError> {
+    let link_path = archive_dir.join(LINK_FILENAME);
+    if link_path.exists() {
+        let target = std::fs::read_to_string(&link_path)?.trim().to_owned();
+        if target.is_empty() {
+            return Err(ArchiveToolError::InvalidArguments(format!(
+                "empty Archive mark-file link: {}",
+                link_path.display()
+            )));
+        }
+        return Ok(Some(PathBuf::from(target).join(FILENAME)));
+    }
+
+    let default_path = archive_dir.join(FILENAME);
+    Ok(default_path.exists().then_some(default_path))
+}
+
+fn open_mark_file(archive_dir: &Path) -> Result<Option<ArchiveMarkFile>, ArchiveToolError> {
+    resolve_mark_file(archive_dir)?
+        .map(ArchiveMarkFile::open)
+        .transpose()
+        .map_err(ArchiveToolError::from)
 }
 
 fn write_descriptor(
