@@ -2,7 +2,8 @@
 //!
 //! Mirrors `io.aeron.archive.Catalog.java`.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 use crate::recording_descriptor::RecordingDescriptor;
 
@@ -13,10 +14,17 @@ pub struct CatalogHeader {
     pub next_recording_id: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingState {
+    Valid,
+    Invalid,
+}
+
 pub struct Catalog {
     header: CatalogHeader,
     descriptors: HashMap<i64, RecordingDescriptor>,
     ordered_descriptors: Vec<RecordingDescriptor>,
+    invalid_recordings: RefCell<HashSet<i64>>,
 }
 
 impl Default for Catalog {
@@ -35,6 +43,7 @@ impl Catalog {
             },
             descriptors: HashMap::new(),
             ordered_descriptors: Vec::new(),
+            invalid_recordings: RefCell::new(HashSet::new()),
         }
     }
 
@@ -46,6 +55,7 @@ impl Catalog {
 
     pub fn add_recording(&mut self, descriptor: RecordingDescriptor) -> i64 {
         let rec_id = descriptor.recording_id;
+        self.invalid_recordings.borrow_mut().remove(&rec_id);
         self.descriptors.insert(rec_id, descriptor.clone());
         self.ordered_descriptors.push(descriptor);
         rec_id
@@ -53,6 +63,27 @@ impl Catalog {
 
     pub fn get_recording(&self, recording_id: i64) -> Option<&RecordingDescriptor> {
         self.descriptors.get(&recording_id)
+    }
+
+    pub fn get_valid_recording(&self, recording_id: i64) -> Option<&RecordingDescriptor> {
+        self.get_recording(recording_id)
+            .filter(|_| !self.is_recording_invalid(recording_id))
+    }
+
+    pub fn change_state(&self, recording_id: i64, state: RecordingState) -> bool {
+        if !self.descriptors.contains_key(&recording_id) {
+            return false;
+        }
+
+        let mut invalid_recordings = self.invalid_recordings.borrow_mut();
+        match state {
+            RecordingState::Valid => invalid_recordings.remove(&recording_id),
+            RecordingState::Invalid => invalid_recordings.insert(recording_id),
+        }
+    }
+
+    fn is_recording_invalid(&self, recording_id: i64) -> bool {
+        self.invalid_recordings.borrow().contains(&recording_id)
     }
 
     pub fn recordings(&self) -> &[RecordingDescriptor] {
@@ -118,6 +149,7 @@ impl Catalog {
         if self.descriptors.remove(&recording_id).is_none() {
             return false;
         }
+        self.invalid_recordings.borrow_mut().remove(&recording_id);
         self.ordered_descriptors
             .retain(|descriptor| descriptor.recording_id != recording_id);
         true
@@ -227,6 +259,7 @@ impl Catalog {
             },
             descriptors: HashMap::new(),
             ordered_descriptors: Vec::new(),
+            invalid_recordings: RefCell::new(HashSet::new()),
         };
         for _ in 0..descriptor_count {
             let mut read_i64 = || -> std::io::Result<i64> {

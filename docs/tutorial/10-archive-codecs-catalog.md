@@ -20,6 +20,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 - `crates/archive/src/catalog_index.rs`: ordered recording-id to catalog-offset index with monotonic insertion, binary lookup, growth, and removal semantics.
 - `crates/archive/src/catalog_view.rs`: read-only listing of all or one persisted recording descriptor.
 - `crates/archive/src/list_recordings_session.rs`: incremental descriptor listing with recording-unknown and abort boundaries.
+- `crates/archive/src/list_recording_by_id_session.rs`: retryable single-recording descriptor publication, catalog invalidation re-checks, and unknown responses.
 
 ## ArchiveConductor & Sessions
 
