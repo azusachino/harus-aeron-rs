@@ -5,6 +5,7 @@
 pub mod archive_counters;
 pub mod archive_exception;
 pub mod archive_mark_file;
+pub mod archive_tool;
 pub mod catalog;
 pub mod catalog_index;
 pub mod catalog_view;

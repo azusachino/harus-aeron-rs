@@ -70,6 +70,16 @@ impl Catalog {
             .filter(|_| !self.is_recording_invalid(recording_id))
     }
 
+    pub fn recording_state(&self, recording_id: i64) -> Option<RecordingState> {
+        self.get_recording(recording_id).map(|_| {
+            if self.is_recording_invalid(recording_id) {
+                RecordingState::Invalid
+            } else {
+                RecordingState::Valid
+            }
+        })
+    }
+
     pub fn change_state(&self, recording_id: i64, state: RecordingState) -> bool {
         if !self.descriptors.contains_key(&recording_id) {
             return false;

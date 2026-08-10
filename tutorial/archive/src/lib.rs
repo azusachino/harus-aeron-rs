@@ -4,6 +4,7 @@
 
 pub mod catalog;
 pub mod archive_mark_file;
+pub mod archive_tool;
 pub mod client_context;
 pub mod codecs;
 pub mod conductor;
