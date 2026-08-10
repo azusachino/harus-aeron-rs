@@ -13,6 +13,7 @@ pub mod conductor;
 pub mod control_session;
 pub mod control_session_adapter;
 pub mod delete_segments_session;
+pub mod list_recordings_session;
 pub mod recording_descriptor;
 pub mod recording_pos;
 pub mod recording_subscription_descriptor;

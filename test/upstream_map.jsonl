@@ -20,7 +20,7 @@
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/FailRecordingEventsListener.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ListRecordingByIdSessionTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ListRecordingsForUriSessionTest.java"}
-{"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ListRecordingsSessionTest.java"}
+{"layer": "archive", "rust_equivalent": "crates/archive/src/list_recordings_session.rs (incremental descriptor listing, missing-recording response, and abort behavior)", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ListRecordingsSessionTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/RecordingSessionTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/RecordingWriterTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ReplaySessionTest.java"}
