@@ -139,6 +139,10 @@ real-runtime RecordingSession coverage for image-frame writes, stop persistence,
 and replay payloads (the Java mock event-proxy wiring remains outside this API),
 RecordingWriter frame validation and segment rollover (checksum, padding-frame,
 and interrupt-injection paths remain outside the current runtime configuration),
+ReplaySession behavior through `ReplayCursor` and control-service coverage for
+active follow, stopped replay, bounded limits, persistence, and publication
+backpressure (Java-specific CRC/padding publication mechanics remain outside this
+cursor API),
 ordered recording-id/catalog-offset indexing, corrected term-aligned
 segment-file math, recording-signal values, bounded recording queries,
 crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay
