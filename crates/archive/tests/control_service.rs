@@ -159,6 +159,45 @@ fn await_listing(
     panic!("listing {correlation_id} did not arrive");
 }
 
+fn await_recordings(
+    driver: &mut MediaDriver,
+    archive: &mut ArchiveService,
+    client: &mut ClientConductor<'static>,
+    subscription_id: i64,
+    correlation_id: i64,
+    expected_count: usize,
+) -> Vec<RecordingDescriptor> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut descriptors = Vec::new();
+    while Instant::now() < deadline {
+        cycle(driver, archive, client);
+        if let Some(subscription) = client.subscription_mut(subscription_id) {
+            subscription.poll(
+                |buffer, offset, length, _| {
+                    let mut bytes = vec![0; length];
+                    buffer.get_bytes(offset, &mut bytes);
+                    if let Ok(descriptor) = RecordingDescriptor::decode(&bytes)
+                        && descriptor.correlation_id == correlation_id
+                        && !descriptors.iter().any(|existing: &RecordingDescriptor| {
+                            existing.recording_id == descriptor.recording_id
+                        })
+                    {
+                        descriptors.push(descriptor);
+                    }
+                },
+                20,
+            );
+        }
+        if descriptors.len() == expected_count {
+            return descriptors;
+        }
+    }
+    panic!(
+        "expected {expected_count} recordings for listing {correlation_id}, got {}",
+        descriptors.len()
+    );
+}
+
 fn await_subscription_listing(
     driver: &mut MediaDriver,
     archive: &mut ArchiveService,
@@ -1363,6 +1402,170 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
         )
         .code,
         ControlResponseCode::Error
+    );
+
+    std::fs::remove_dir_all(archive_dir).expect("cleanup");
+}
+
+#[test]
+#[ignore = "current MediaDriver rejects multiple IPC publications sharing one stream"]
+fn records_each_joined_image_under_one_shared_subscription() {
+    const SHARED_STREAM: i32 = 707;
+    const SHARED_RESPONSE_STREAM: i32 = 708;
+    let archive_dir = archive_dir();
+    let _ = std::fs::remove_dir_all(&archive_dir);
+    let mut driver = MediaDriver::launch(Configuration {
+        ipc_term_buffer_length: TERM_MIN_LENGTH as usize,
+        ..Configuration::default()
+    })
+    .expect("driver");
+    let context = ArchiveContext::new(driver.aeron_dir(), &archive_dir);
+    let mut archive = ArchiveService::launch(context).expect("archive");
+    let mut external = client(&driver, 8_101);
+    let control_publication = external
+        .add_publication("aeron:ipc", CONTROL_STREAM)
+        .expect("control publication");
+    let response_subscription = external
+        .add_subscription("aeron:ipc", SHARED_RESPONSE_STREAM)
+        .expect("response subscription");
+    await_resources(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        response_subscription,
+    );
+    let session_id = connect(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        response_subscription,
+        101,
+        SHARED_RESPONSE_STREAM,
+    );
+
+    let first_publication = external
+        .add_publication("aeron:ipc", SHARED_STREAM)
+        .expect("first publication");
+    let second_publication = external
+        .add_publication("aeron:ipc", SHARED_STREAM)
+        .expect("second publication");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline
+        && (external.publication(first_publication).is_none()
+            || external.publication(second_publication).is_none())
+    {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+
+    let mut start = StartRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 102,
+        stream_id: SHARED_STREAM,
+        source_location: SourceLocation::Local,
+        channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("start encode");
+    while !offer(&external, control_publication, &mut start) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let recording_subscription_id = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        102,
+    )
+    .relevant_id;
+
+    let mut first_payload = b"first-image".to_vec();
+    while !offer(&external, first_publication, &mut first_payload) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let mut second_payload = b"second-image".to_vec();
+    while !offer(&external, second_publication, &mut second_payload) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    for _ in 0..40 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+
+    let mut list = ListRecordingsRequest {
+        control_session_id: session_id,
+        correlation_id: 103,
+        from_recording_id: 0,
+        record_count: 2,
+    }
+    .encode()
+    .expect("list recordings encode");
+    while !offer(&external, control_publication, &mut list) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let active_recordings = await_recordings(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        103,
+        2,
+    );
+    assert!(
+        active_recordings
+            .iter()
+            .all(|descriptor| descriptor.stop_position == -1)
+    );
+    assert_ne!(
+        active_recordings[0].session_id, active_recordings[1].session_id,
+        "joined images must own distinct recording sessions"
+    );
+
+    let mut stop = StopRecordingSubscriptionRequest {
+        control_session_id: session_id,
+        correlation_id: 104,
+        subscription_id: recording_subscription_id,
+    }
+    .encode()
+    .expect("stop encode");
+    while !offer(&external, control_publication, &mut stop) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            104,
+        )
+        .code,
+        ControlResponseCode::Ok
+    );
+
+    let mut list_stopped = ListRecordingsRequest {
+        control_session_id: session_id,
+        correlation_id: 105,
+        from_recording_id: 0,
+        record_count: 2,
+    }
+    .encode()
+    .expect("stopped list recordings encode");
+    while !offer(&external, control_publication, &mut list_stopped) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let stopped_recordings = await_recordings(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        105,
+        2,
+    );
+    assert!(
+        stopped_recordings
+            .iter()
+            .all(|descriptor| descriptor.stop_position > descriptor.start_position)
     );
 
     std::fs::remove_dir_all(archive_dir).expect("cleanup");

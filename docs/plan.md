@@ -174,7 +174,12 @@ the separate publishing client reaches end-of-stream; the legacy templates prese
 manual-stop behavior.
 
 This is still not full Archive parity: shared/ref-counted recording subscriptions
-are not implemented. The current replay path
+and per-image recording-session ownership are implemented for the current managed
+service boundary. `Subscription::poll_image` keeps joined images isolated, and the
+runtime test proves two images under one subscription produce separate descriptors
+and recording files. A real control-service multi-image probe remains ignored because
+the current Rust Media Driver rejects multiple IPC publications sharing one stream.
+The current replay path
 supports stopped recordings rather than live follow/bounded-counter replay, and uses
 service-local session IDs rather than upstream's composite replay/publication ID.
 Authentication, replication, detached segment operations, marks/counters, and the

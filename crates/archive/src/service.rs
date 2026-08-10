@@ -105,8 +105,10 @@ struct PendingReplay {
 
 struct ActiveRecording {
     subscription_id: i64,
-    recording_id: i64,
+    recordings: HashMap<i64, i64>,
     auto_stop: bool,
+    follow_images: bool,
+    subscription_ref_count: usize,
 }
 
 struct ActiveReplay {
@@ -713,50 +715,77 @@ impl ArchiveService {
         let count = ready.len();
         for index in ready.into_iter().rev() {
             let pending = self.pending_starts.swap_remove(index);
-            let recording_id = if let Some(recording_id) = pending.recording_id {
-                let result = {
+            let image_correlations = self
+                .client
+                .subscription(pending.registration_id)
+                .ok_or_else(|| ArchiveServiceError::InvalidContext("subscription vanished".into()))?
+                .images()
+                .iter()
+                .map(|image| image.correlation_id())
+                .collect::<Vec<_>>();
+            let image_correlations = if pending.recording_id.is_some() {
+                image_correlations.into_iter().take(1).collect()
+            } else {
+                image_correlations
+            };
+            let mut recordings = HashMap::new();
+            for image_correlation_id in image_correlations {
+                let result: Result<i64, ArchiveServiceError> = {
                     let subscription = self
                         .client
                         .subscription(pending.registration_id)
                         .ok_or_else(|| {
                             ArchiveServiceError::InvalidContext("subscription vanished".into())
                         })?;
-                    self.runtime.extend_recording(
-                        recording_id,
-                        pending.request.control_session_id,
-                        pending.request.correlation_id,
-                        subscription,
-                    )
-                };
-                if let Err(runtime_error) = result {
-                    let _ = self.client.remove_subscription(pending.registration_id)?;
-                    self.queue_session_response(
-                        pending.request.control_session_id,
-                        error(
+                    if let Some(recording_id) = pending.recording_id {
+                        self.runtime.extend_recording(
+                            recording_id,
                             pending.request.control_session_id,
                             pending.request.correlation_id,
-                            ControlResponseCode::Error,
-                            &runtime_error.to_string(),
-                        ),
-                    )?;
-                    continue;
+                            subscription,
+                            image_correlation_id,
+                        )?;
+                        Ok(recording_id)
+                    } else {
+                        Ok(self
+                            .runtime
+                            .start_recording(subscription, image_correlation_id)?)
+                    }
+                };
+                match result {
+                    Ok(recording_id) => {
+                        recordings.insert(image_correlation_id, recording_id);
+                    }
+                    Err(runtime_error) => {
+                        for recording_id in recordings.values().copied() {
+                            let _ = self.runtime.stop_recording(recording_id);
+                        }
+                        let _ = self.client.remove_subscription(pending.registration_id)?;
+                        self.queue_session_response(
+                            pending.request.control_session_id,
+                            error(
+                                pending.request.control_session_id,
+                                pending.request.correlation_id,
+                                ControlResponseCode::Error,
+                                &runtime_error.to_string(),
+                            ),
+                        )?;
+                        recordings.clear();
+                        break;
+                    }
                 }
-                recording_id
-            } else {
-                let subscription = self
-                    .client
-                    .subscription(pending.registration_id)
-                    .ok_or_else(|| {
-                        ArchiveServiceError::InvalidContext("subscription vanished".into())
-                    })?;
-                self.runtime.start_recording(subscription)?
-            };
+            }
+            if recordings.is_empty() {
+                continue;
+            }
             self.active_recordings.insert(
                 (pending.request.channel, pending.request.stream_id),
                 ActiveRecording {
                     subscription_id: pending.registration_id,
-                    recording_id,
+                    subscription_ref_count: recordings.len() + 1,
+                    recordings,
                     auto_stop: pending.auto_stop,
+                    follow_images: pending.recording_id.is_none(),
                 },
             );
         }
@@ -772,7 +801,9 @@ impl ArchiveService {
             return Ok(true);
         }
         if let Some(active) = self.active_recordings.remove(key) {
-            self.runtime.stop_recording(active.recording_id)?;
+            for recording_id in active.recordings.values().copied() {
+                self.runtime.stop_recording(recording_id)?;
+            }
             let _ = self.client.remove_subscription(active.subscription_id)?;
             return Ok(true);
         }
@@ -802,37 +833,114 @@ impl ArchiveService {
     }
 
     fn poll_recordings(&mut self) -> Result<usize, ArchiveServiceError> {
-        let recordings = self
+        let active = self
             .active_recordings
             .iter()
-            .map(|(key, active)| {
-                (
-                    key.clone(),
-                    active.subscription_id,
-                    active.recording_id,
-                    active.auto_stop,
-                )
-            })
+            .map(|(key, active)| (key.clone(), active.subscription_id))
             .collect::<Vec<_>>();
         let mut work = 0;
-        let mut stopped = Vec::new();
-        for (key, subscription_id, recording_id, auto_stop) in recordings {
-            if let Some(subscription) = self.client.subscription_mut(subscription_id) {
-                work += self
-                    .runtime
-                    .poll_recording(recording_id, subscription, 20)?;
-                if auto_stop
-                    && (subscription.images().is_empty()
-                        || subscription
+        for (key, subscription_id) in &active {
+            let Some((follow_images, known_images)) =
+                self.active_recordings.get(key).map(|recording| {
+                    (
+                        recording.follow_images,
+                        recording.recordings.keys().copied().collect::<HashSet<_>>(),
+                    )
+                })
+            else {
+                continue;
+            };
+            if follow_images {
+                let image_correlations = self
+                    .client
+                    .subscription(*subscription_id)
+                    .map(|subscription| {
+                        subscription
                             .images()
                             .iter()
-                            .all(|image| image.is_end_of_stream() || image.is_closed()))
-                {
-                    stopped.push(key);
+                            .map(|image| image.correlation_id())
+                            .filter(|image_correlation_id| {
+                                !known_images.contains(image_correlation_id)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for image_correlation_id in image_correlations {
+                    let recording_id = {
+                        let subscription =
+                            self.client.subscription(*subscription_id).ok_or_else(|| {
+                                ArchiveServiceError::InvalidContext("subscription vanished".into())
+                            })?;
+                        self.runtime
+                            .start_recording(subscription, image_correlation_id)?
+                    };
+                    if let Some(active) = self.active_recordings.get_mut(key) {
+                        active.recordings.insert(image_correlation_id, recording_id);
+                        active.subscription_ref_count += 1;
+                    }
                 }
             }
         }
-        for key in stopped {
+
+        let recordings = self
+            .active_recordings
+            .iter()
+            .flat_map(|(key, active)| {
+                active
+                    .recordings
+                    .iter()
+                    .map(|(image_correlation_id, recording_id)| {
+                        (
+                            key.clone(),
+                            active.subscription_id,
+                            *image_correlation_id,
+                            *recording_id,
+                            active.auto_stop,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut stopped_sessions = Vec::new();
+        for (key, subscription_id, image_correlation_id, recording_id, auto_stop) in recordings {
+            if let Some(subscription) = self.client.subscription_mut(subscription_id) {
+                work += self.runtime.poll_recording(
+                    recording_id,
+                    subscription,
+                    image_correlation_id,
+                    20,
+                )?;
+                if subscription
+                    .image_by_correlation_id(image_correlation_id)
+                    .is_none_or(|image| image.is_end_of_stream() || image.is_closed())
+                {
+                    stopped_sessions.push((key, image_correlation_id, recording_id, auto_stop));
+                }
+            }
+        }
+        let mut stopped_keys = HashSet::new();
+        for (key, image_correlation_id, recording_id, auto_stop) in stopped_sessions {
+            self.runtime.stop_recording(recording_id)?;
+            if let Some(active) = self.active_recordings.get_mut(&key) {
+                active.recordings.remove(&image_correlation_id);
+                active.subscription_ref_count = active.subscription_ref_count.saturating_sub(1);
+                if auto_stop {
+                    let all_images_stopped = self
+                        .client
+                        .subscription(active.subscription_id)
+                        .is_none_or(|subscription| {
+                            subscription.images().is_empty()
+                                || subscription
+                                    .images()
+                                    .iter()
+                                    .all(|image| image.is_end_of_stream() || image.is_closed())
+                        });
+                    if all_images_stopped && active.subscription_ref_count == 1 {
+                        stopped_keys.insert(key.clone());
+                    }
+                }
+            }
+        }
+        for key in stopped_keys {
             work += usize::from(self.stop_recording_by_key(&key)?);
         }
         Ok(work)

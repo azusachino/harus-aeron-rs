@@ -18,7 +18,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 - `crates/archive/src/control_session.rs`: `ControlSession` state machine (`Init`, `Connected`, `Closed`).
 - `crates/archive/src/conductor.rs`: `ArchiveConductor` for processing client connection requests (`on_connect`) and stream recording sessions (`on_start_recording`).
 - `crates/archive/src/runtime.rs`: persistent recording of aligned frames from a real subscription, validated extension from the exact stopped term position, truncation that clears/deletes the segment tail, purge of segment and catalog state, active and catalog-backed recording-position queries, and an incremental `ReplayCursor` that validates position/length bounds and advances only after successful publication offers.
-- `crates/archive/src/service.rs`: `ArchiveContext`, the CnC-backed managed duty cycle, recording-subscription IDs and listing, stop-by-subscription, template-63/64 auto-stop on publisher end-of-stream, request correlation/deduplication, response publication, replay-session IDs, `StopReplay`, and final-fragment publication linger.
+- `crates/archive/src/service.rs`: `ArchiveContext`, the CnC-backed managed duty cycle, shared recording-subscription ownership with one recording session per joined image, recording-subscription IDs and listing, stop-by-subscription, template-63/64 auto-stop on publisher end-of-stream, request correlation/deduplication, response publication, replay-session IDs, `StopReplay`, and final-fragment publication linger.
 - `crates/archive/src/bin/aeron-archive.rs`: standalone process that attaches to an existing Media Driver and stops cleanly when standard input closes.
 
 The integration test in `crates/archive/tests/control_service.rs` drives the real
@@ -38,6 +38,11 @@ recording's exact initial-term/term-id/term-offset triple, appends frames under 
 same recording ID, truncates back to the prior aligned stop, restarts and replays only
 the retained prefix, then purges and restarts again to prove both catalog invalidation
 and segment deletion.
+
+`crates/archive/tests/runtime_lifecycle.rs` also constructs two joined images under
+one subscription and verifies that each image is polled into its own recording
+session. The control-service multi-image probe remains an ignored boundary test until
+the Rust Media Driver accepts multiple IPC publications sharing one stream.
 
 ## Verification
 

@@ -145,10 +145,10 @@ impl ArchiveRuntime {
     pub fn start_recording(
         &mut self,
         subscription: &Subscription,
+        image_correlation_id: i64,
     ) -> Result<i64, ArchiveRuntimeError> {
         let image = subscription
-            .images()
-            .first()
+            .image_by_correlation_id(image_correlation_id)
             .ok_or(ArchiveRuntimeError::NoImage)?;
         let recording_id = self.catalog.allocate_recording_id();
         let start_position = image.position();
@@ -181,6 +181,7 @@ impl ArchiveRuntime {
         &mut self,
         recording_id: i64,
         subscription: &mut Subscription,
+        image_correlation_id: i64,
         fragment_limit: usize,
     ) -> Result<usize, ArchiveRuntimeError> {
         let writer = self
@@ -188,7 +189,8 @@ impl ArchiveRuntime {
             .get_mut(&recording_id)
             .ok_or(ArchiveRuntimeError::UnknownRecording(recording_id))?;
         let mut write_error = None;
-        let fragments = subscription.poll(
+        let fragments = subscription.poll_image(
+            image_correlation_id,
             |buffer, _offset, _length, header| {
                 if write_error.is_none() {
                     write_error = writer.write_frame(buffer, header.offset()).err();
@@ -221,13 +223,13 @@ impl ArchiveRuntime {
         control_session_id: i64,
         correlation_id: i64,
         subscription: &Subscription,
+        image_correlation_id: i64,
     ) -> Result<(), ArchiveRuntimeError> {
         if self.active.contains_key(&recording_id) {
             return Err(ArchiveRuntimeError::RecordingActive(recording_id));
         }
         let image = subscription
-            .images()
-            .first()
+            .image_by_correlation_id(image_correlation_id)
             .ok_or(ArchiveRuntimeError::NoImage)?;
         let descriptor = self
             .catalog
