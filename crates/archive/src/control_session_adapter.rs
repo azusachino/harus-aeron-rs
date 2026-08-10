@@ -5,9 +5,9 @@ use crate::codecs::{
     ExtendRecordingRequestV2, FindLastMatchingRecordingRequest, ListRecordingRequest,
     ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest, ListRecordingsRequest,
     MaxRecordedPositionRequest, MessageHeader, PurgeRecordingRequest, RecordingPositionRequest,
-    ReplayRequest, StartPositionRequest, StartRecordingRequest, StartRecordingRequestV2,
-    StopPositionRequest, StopRecordingRequest, StopRecordingSubscriptionRequest, StopReplayRequest,
-    TruncateRecordingRequest,
+    ReplayRequest, ReplayTokenRequest, ReplicateRequest2, StartPositionRequest,
+    StartRecordingRequest, StartRecordingRequestV2, StopPositionRequest, StopRecordingRequest,
+    StopRecordingSubscriptionRequest, StopReplayRequest, TruncateRecordingRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub enum ControlRequest {
     StopRecordingSubscription(StopRecordingSubscriptionRequest),
     Replay(ReplayRequest),
     BoundedReplay(BoundedReplayRequest),
+    Replicate(ReplicateRequest2),
+    ReplayToken(ReplayTokenRequest),
     StopReplay(StopReplayRequest),
     ListRecordings(ListRecordingsRequest),
     ListRecordingsForUri(ListRecordingsForUriRequest),
@@ -87,6 +89,12 @@ impl ControlSessionAdapter {
             BoundedReplayRequest::TEMPLATE_ID => Ok(ControlRequest::BoundedReplay(
                 BoundedReplayRequest::decode(frame)?,
             )),
+            ReplicateRequest2::TEMPLATE_ID => {
+                Ok(ControlRequest::Replicate(ReplicateRequest2::decode(frame)?))
+            }
+            ReplayTokenRequest::TEMPLATE_ID => Ok(ControlRequest::ReplayToken(
+                ReplayTokenRequest::decode(frame)?,
+            )),
             StopReplayRequest::TEMPLATE_ID => Ok(ControlRequest::StopReplay(
                 StopReplayRequest::decode(frame)?,
             )),
@@ -129,7 +137,9 @@ impl ControlSessionAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::{PROTOCOL_SEMANTIC_VERSION, SourceLocation, StartRecordingRequestV2};
+    use crate::codecs::{
+        PROTOCOL_SEMANTIC_VERSION, ReplayRequest, SourceLocation, StartRecordingRequestV2,
+    };
 
     #[test]
     fn dispatches_by_real_sbe_template_id() {
@@ -186,5 +196,81 @@ mod tests {
             Err(ControlAdapterError::UnsupportedTemplate(999))
         );
         assert!(ControlSessionAdapter::decode(&frame[..7]).is_err());
+    }
+
+    #[test]
+    fn dispatches_replication_request2_with_all_variable_fields() {
+        let request = ReplicateRequest2 {
+            control_session_id: 928_374,
+            correlation_id: 9_382_475,
+            src_recording_id: 1_234_234,
+            dst_recording_id: 2_532_453_245,
+            stop_position: 2_315_345,
+            channel_tag_id: 234,
+            subscription_tag_id: 235,
+            src_control_stream_id: 982_374,
+            file_io_max_length: 4096,
+            replication_session_id: 17,
+            src_control_channel: "src".into(),
+            live_destination: "live".into(),
+            replication_channel: "replication".into(),
+            encoded_credentials: b"some password".to_vec(),
+            src_response_channel: "response".into(),
+        };
+
+        assert_eq!(
+            ControlSessionAdapter::decode(&request.encode().unwrap()).unwrap(),
+            ControlRequest::Replicate(request)
+        );
+    }
+
+    #[test]
+    fn dispatches_replay_and_bounded_replay_requests() {
+        let replay = ReplayRequest {
+            control_session_id: 928_374,
+            correlation_id: 9_382_475,
+            recording_id: 9_827_345_897,
+            position: 982_374,
+            length: -1,
+            replay_stream_id: 9_832_475,
+            file_io_max_length: 4096,
+            replay_token: 0,
+            replay_channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            ControlSessionAdapter::decode(&replay.encode().unwrap()).unwrap(),
+            ControlRequest::Replay(replay)
+        );
+
+        let bounded = BoundedReplayRequest {
+            control_session_id: 928_374,
+            correlation_id: 9_382_475,
+            recording_id: 9_827_345_897,
+            position: 982_374,
+            length: -1,
+            limit_counter_id: 92_734,
+            replay_stream_id: 9_832_475,
+            file_io_max_length: 4096,
+            replay_token: 0,
+            replay_channel: "aeron:ipc?alias=replay".into(),
+        };
+        assert_eq!(
+            ControlSessionAdapter::decode(&bounded.encode().unwrap()).unwrap(),
+            ControlRequest::BoundedReplay(bounded)
+        );
+    }
+
+    #[test]
+    fn dispatches_replay_token_request() {
+        let request = ReplayTokenRequest {
+            control_session_id: 928_374,
+            correlation_id: 9_382_475,
+            recording_id: 9_827_345_897,
+        };
+
+        assert_eq!(
+            ControlSessionAdapter::decode(&request.encode().unwrap()).unwrap(),
+            ControlRequest::ReplayToken(request)
+        );
     }
 }

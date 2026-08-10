@@ -12,7 +12,7 @@
 {"layer": "archive", "rust_equivalent": "crates/archive/src/catalog_index.rs", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/CatalogIndexTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/CatalogTest.java"}
 {"layer": "archive", "rust_equivalent": "crates/archive/src/catalog_view.rs", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/CatalogViewTest.java"}
-{"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ControlSessionAdapterTest.java"}
+{"layer": "archive", "rust_equivalent": "crates/archive/src/control_session_adapter.rs (pure Rust adapter decode for ReplicateRequest2, Replay, BoundedReplay, and ReplayTokenRequest)", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ControlSessionAdapterTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ControlSessionAdapterV6Test.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ControlSessionTest.java"}
 {"layer": "archive", "rust_equivalent": "crates/archive/src/delete_segments_session.rs (Rust delete-session queue, segment-position parsing, and close signal)", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/DeleteSegmentsSessionTest.java"}

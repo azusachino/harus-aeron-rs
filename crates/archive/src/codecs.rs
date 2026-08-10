@@ -110,11 +110,13 @@ pub enum ControlRequestType {
     FindLastMatchingRecording = 16,
     ListRecordingSubscriptions = 17,
     BoundedReplay = 18,
+    ReplicateRequest2 = 66,
     StartPosition = 52,
     StartRecordingV2 = 63,
     ExtendRecordingV2 = 64,
     MaxRecordedPosition = 67,
     PurgeRecording = 104,
+    ReplayTokenRequest = 105,
 }
 
 #[repr(i32)]
@@ -337,6 +339,152 @@ impl ReplayRequest {
                 0
             },
             replay_channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicateRequest2 {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub src_recording_id: i64,
+    pub dst_recording_id: i64,
+    pub stop_position: i64,
+    pub channel_tag_id: i64,
+    pub subscription_tag_id: i64,
+    pub src_control_stream_id: i32,
+    pub file_io_max_length: i32,
+    pub replication_session_id: i32,
+    pub src_control_channel: String,
+    pub live_destination: String,
+    pub replication_channel: String,
+    pub encoded_credentials: Vec<u8>,
+    pub src_response_channel: String,
+}
+
+impl ReplicateRequest2 {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ReplicateRequest2 as u16;
+    pub const BLOCK_LENGTH: u16 = 68;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        validate_ascii(&self.src_control_channel)?;
+        validate_ascii(&self.live_destination)?;
+        validate_ascii(&self.replication_channel)?;
+        validate_ascii(&self.src_response_channel)?;
+        validate_var_data(&self.encoded_credentials)?;
+
+        let variable_length = [
+            self.src_control_channel.len(),
+            self.live_destination.len(),
+            self.replication_channel.len(),
+            self.encoded_credentials.len(),
+            self.src_response_channel.len(),
+        ]
+        .into_iter()
+        .map(|length| 4 + length)
+        .sum::<usize>();
+        let variable_offset = MessageHeader::SIZE + usize::from(Self::BLOCK_LENGTH);
+        let mut frame = vec![0; variable_offset + variable_length];
+        MessageHeader {
+            block_length: Self::BLOCK_LENGTH,
+            template_id: Self::TEMPLATE_ID,
+            schema_id: SBE_SCHEMA_ID,
+            version: SBE_SCHEMA_VERSION,
+        }
+        .encode_into(&mut frame)?;
+        put_i64(&mut frame, 8, self.control_session_id);
+        put_i64(&mut frame, 16, self.correlation_id);
+        put_i64(&mut frame, 24, self.src_recording_id);
+        put_i64(&mut frame, 32, self.dst_recording_id);
+        put_i64(&mut frame, 40, self.stop_position);
+        put_i64(&mut frame, 48, self.channel_tag_id);
+        put_i64(&mut frame, 56, self.subscription_tag_id);
+        put_i32(&mut frame, 64, self.src_control_stream_id);
+        put_i32(&mut frame, 68, self.file_io_max_length);
+        put_i32(&mut frame, 72, self.replication_session_id);
+
+        let mut offset = variable_offset;
+        offset = put_ascii(&mut frame, offset, &self.src_control_channel);
+        offset = put_ascii(&mut frame, offset, &self.live_destination);
+        offset = put_ascii(&mut frame, offset, &self.replication_channel);
+        offset = put_var_data(&mut frame, offset, &self.encoded_credentials);
+        put_ascii(&mut frame, offset, &self.src_response_channel);
+        Ok(frame)
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (header, mut offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        let (src_control_channel, next) = decode_ascii(frame, offset)?;
+        offset = next;
+        let (live_destination, next) = decode_ascii(frame, offset)?;
+        offset = next;
+        let (replication_channel, next) = decode_ascii(frame, offset)?;
+        offset = next;
+        let (encoded_credentials, next) = if header.version >= 8 {
+            decode_var_data(frame, offset)?
+        } else {
+            (Vec::new(), offset)
+        };
+        offset = next;
+        let src_response_channel = if header.version >= 10 {
+            decode_ascii(frame, offset)?.0
+        } else {
+            String::new()
+        };
+
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            src_recording_id: get_i64(frame, 24),
+            dst_recording_id: get_i64(frame, 32),
+            stop_position: get_i64(frame, 40),
+            channel_tag_id: get_i64(frame, 48),
+            subscription_tag_id: get_i64(frame, 56),
+            src_control_stream_id: get_i32(frame, 64),
+            file_io_max_length: if header.version >= 7 {
+                get_i32(frame, 68)
+            } else {
+                -1
+            },
+            replication_session_id: if header.version >= 8 {
+                get_i32(frame, 72)
+            } else {
+                -1
+            },
+            src_control_channel,
+            live_destination,
+            replication_channel,
+            encoded_credentials,
+            src_response_channel,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayTokenRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub recording_id: i64,
+}
+
+impl ReplayTokenRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::ReplayTokenRequest as u16;
+    pub const BLOCK_LENGTH: u16 = 24;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_fixed_message(Self::TEMPLATE_ID, Self::BLOCK_LENGTH, |frame| {
+            put_i64(frame, 8, self.control_session_id);
+            put_i64(frame, 16, self.correlation_id);
+            put_i64(frame, 24, self.recording_id);
+        })
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        decode_fixed_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            recording_id: get_i64(frame, 24),
         })
     }
 }
@@ -939,14 +1087,7 @@ fn encode_var_message(
     value: &str,
     encode_fixed: impl FnOnce(&mut [u8]),
 ) -> Result<Vec<u8>, CodecError> {
-    if !value.is_ascii() {
-        return Err(CodecError::NonAscii);
-    }
-    if value.len() > VAR_ASCII_MAX_LENGTH || value.len() > u32::MAX as usize {
-        return Err(CodecError::VariableFieldTooLong {
-            length: value.len(),
-        });
-    }
+    validate_ascii(value)?;
     let variable_offset = MessageHeader::SIZE + usize::from(block_length);
     let mut frame = vec![0; variable_offset + 4 + value.len()];
     MessageHeader {
@@ -1022,6 +1163,41 @@ fn decode_ascii(frame: &[u8], offset: usize) -> Result<(String, usize), CodecErr
     Ok((String::from_utf8_lossy(bytes).into_owned(), end))
 }
 
+fn decode_var_data(frame: &[u8], offset: usize) -> Result<(Vec<u8>, usize), CodecError> {
+    require(frame, offset + 4)?;
+    let length = get_u32(frame, offset) as usize;
+    if length > VAR_ASCII_MAX_LENGTH {
+        return Err(CodecError::VariableFieldTooLong { length });
+    }
+    let end = offset
+        .checked_add(4)
+        .and_then(|start| start.checked_add(length))
+        .ok_or(CodecError::VariableFieldTooLong { length })?;
+    require(frame, end)?;
+    Ok((frame[offset + 4..end].to_vec(), end))
+}
+
+fn validate_ascii(value: &str) -> Result<(), CodecError> {
+    if !value.is_ascii() {
+        return Err(CodecError::NonAscii);
+    }
+    if value.len() > VAR_ASCII_MAX_LENGTH || value.len() > u32::MAX as usize {
+        return Err(CodecError::VariableFieldTooLong {
+            length: value.len(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_var_data(value: &[u8]) -> Result<(), CodecError> {
+    if value.len() > VAR_ASCII_MAX_LENGTH || value.len() > u32::MAX as usize {
+        return Err(CodecError::VariableFieldTooLong {
+            length: value.len(),
+        });
+    }
+    Ok(())
+}
+
 fn decode_bool(value: i32) -> Result<bool, CodecError> {
     match value {
         0 => Ok(false),
@@ -1047,6 +1223,18 @@ fn put_u16(frame: &mut [u8], offset: usize, value: u16) {
 
 fn put_u32(frame: &mut [u8], offset: usize, value: u32) {
     frame[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_ascii(frame: &mut [u8], offset: usize, value: &str) -> usize {
+    put_u32(frame, offset, value.len() as u32);
+    frame[offset + 4..offset + 4 + value.len()].copy_from_slice(value.as_bytes());
+    offset + 4 + value.len()
+}
+
+fn put_var_data(frame: &mut [u8], offset: usize, value: &[u8]) -> usize {
+    put_u32(frame, offset, value.len() as u32);
+    frame[offset + 4..offset + 4 + value.len()].copy_from_slice(value);
+    offset + 4 + value.len()
 }
 
 fn put_i32(frame: &mut [u8], offset: usize, value: i32) {

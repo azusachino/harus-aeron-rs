@@ -391,6 +391,28 @@ impl ArchiveService {
                     limit_counter_id: Some(request.limit_counter_id),
                 });
             }
+            ControlRequest::Replicate(request) => {
+                self.queue_session_response(
+                    request.control_session_id,
+                    error(
+                        request.control_session_id,
+                        request.correlation_id,
+                        ControlResponseCode::Error,
+                        "replication is not implemented",
+                    ),
+                )?;
+            }
+            ControlRequest::ReplayToken(request) => {
+                self.queue_session_response(
+                    request.control_session_id,
+                    error(
+                        request.control_session_id,
+                        request.correlation_id,
+                        ControlResponseCode::Error,
+                        "replay tokens are not implemented",
+                    ),
+                )?;
+            }
             ControlRequest::StopReplay(request) => {
                 if let Some(active) = self.active_replays.remove(&request.replay_session_id) {
                     let _ = self.client.remove_publication(active.publication_id)?;
@@ -1438,6 +1460,12 @@ fn request_key(request: &ControlRequest) -> (u16, i64, i64) {
         ControlRequest::Replay(request) => (6, request.control_session_id, request.correlation_id),
         ControlRequest::BoundedReplay(request) => {
             (18, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::Replicate(request) => {
+            (66, request.control_session_id, request.correlation_id)
+        }
+        ControlRequest::ReplayToken(request) => {
+            (105, request.control_session_id, request.correlation_id)
         }
         ControlRequest::StopReplay(request) => {
             (7, request.control_session_id, request.correlation_id)
