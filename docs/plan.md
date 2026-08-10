@@ -143,6 +143,8 @@ ReplaySession behavior through `ReplayCursor` and control-service coverage for
 active follow, stopped replay, bounded limits, persistence, and publication
 backpressure (Java-specific CRC/padding publication mechanics remain outside this
 cursor API),
+Archive client context channel/session/default/retry configuration (high-level
+client connection and close orchestration remain outside the current Rust API),
 ordered recording-id/catalog-offset indexing, corrected term-aligned
 segment-file math, recording-signal values, bounded recording queries,
 crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay
