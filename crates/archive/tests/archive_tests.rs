@@ -8,6 +8,8 @@ use aeron_archive::codecs::{
 use aeron_archive::conductor::ArchiveConductor;
 use aeron_archive::control_session::ControlSession;
 use aeron_archive::recording_descriptor::RecordingDescriptor;
+use aeron_archive::runtime::ArchiveRuntime;
+use std::io::{Seek, SeekFrom, Write};
 #[test]
 fn test_complete_sbe_messages_roundtrip() {
     let connect = ConnectRequest {
@@ -108,6 +110,53 @@ fn test_catalog_file_persistence_roundtrip() {
     assert_eq!(loaded.get_recording(rec_id2), Some(&desc2));
 
     let _ = std::fs::remove_file(catalog_path);
+}
+
+#[test]
+fn test_runtime_recovers_zero_next_recording_id_on_reopen() {
+    let archive_dir = std::env::temp_dir().join(format!(
+        "aeron-runtime-catalog-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&archive_dir);
+    std::fs::create_dir_all(&archive_dir).expect("create archive directory");
+
+    let mut catalog = Catalog::new();
+    catalog.add_recording(RecordingDescriptor::new(
+        1,
+        2,
+        7,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        "stripped".into(),
+        "original".into(),
+        "source".into(),
+    ));
+    let catalog_path = archive_dir.join("catalog.dat");
+    catalog.save_to_file(&catalog_path).expect("save catalog");
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&catalog_path)
+        .expect("open catalog");
+    file.seek(SeekFrom::Start(8))
+        .expect("seek next recording id");
+    file.write_all(&0_i64.to_le_bytes())
+        .expect("rewrite next recording id");
+    drop(file);
+
+    let runtime = ArchiveRuntime::open(&archive_dir).expect("reopen archive runtime");
+    assert_eq!(runtime.catalog().header().next_recording_id, 8);
+    std::fs::remove_dir_all(archive_dir).expect("cleanup");
 }
 
 #[test]

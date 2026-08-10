@@ -125,8 +125,9 @@ depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
 **Managed-service status (2026-08-10):** catalog descriptor persistence, corrected
-term-aligned segment-file math, recording-signal values, bounded recording queries, and
-an in-memory recording/replay lifecycle are implemented. Bounded complete v13 SBE
+term-aligned segment-file math, recording-signal values, bounded recording queries,
+crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay
+lifecycle are implemented. Bounded complete v13 SBE
 codecs cover connect, start/stop recording, replay/stop replay, listing requests, and
 correlated control responses. `ArchiveService` attaches to a real Media Driver CnC
 file, dispatches those requests from a control subscription, publishes responses on
@@ -164,6 +165,11 @@ stop at `NULL_POSITION` while active, reports the live writer position as its
 maximum, and preserves finalized query results across Archive restart. Find-last
 matching follows upstream's exact session, stream, channel-fragment, and
 minimum-recording-ID semantics.
+
+Catalog reopen validation now follows the upstream recovery boundary: a zero persisted
+`nextRecordingId` is recomputed from the highest descriptor, while a stale value below
+that descriptor is rejected as invalid catalog data. Runtime reopen coverage exercises
+the recovery path through `ArchiveRuntime::open`.
 
 Recording mutation now covers v13 `ExtendRecordingRequest` (11),
 `TruncateRecordingRequest` (13), and `PurgeRecordingRequest` (104). Extension requires

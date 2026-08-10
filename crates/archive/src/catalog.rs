@@ -287,6 +287,30 @@ impl Catalog {
             );
             catalog.add_recording(descriptor);
         }
+        let expected_next_recording_id = catalog
+            .ordered_descriptors
+            .iter()
+            .map(|descriptor| descriptor.recording_id)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "catalog recording id overflow",
+                )
+            })?;
+        if catalog.header.next_recording_id == 0 {
+            catalog.header.next_recording_id = expected_next_recording_id;
+        } else if catalog.header.next_recording_id < expected_next_recording_id {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "catalog next recording id {} is below expected {}",
+                    catalog.header.next_recording_id, expected_next_recording_id
+                ),
+            ));
+        }
         Ok(catalog)
     }
 }
@@ -294,6 +318,39 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Seek, SeekFrom, Write};
+
+    fn descriptor(recording_id: i64) -> RecordingDescriptor {
+        RecordingDescriptor::new(
+            1,
+            2,
+            recording_id,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            "stripped".into(),
+            "original".into(),
+            "source".into(),
+        )
+    }
+
+    fn rewrite_next_recording_id(path: &std::path::Path, next_recording_id: i64) {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open catalog");
+        file.seek(SeekFrom::Start(8))
+            .expect("seek next recording id");
+        file.write_all(&next_recording_id.to_le_bytes())
+            .expect("rewrite next recording id");
+    }
 
     #[test]
     fn should_allocate_recording_id_and_store_descriptor() {
@@ -335,30 +392,53 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let mut catalog = Catalog::new();
         let recording_id = catalog.allocate_recording_id();
-        let descriptor = RecordingDescriptor::new(
-            1,
-            2,
-            recording_id,
-            3,
-            4,
-            5,
-            6,
-            7,
-            8,
-            9,
-            10,
-            11,
-            12,
-            "stripped".into(),
-            "original".into(),
-            "source".into(),
-        );
+        let descriptor = descriptor(recording_id);
         catalog.add_recording(descriptor.clone());
         catalog.save_to_file(&path).unwrap();
 
         let loaded = Catalog::load_from_file(&path).unwrap();
         assert_eq!(loaded.header().next_recording_id, 2);
         assert_eq!(loaded.recordings(), &[descriptor]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn should_recover_zero_next_recording_id_from_descriptors() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-catalog-recover-{}-{:?}.dat",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut catalog = Catalog::new();
+        catalog.add_recording(descriptor(7));
+        catalog.save_to_file(&path).expect("save catalog");
+        rewrite_next_recording_id(&path, 0);
+
+        let loaded = Catalog::load_from_file(&path).expect("recover catalog");
+        assert_eq!(loaded.header().next_recording_id, 8);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn should_reject_next_recording_id_before_descriptors() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-catalog-invalid-next-{}-{:?}.dat",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut catalog = Catalog::new();
+        catalog.add_recording(descriptor(7));
+        catalog.save_to_file(&path).expect("save catalog");
+        rewrite_next_recording_id(&path, 7);
+
+        let error = match Catalog::load_from_file(&path) {
+            Ok(_) => panic!("reject stale next id"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("below expected 8"));
         let _ = std::fs::remove_file(path);
     }
 }
