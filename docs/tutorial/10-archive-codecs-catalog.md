@@ -19,6 +19,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 - `crates/archive/src/catalog.rs`: `CatalogHeader` and `Catalog` manager handling sequential `recording_id` allocation, crash-recovery validation of the next ID, and descriptor indexing.
 - `crates/archive/src/catalog_index.rs`: ordered recording-id to catalog-offset index with monotonic insertion, binary lookup, growth, and removal semantics.
 - `crates/archive/src/catalog_view.rs`: read-only listing of all or one persisted recording descriptor.
+- `crates/archive/src/archive_mark_file.rs`: SBE-compatible `archive-mark.dat` layout, aligned file sizing, metadata channels, liveness timestamps, ready/terminated signaling, and error-buffer access; upstream migration and process-ownership machinery remains outside the current boundary.
 - `crates/archive/src/client_context.rs`: Archive control-channel session-ID/default injection and retry-attempt validation; connection ownership remains outside the current Rust client boundary.
 - `crates/archive/src/list_recordings_session.rs`: incremental descriptor listing with recording-unknown and abort boundaries.
 - `crates/archive/src/list_recording_by_id_session.rs`: retryable single-recording descriptor publication, catalog invalidation re-checks, and unknown responses.

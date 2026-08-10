@@ -9,6 +9,7 @@ dependencies = [
  "aeron-client",
  "aeron-driver",
  "agrona",
+ "memmap2",
  "proptest",
  "thiserror",
 ]

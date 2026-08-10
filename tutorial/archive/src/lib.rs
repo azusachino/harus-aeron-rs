@@ -3,6 +3,7 @@
 //! Reference implementation: `crates/archive`. Course chapter: `docs/tutorial/`.
 
 pub mod catalog;
+pub mod archive_mark_file;
 pub mod client_context;
 pub mod codecs;
 pub mod conductor;
