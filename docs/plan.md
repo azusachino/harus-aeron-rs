@@ -141,6 +141,7 @@ bounded ListRecordingsForUriSession stream/channel filtering with retry and
 exhaustion signaling,
 long descriptor fields, invalid recording gaps, and multi-batch URI listing,
 bounded recording-history purge/truncate behavior and signal-value coverage,
+invalid truncate/replay request responses over real control channels,
 real-runtime RecordingSession coverage for image-frame writes, stop persistence,
 and replay payloads (the Java mock event-proxy wiring remains outside this API),
 RecordingWriter frame validation and segment rollover (checksum, padding-frame,
