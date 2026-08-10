@@ -5,10 +5,8 @@
 
 use agrona::{AgronaError, CountersManager};
 
-/// Counter type for the position reached by an active recording.
-pub const ARCHIVE_RECORDING_POSITION_TYPE_ID: i32 = 100;
-/// Counter type for the number of errors observed by an Archive.
-pub const ARCHIVE_ERROR_COUNT_TYPE_ID: i32 = 101;
+pub use aeron_client::counters::{ARCHIVE_ERROR_COUNT_TYPE_ID, ARCHIVE_RECORDING_POSITION_TYPE_ID};
+
 /// Suffix appended to every Archive counter label.
 pub const ARCHIVE_ID_LABEL_SUFFIX: &str = " - archiveId=";
 /// Value returned when a matching counter cannot be found.
@@ -103,7 +101,7 @@ mod tests {
             let (type_id, key, label) = allocated_counter(manager, counter_id);
 
             assert_eq!(999, type_id);
-            assert_eq!(archive_id.to_le_bytes(), key.as_slice());
+            assert_eq!(archive_id.to_le_bytes(), key[..8]);
             assert_eq!("<test counter> - archiveId=-1832178932131546", label);
         });
     }
@@ -116,7 +114,7 @@ mod tests {
             let (type_id, key, label) = allocated_counter(manager, counter_id);
 
             assert_eq!(ARCHIVE_ERROR_COUNT_TYPE_ID, type_id);
-            assert_eq!(archive_id.to_le_bytes(), key.as_slice());
+            assert_eq!(archive_id.to_le_bytes(), key[..8]);
             assert_eq!("Archive Errors - archiveId=24623864", label);
         });
     }

@@ -1,8 +1,7 @@
 //! Archive: recording, replay, and catalog persistence.
 //!
 //! Mirrors upstream `aeron-archive`, which depends on `aeron-client` the same way this
-//! crate depends on [`aeron_client`]. Future phase — not started. Placeholder crate to
-//! reserve the module boundary.
+//! crate depends on [`aeron_client`].
 pub mod archive_counters;
 pub mod archive_exception;
 pub mod catalog;
@@ -14,6 +13,7 @@ pub mod conductor;
 pub mod control_session;
 pub mod control_session_adapter;
 pub mod recording_descriptor;
+pub mod recording_pos;
 pub mod recording_subscription_descriptor;
 pub mod runtime;
 pub mod service;

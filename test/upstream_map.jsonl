@@ -27,7 +27,7 @@
 {"layer": "archive", "rust_equivalent": "crates/archive/src/checksum.rs (Rust generic constructor replaces Java reflection)", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/checksum/ChecksumsTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/client/AeronArchiveTest.java"}
 {"layer": "archive", "rust_equivalent": "crates/archive/src/archive_exception.rs", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/client/ArchiveExceptionTest.java"}
-{"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/status/RecordingPosTest.java"}
+{"layer": "archive", "rust_equivalent": "crates/archive/src/recording_pos.rs (Rust CountersManager-backed recording-position metadata and lookup)", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/status/RecordingPosTest.java"}
 {"layer": "client", "rust_equivalent": "crates/client/src/context.rs", "status": "implemented", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/AeronContextTest.java"}
 {"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/AeronCountersTest.java"}
 {"layer": "client", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-client/src/test/java/io/aeron/BufferBuilderTest.java"}
