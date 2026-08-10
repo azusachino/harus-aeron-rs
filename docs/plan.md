@@ -144,6 +144,9 @@ bounded recording-history purge/truncate behavior and signal-value coverage,
 invalid truncate/replay request responses over real control channels,
 bounded response-stream selection, independent replay sessions, active-follow replay,
 and explicit replication/replay-token protocol boundaries,
+managed response retry/requeue, authorization-policy, and segment-file cleanup
+boundaries; Archive authentication handshake, abandoned-client stress, and
+cross-recording segment migration remain explicitly unimplemented,
 real-runtime RecordingSession coverage for image-frame writes, stop persistence,
 and replay payloads (the Java mock event-proxy wiring remains outside this API),
 RecordingWriter frame validation and segment rollover (checksum, padding-frame,
