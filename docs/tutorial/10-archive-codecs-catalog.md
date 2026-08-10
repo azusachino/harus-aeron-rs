@@ -12,6 +12,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 ## Persistent Catalog Indexing
 
 - `crates/archive/src/catalog.rs`: `CatalogHeader` and `Catalog` manager handling sequential `recording_id` allocation, crash-recovery validation of the next ID, and descriptor indexing.
+- `crates/archive/src/catalog_index.rs`: ordered recording-id to catalog-offset index with monotonic insertion, binary lookup, growth, and removal semantics.
 
 ## ArchiveConductor & Sessions
 
