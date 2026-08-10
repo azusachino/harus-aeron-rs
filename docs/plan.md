@@ -124,8 +124,9 @@ depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 ### v0.0.7 — aeron-archive
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
-**Managed-service status (2026-08-10):** catalog descriptor persistence, read-only
-catalog views, ordered recording-id/catalog-offset indexing, corrected term-aligned
+**Managed-service status (2026-08-10):** catalog descriptor persistence, Archive
+error-code naming, read-only catalog views, ordered recording-id/catalog-offset
+indexing, corrected term-aligned
 segment-file math, recording-signal values, bounded recording queries,
 crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay
 lifecycle are implemented. Bounded complete v13 SBE

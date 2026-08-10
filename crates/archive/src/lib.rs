@@ -3,6 +3,7 @@
 //! Mirrors upstream `aeron-archive`, which depends on `aeron-client` the same way this
 //! crate depends on [`aeron_client`]. Future phase — not started. Placeholder crate to
 //! reserve the module boundary.
+pub mod archive_exception;
 pub mod catalog;
 pub mod catalog_index;
 pub mod catalog_view;
