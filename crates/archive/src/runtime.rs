@@ -69,6 +69,7 @@ pub struct ReplayCursor {
     descriptor: RecordingDescriptor,
     position: i64,
     limit: i64,
+    follow: bool,
 }
 
 impl ReplayCursor {
@@ -85,7 +86,11 @@ impl ReplayCursor {
     }
 
     pub fn is_complete(&self) -> bool {
-        self.position >= self.limit
+        !self.follow && self.position >= self.limit
+    }
+
+    pub fn is_following(&self) -> bool {
+        self.follow
     }
 
     pub fn poll(
@@ -94,7 +99,7 @@ impl ReplayCursor {
         fragment_limit: usize,
     ) -> Result<usize, ArchiveRuntimeError> {
         let mut messages = 0;
-        while !self.is_complete() && messages < fragment_limit {
+        while self.position < self.limit && messages < fragment_limit {
             let position = self.position;
             let (mut payload, aligned_length) =
                 read_recorded_payload(&self.archive_dir, &self.descriptor, position)?;
@@ -398,6 +403,7 @@ impl ArchiveRuntime {
             });
         }
         let available = available_stop - position;
+        let follow = requested_length == -1 && active_position.is_some();
         let length = match requested_length {
             -1 | -2 => available,
             value if value >= 0 => value.min(available),
@@ -412,7 +418,20 @@ impl ArchiveRuntime {
             descriptor,
             position,
             limit,
+            follow,
         })
+    }
+
+    pub fn refresh_replay_limit(&self, cursor: &mut ReplayCursor) {
+        if !cursor.follow {
+            return;
+        }
+        if let Some(writer) = self.active.get(&cursor.recording_id()) {
+            cursor.limit = writer.position;
+        } else if let Some(stop_position) = self.stop_position(cursor.recording_id()) {
+            cursor.limit = stop_position;
+            cursor.follow = false;
+        }
     }
 }
 

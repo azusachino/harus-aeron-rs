@@ -29,6 +29,7 @@ const LIVE_STREAM: i32 = 702;
 const REPLAY_STREAM: i32 = 703;
 const BOUNDED_REPLAY_STREAM: i32 = 705;
 const INVALID_REPLAY_STREAM: i32 = 706;
+const LIVE_FOLLOW_REPLAY_STREAM: i32 = 709;
 
 fn client(driver: &MediaDriver, client_id: i64) -> ClientConductor<'static> {
     let ring = ManyToOneRingBuffer::new(driver.cnc().to_driver_buffer()).expect("driver ring");
@@ -987,6 +988,92 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
         )
         .relevant_id,
         recording_id
+    );
+
+    let live_follow_subscription = external
+        .add_subscription("aeron:ipc", LIVE_FOLLOW_REPLAY_STREAM)
+        .expect("live follow replay subscription");
+    await_resources(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        live_follow_subscription,
+    );
+    let live_follow_position = archive
+        .runtime()
+        .recording_position(recording_id)
+        .expect("live follow position");
+    let mut live_follow_replay = ReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 27,
+        recording_id,
+        position: live_follow_position,
+        length: -1,
+        replay_stream_id: LIVE_FOLLOW_REPLAY_STREAM,
+        file_io_max_length: 0,
+        replay_token: 0,
+        replay_channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("live follow replay encode");
+    while !offer(&external, control_publication, &mut live_follow_replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let live_follow_replay_session_id = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        27,
+    )
+    .relevant_id;
+    let mut live_follow_payload = b"live-follow".to_vec();
+    while !offer(&external, live_publication, &mut live_follow_payload) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let mut live_follow_replayed = Vec::new();
+    for _ in 0..100 {
+        cycle(&mut driver, &mut archive, &mut external);
+        if let Some(subscription) = external.subscription_mut(live_follow_subscription) {
+            subscription.poll(
+                |buffer, offset, length, _| {
+                    let mut payload = vec![0; length];
+                    buffer.get_bytes(offset, &mut payload);
+                    live_follow_replayed.push(payload);
+                },
+                10,
+            );
+        }
+        if live_follow_replayed.contains(&live_follow_payload) {
+            break;
+        }
+    }
+    assert!(
+        live_follow_replayed.contains(&live_follow_payload),
+        "active replay did not follow a payload written after replay started: {live_follow_replayed:?}"
+    );
+
+    let mut stop_live_follow_replay = StopReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 28,
+        replay_session_id: live_follow_replay_session_id,
+    }
+    .encode()
+    .expect("stop live follow replay encode");
+    while !offer(&external, control_publication, &mut stop_live_follow_replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            28,
+        )
+        .code,
+        ControlResponseCode::Ok
     );
 
     let mut stop = StopRecordingSubscriptionRequest {

@@ -254,7 +254,7 @@ fn records_persists_restarts_and_replays_through_real_driver_clients() {
 
     let mut active_replay = archive
         .start_replay(recording_id, -1, -1)
-        .expect("replay active recording snapshot");
+        .expect("replay active recording with follow");
     assert_eq!(
         active_replay.limit(),
         archive
@@ -294,8 +294,12 @@ fn records_persists_restarts_and_replays_through_real_driver_clients() {
             .map(|payload| payload.to_vec())
             .collect::<Vec<_>>()
     );
+    assert!(active_replay.is_following());
 
     let stop_position = archive.stop_recording(recording_id).expect("stop");
+    archive.refresh_replay_limit(&mut active_replay);
+    assert!(!active_replay.is_following());
+    assert!(active_replay.is_complete());
     assert!(stop_position > 0);
     drop(archive);
 

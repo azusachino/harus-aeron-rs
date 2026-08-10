@@ -1006,6 +1006,7 @@ impl ArchiveService {
                 completed.push(replay_session_id);
                 continue;
             };
+            self.runtime.refresh_replay_limit(&mut active.cursor);
             match active.cursor.poll(publication, 1) {
                 Ok(count) => work += count,
                 Err(ArchiveRuntimeError::ReplayOffer { .. }) => {

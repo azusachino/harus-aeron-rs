@@ -124,7 +124,7 @@ depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 ### v0.0.7 — aeron-archive
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
-**Managed-service status (2026-07-29):** catalog descriptor persistence, corrected
+**Managed-service status (2026-08-10):** catalog descriptor persistence, corrected
 term-aligned segment-file math, recording-signal values, bounded recording queries, and
 an in-memory recording/replay lifecycle are implemented. Bounded complete v13 SBE
 codecs cover connect, start/stop recording, replay/stop replay, listing requests, and
@@ -142,6 +142,12 @@ requested position/length bounds are validated, backpressure leaves the cursor i
 place, the correlated start response carries a replay-session ID, and `StopReplay`
 aborts an active session while remaining idempotent after completion. Completed replay
 publications linger briefly so subscribers can consume the final fragment.
+
+Replay follows the upstream all-and-follow sentinel for active recordings: a
+`ReplayRequest` with `length=-1` streams the currently written range and waits for
+later frames until the recording stops. `length=-2` remains a bounded snapshot of the
+currently available range. The real control-service test proves that a payload
+published after replay starts is delivered by the still-active replay.
 
 Recording control follows the upstream subscription lifecycle: `StartRecording`
 responds immediately with the Aeron subscription registration ID, active
@@ -179,9 +185,9 @@ service boundary. `Subscription::poll_image` keeps joined images isolated, and t
 runtime and control-service tests prove two images under one subscription produce
 separate descriptors and recording files. The Rust Media Driver now permits distinct
 IPC publication sessions on one stream while retaining same-session clash checks.
-The current replay path supports stopped recordings and bounded snapshots of the
-currently written range of active recordings, but does not follow future writes or
-support bounded-counter replay. It uses service-local session IDs rather than
+The current replay path supports stopped recordings, active `length=-1` follow, and
+bounded `length=-2` snapshots, but does not support bounded-counter replay. It uses
+service-local session IDs rather than
 upstream's composite replay/publication ID.
 Authentication, replication, detached segment operations, marks/counters, and the
 complete upstream test families remain open. Keep Archive ledger rows `todo` until
