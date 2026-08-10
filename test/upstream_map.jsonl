@@ -1,6 +1,6 @@
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ArchiveConductorTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ArchiveContextTest.java"}
-{"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ArchiveCountersTest.java"}
+{"layer": "archive", "rust_equivalent": "crates/archive/src/archive_counters.rs (Rust CountersManager replaces Aeron Counter mocks and omits Java version metadata)", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ArchiveCountersTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ArchiveMarkFileTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ArchiveMigrationUtils.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ArchiveMigration_2_3Test.java"}
