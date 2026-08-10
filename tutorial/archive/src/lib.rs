@@ -13,6 +13,7 @@ pub mod list_recordings_session;
 pub mod list_recording_by_id_session;
 pub mod list_recordings_for_uri_session;
 pub mod delete_segments_session;
+pub mod migration;
 pub mod recording_descriptor;
 pub mod recording_pos;
 pub mod recording_subscription_descriptor;

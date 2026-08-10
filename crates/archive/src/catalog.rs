@@ -37,7 +37,7 @@ impl Catalog {
     pub fn new() -> Self {
         Self {
             header: CatalogHeader {
-                version: 1,
+                version: 2,
                 length: 0,
                 next_recording_id: 1,
             },
@@ -92,6 +92,14 @@ impl Catalog {
 
     pub fn header(&self) -> &CatalogHeader {
         &self.header
+    }
+
+    pub(crate) fn set_version(&mut self, version: i32) {
+        self.header.version = version;
+    }
+
+    pub(crate) fn set_next_recording_id(&mut self, next_recording_id: i64) {
+        self.header.next_recording_id = next_recording_id;
     }
 
     pub fn update_stop_position(
@@ -231,6 +239,12 @@ impl Catalog {
                 file.write_all(&length.to_le_bytes())?;
                 file.write_all(bytes)?;
             }
+            let state = if self.is_recording_invalid(descriptor.recording_id) {
+                0
+            } else {
+                1
+            };
+            file.write_all(&[state])?;
         }
         file.sync_all()?;
         Ok(())
@@ -318,7 +332,23 @@ impl Catalog {
                 read_string()?,
                 read_string()?,
             );
-            catalog.add_recording(descriptor);
+            let recording_id = catalog.add_recording(descriptor);
+            if version >= 2 {
+                let mut state = [0u8; 1];
+                file.read_exact(&mut state)?;
+                match state[0] {
+                    0 => {
+                        catalog.change_state(recording_id, RecordingState::Invalid);
+                    }
+                    1 => {}
+                    _ => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid catalog recording state",
+                        ));
+                    }
+                }
+            }
         }
         let expected_next_recording_id = catalog
             .ordered_descriptors

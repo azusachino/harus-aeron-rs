@@ -199,9 +199,17 @@ impl ArchiveMarkFile {
     }
 
     pub fn signal_ready(&mut self, activity_timestamp: i64) -> Result<(), ArchiveMarkFileError> {
+        self.signal_ready_with_version(activity_timestamp, SEMANTIC_VERSION)
+    }
+
+    pub fn signal_ready_with_version(
+        &mut self,
+        activity_timestamp: i64,
+        version: i32,
+    ) -> Result<(), ArchiveMarkFileError> {
         if let Some(map) = self.map.as_mut() {
             write_i64(map, FIXED_BLOCK_OFFSET + 8, activity_timestamp);
-            write_i32(map, FIXED_BLOCK_OFFSET, SEMANTIC_VERSION);
+            write_i32(map, FIXED_BLOCK_OFFSET, version);
             self.force()?;
         }
         Ok(())
