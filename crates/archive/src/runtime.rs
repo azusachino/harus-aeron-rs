@@ -647,6 +647,8 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeron_client::protocol::{HDR_TYPE_DATA, TYPE_FIELD_OFFSET};
+    use agrona::AtomicBuffer;
 
     fn descriptor() -> RecordingDescriptor {
         RecordingDescriptor::new(
@@ -659,6 +661,27 @@ mod tests {
             4,
             5,
             128,
+            64,
+            32,
+            6,
+            8,
+            "aeron:ipc".into(),
+            "aeron:ipc".into(),
+            "source".into(),
+        )
+    }
+
+    fn writer_descriptor(recording_id: i64, segment_file_length: i32) -> RecordingDescriptor {
+        RecordingDescriptor::new(
+            1,
+            2,
+            recording_id,
+            0,
+            NULL_POSITION,
+            3,
+            0,
+            5,
+            segment_file_length,
             64,
             32,
             6,
@@ -682,6 +705,67 @@ mod tests {
         for base in [0, 128, 256] {
             std::fs::write(path.join(format!("7-{base}.rec")), vec![1_u8; 128]).unwrap();
         }
+    }
+
+    #[test]
+    fn recording_writer_writes_frames_and_rolls_segments() {
+        let path = segment_test_dir("writer");
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create writer directory");
+        let descriptor = writer_descriptor(13, 128);
+        let mut writer = RecordingWriter::open(&path, &descriptor).expect("open writer");
+
+        let mut frame = vec![0; 64];
+        let buffer = AtomicBuffer::new(&mut frame);
+        buffer.put_i32(0, 64);
+        buffer.put_i16(TYPE_FIELD_OFFSET, HDR_TYPE_DATA as i16);
+
+        for _ in 0..2 {
+            writer.write_frame(&buffer, 0).expect("write frame");
+        }
+        buffer.put_i32(0, 64);
+        writer
+            .write_frame(&buffer, 0)
+            .expect("roll to next segment");
+        writer.sync().expect("sync writer");
+
+        assert!(path.join(descriptor.segment_file_name(0)).exists());
+        assert!(path.join(descriptor.segment_file_name(128)).exists());
+        assert_eq!(
+            std::fs::metadata(path.join(descriptor.segment_file_name(0)))
+                .expect("first segment")
+                .len(),
+            128
+        );
+        assert_eq!(
+            std::fs::metadata(path.join(descriptor.segment_file_name(128)))
+                .expect("second segment")
+                .len(),
+            128
+        );
+        std::fs::remove_dir_all(path).expect("cleanup writer directory");
+    }
+
+    #[test]
+    fn recording_writer_rejects_short_frames() {
+        let path = segment_test_dir("writer-invalid");
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create writer directory");
+        let descriptor = writer_descriptor(14, 128);
+        let mut writer = RecordingWriter::open(&path, &descriptor).expect("open writer");
+
+        let mut frame = vec![0; 32];
+        let buffer = AtomicBuffer::new(&mut frame);
+        buffer.put_i32(0, 16);
+
+        assert!(matches!(
+            writer.write_frame(&buffer, 0),
+            Err(ArchiveRuntimeError::InvalidFrame {
+                position: 0,
+                length: 16
+            })
+        ));
+        std::fs::remove_dir_all(path).expect("cleanup writer directory");
     }
 
     #[test]

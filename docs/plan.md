@@ -137,6 +137,8 @@ bounded ListRecordingsForUriSession stream/channel filtering with retry and
 exhaustion signaling,
 real-runtime RecordingSession coverage for image-frame writes, stop persistence,
 and replay payloads (the Java mock event-proxy wiring remains outside this API),
+RecordingWriter frame validation and segment rollover (checksum, padding-frame,
+and interrupt-injection paths remain outside the current runtime configuration),
 ordered recording-id/catalog-offset indexing, corrected term-aligned
 segment-file math, recording-signal values, bounded recording queries,
 crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay
