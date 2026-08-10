@@ -1512,4 +1512,27 @@ mod tests {
             Err(ArchiveServiceError::InvalidContext(_))
         ));
     }
+
+    #[test]
+    fn context_uses_managed_service_defaults() {
+        let context = ArchiveContext::new("/tmp/aeron", "/tmp/archive");
+
+        assert_eq!(context.control_channel, DEFAULT_CONTROL_CHANNEL);
+        assert_eq!(context.control_stream_id, DEFAULT_CONTROL_STREAM_ID);
+        assert_eq!(context.client_id, DEFAULT_ARCHIVE_CLIENT_ID);
+        assert_eq!(context.idle_duration, Duration::from_millis(1));
+        assert!(context.validate().is_ok());
+    }
+
+    #[test]
+    fn context_rejects_an_empty_control_channel() {
+        let mut context = ArchiveContext::new("/tmp/aeron", "/tmp/archive");
+        context.control_channel.clear();
+
+        assert!(matches!(
+            context.validate(),
+            Err(ArchiveServiceError::InvalidContext(message))
+                if message == "control channel must not be empty"
+        ));
+    }
 }
