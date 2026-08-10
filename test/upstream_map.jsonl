@@ -11,7 +11,7 @@
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ArchiveToolTests.java"}
 {"layer": "archive", "rust_equivalent": "crates/archive/src/catalog_index.rs", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/CatalogIndexTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/CatalogTest.java"}
-{"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/CatalogViewTest.java"}
+{"layer": "archive", "rust_equivalent": "crates/archive/src/catalog_view.rs", "status": "done", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/CatalogViewTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ControlSessionAdapterTest.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ControlSessionAdapterV6Test.java"}
 {"layer": "archive", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-archive/src/test/java/io/aeron/archive/ControlSessionTest.java"}

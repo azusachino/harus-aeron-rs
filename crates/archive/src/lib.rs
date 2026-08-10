@@ -5,6 +5,7 @@
 //! reserve the module boundary.
 pub mod catalog;
 pub mod catalog_index;
+pub mod catalog_view;
 pub mod codecs;
 pub mod conductor;
 pub mod control_session;
