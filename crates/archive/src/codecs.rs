@@ -3,6 +3,7 @@
 //! The wire authority is `vendor/aeron/aeron-archive/src/main/resources/archive/
 //! aeron-archive-codecs.xml`. SBE messages consist of an eight-byte message header,
 //! a template-specific fixed block, and zero or more length-prefixed variable fields.
+//! Versioned request decoders also accept the shorter fixed blocks emitted by v6 clients.
 
 pub const SBE_SCHEMA_ID: u16 = 101;
 pub const SBE_SCHEMA_VERSION: u16 = 13;
@@ -298,6 +299,7 @@ pub struct ReplayRequest {
 
 impl ReplayRequest {
     pub const TEMPLATE_ID: u16 = ControlRequestType::Replay as u16;
+    pub const BLOCK_LENGTH_V6: u16 = 44;
     pub const BLOCK_LENGTH: u16 = 56;
 
     pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
@@ -319,8 +321,16 @@ impl ReplayRequest {
     }
 
     pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let header = MessageHeader::decode_from(frame)?;
+        let minimum_block_length = if header.version >= 10 {
+            Self::BLOCK_LENGTH
+        } else if header.version >= 7 {
+            48
+        } else {
+            Self::BLOCK_LENGTH_V6
+        };
         let (header, variable_offset) =
-            decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+            decode_message(frame, Self::TEMPLATE_ID, minimum_block_length)?;
         Ok(Self {
             control_session_id: get_i64(frame, 8),
             correlation_id: get_i64(frame, 16),
@@ -331,12 +341,12 @@ impl ReplayRequest {
             file_io_max_length: if header.version >= 7 {
                 get_i32(frame, 52)
             } else {
-                0
+                -1
             },
             replay_token: if header.version >= 10 {
                 get_i64(frame, 56)
             } else {
-                0
+                -1
             },
             replay_channel: decode_ascii(frame, variable_offset)?.0,
         })
@@ -364,6 +374,7 @@ pub struct ReplicateRequest2 {
 
 impl ReplicateRequest2 {
     pub const TEMPLATE_ID: u16 = ControlRequestType::ReplicateRequest2 as u16;
+    pub const BLOCK_LENGTH_V6: u16 = 60;
     pub const BLOCK_LENGTH: u16 = 68;
 
     pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
@@ -413,7 +424,15 @@ impl ReplicateRequest2 {
     }
 
     pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
-        let (header, mut offset) = decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        let header = MessageHeader::decode_from(frame)?;
+        let minimum_block_length = if header.version >= 8 {
+            Self::BLOCK_LENGTH
+        } else if header.version >= 7 {
+            64
+        } else {
+            Self::BLOCK_LENGTH_V6
+        };
+        let (header, mut offset) = decode_message(frame, Self::TEMPLATE_ID, minimum_block_length)?;
         let (src_control_channel, next) = decode_ascii(frame, offset)?;
         offset = next;
         let (live_destination, next) = decode_ascii(frame, offset)?;
@@ -505,6 +524,7 @@ pub struct BoundedReplayRequest {
 
 impl BoundedReplayRequest {
     pub const TEMPLATE_ID: u16 = ControlRequestType::BoundedReplay as u16;
+    pub const BLOCK_LENGTH_V6: u16 = 48;
     pub const BLOCK_LENGTH: u16 = 60;
 
     pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
@@ -527,8 +547,16 @@ impl BoundedReplayRequest {
     }
 
     pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let header = MessageHeader::decode_from(frame)?;
+        let minimum_block_length = if header.version >= 10 {
+            Self::BLOCK_LENGTH
+        } else if header.version >= 7 {
+            52
+        } else {
+            Self::BLOCK_LENGTH_V6
+        };
         let (header, variable_offset) =
-            decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+            decode_message(frame, Self::TEMPLATE_ID, minimum_block_length)?;
         Ok(Self {
             control_session_id: get_i64(frame, 8),
             correlation_id: get_i64(frame, 16),
@@ -540,12 +568,12 @@ impl BoundedReplayRequest {
             file_io_max_length: if header.version >= 7 {
                 get_i32(frame, 56)
             } else {
-                0
+                -1
             },
             replay_token: if header.version >= 10 {
                 get_i64(frame, 60)
             } else {
-                0
+                -1
             },
             replay_channel: decode_ascii(frame, variable_offset)?.0,
         })

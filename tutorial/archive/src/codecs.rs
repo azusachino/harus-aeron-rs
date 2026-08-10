@@ -36,6 +36,15 @@ pub struct StopRecordingRequest;
 pub struct ReplayRequest;
 
 #[allow(dead_code)]
+pub struct BoundedReplayRequest;
+
+#[allow(dead_code)]
+pub struct ReplicateRequest2;
+
+#[allow(dead_code)]
+pub struct ReplayTokenRequest;
+
+#[allow(dead_code)]
 pub struct StopReplayRequest;
 
 #[allow(dead_code)]

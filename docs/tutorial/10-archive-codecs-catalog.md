@@ -9,8 +9,8 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 - `crates/archive/src/recording_pos.rs`: recording-position counter key construction and lookup by recording/session and Archive ID.
 - `crates/archive/src/delete_segments_session.rs`: incremental segment deletion, maximum position parsing, and ordered delete signaling.
 - `crates/archive/src/checksum.rs`: CRC-32 and CRC-32C implementations, aliases, and type-safe custom checksum construction.
-- `crates/archive/src/codecs.rs`: bounded complete-message codecs for the v13 connect, start/stop/extend/truncate/purge recording, replay/stop replay, listing, recording-history position queries, find-last matching, and control-response SBE templates. Each frame uses the exact eight-byte message header, template-specific fixed block, and any required length-prefixed variable ASCII field.
-- `crates/archive/src/control_session_adapter.rs`: validates the SBE header and dispatches complete request frames by their real template IDs, including ReplicateRequest2 and ReplayTokenRequest.
+- `crates/archive/src/codecs.rs`: bounded complete-message codecs for the v13 connect, start/stop/extend/truncate/purge recording, replay/stop replay, listing, recording-history position queries, find-last matching, and control-response SBE templates. Each frame uses the exact eight-byte message header, template-specific fixed block, and any required length-prefixed variable ASCII field; versioned replay and replication requests also decode the shorter v6 fixed blocks with Aeron null-value defaults.
+- `crates/archive/src/control_session_adapter.rs`: validates the SBE header and dispatches complete request frames by their real template IDs, including ReplicateRequest2 and ReplayTokenRequest, while preserving v6 request compatibility.
 - `crates/archive/src/recording_descriptor.rs`: complete template-22 `RecordingDescriptor` codec with the 80-byte fixed block and three bounded variable ASCII fields.
 - `crates/archive/src/recording_subscription_descriptor.rs`: template-23 response codec for listing active recording subscription IDs, streams, and stripped channels.
 

@@ -273,4 +273,124 @@ mod tests {
             ControlRequest::ReplayToken(request)
         );
     }
+
+    #[test]
+    fn dispatches_version_6_requests_with_legacy_blocks() {
+        let replay = ReplayRequest {
+            control_session_id: 928_374,
+            correlation_id: 9_382_475,
+            recording_id: 9_827_345_897,
+            position: 982_374,
+            length: 0,
+            replay_stream_id: 9_832_475,
+            file_io_max_length: 4096,
+            replay_token: 17,
+            replay_channel: "aeron:ipc".into(),
+        };
+        let replay_frame = replay.encode().unwrap();
+        let replay = ControlSessionAdapter::decode(&legacy_frame(
+            &replay_frame,
+            ReplayRequest::BLOCK_LENGTH,
+            ReplayRequest::BLOCK_LENGTH_V6,
+            6,
+            replay_frame.len() - MessageHeader::SIZE - usize::from(ReplayRequest::BLOCK_LENGTH),
+        ))
+        .unwrap();
+        let ControlRequest::Replay(replay) = replay else {
+            panic!("expected ReplayRequest");
+        };
+        assert_eq!(replay.file_io_max_length, -1);
+        assert_eq!(replay.replay_token, -1);
+        assert_eq!(replay.replay_channel, "aeron:ipc");
+
+        let bounded = BoundedReplayRequest {
+            control_session_id: 928_374,
+            correlation_id: 9_382_475,
+            recording_id: 9_827_345_897,
+            position: 982_374,
+            length: 0,
+            limit_counter_id: 92_734,
+            replay_stream_id: 9_832_475,
+            file_io_max_length: 4096,
+            replay_token: 17,
+            replay_channel: "aeron:ipc?alias=replay".into(),
+        };
+        let bounded_frame = bounded.encode().unwrap();
+        let bounded = ControlSessionAdapter::decode(&legacy_frame(
+            &bounded_frame,
+            BoundedReplayRequest::BLOCK_LENGTH,
+            BoundedReplayRequest::BLOCK_LENGTH_V6,
+            6,
+            bounded_frame.len()
+                - MessageHeader::SIZE
+                - usize::from(BoundedReplayRequest::BLOCK_LENGTH),
+        ))
+        .unwrap();
+        let ControlRequest::BoundedReplay(bounded) = bounded else {
+            panic!("expected BoundedReplayRequest");
+        };
+        assert_eq!(bounded.file_io_max_length, -1);
+        assert_eq!(bounded.replay_token, -1);
+        assert_eq!(bounded.replay_channel, "aeron:ipc?alias=replay");
+
+        let replicate = ReplicateRequest2 {
+            control_session_id: 928_374,
+            correlation_id: 9_382_475,
+            src_recording_id: 1_234_234,
+            dst_recording_id: 2_532_453_245,
+            stop_position: 2_315_345,
+            channel_tag_id: 234,
+            subscription_tag_id: 235,
+            src_control_stream_id: 982_374,
+            file_io_max_length: 4096,
+            replication_session_id: 17,
+            src_control_channel: "src".into(),
+            live_destination: "live".into(),
+            replication_channel: "replication".into(),
+            encoded_credentials: b"some password".to_vec(),
+            src_response_channel: "response".into(),
+        };
+        let replicate_frame = replicate.encode().unwrap();
+        let variable_length = [
+            replicate.src_control_channel.as_str(),
+            replicate.live_destination.as_str(),
+            replicate.replication_channel.as_str(),
+        ]
+        .into_iter()
+        .map(|value| 4 + value.len())
+        .sum();
+        let replicate = ControlSessionAdapter::decode(&legacy_frame(
+            &replicate_frame,
+            ReplicateRequest2::BLOCK_LENGTH,
+            ReplicateRequest2::BLOCK_LENGTH_V6,
+            6,
+            variable_length,
+        ))
+        .unwrap();
+        let ControlRequest::Replicate(replicate) = replicate else {
+            panic!("expected ReplicateRequest2");
+        };
+        assert_eq!(replicate.file_io_max_length, -1);
+        assert_eq!(replicate.replication_session_id, -1);
+        assert!(replicate.encoded_credentials.is_empty());
+        assert!(replicate.src_response_channel.is_empty());
+    }
+
+    fn legacy_frame(
+        frame: &[u8],
+        full_block_length: u16,
+        legacy_block_length: u16,
+        version: u16,
+        variable_length: usize,
+    ) -> Vec<u8> {
+        let full_variable_offset = MessageHeader::SIZE + usize::from(full_block_length);
+        let legacy_variable_offset = MessageHeader::SIZE + usize::from(legacy_block_length);
+        let mut legacy = vec![0; legacy_variable_offset + variable_length];
+        legacy[..legacy_variable_offset].copy_from_slice(&frame[..legacy_variable_offset]);
+        legacy[0..2].copy_from_slice(&legacy_block_length.to_le_bytes());
+        legacy[6..8].copy_from_slice(&version.to_le_bytes());
+        legacy[legacy_variable_offset..]
+            .copy_from_slice(&frame[full_variable_offset..full_variable_offset + variable_length]);
+        legacy
+    }
 }
