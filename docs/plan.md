@@ -133,6 +133,8 @@ ArchiveConductor stripped-channel identity construction, read-only catalog views
 incremental ListRecordingsSession descriptor/unknown/abort behavior,
 retryable ListRecordingByIdSession descriptor publication with catalog validity
 re-checks,
+bounded ListRecordingsForUriSession stream/channel filtering with retry and
+exhaustion signaling,
 ordered recording-id/catalog-offset indexing, corrected term-aligned
 segment-file math, recording-signal values, bounded recording queries,
 crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay
