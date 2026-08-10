@@ -132,6 +132,8 @@ replay/replication request framing, ControlSession abort/listing lifecycle,
 ArchiveConductor stripped-channel identity construction, read-only catalog views,
 bounded read-only ArchiveTool `describe` and `describe-all` inspection, including
 separate mark-file directory link resolution,
+catalog state transitions, invalid-record compaction, orphan cleanup, and bounded
+descriptor verification,
 incremental ListRecordingsSession descriptor/unknown/abort behavior,
 retryable ListRecordingByIdSession descriptor publication with catalog validity
 re-checks,

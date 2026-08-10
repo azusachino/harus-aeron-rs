@@ -19,7 +19,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 - `crates/archive/src/catalog.rs`: `CatalogHeader` and `Catalog` manager handling sequential `recording_id` allocation, crash-recovery validation of the next ID, and descriptor indexing.
 - `crates/archive/src/catalog_index.rs`: ordered recording-id to catalog-offset index with monotonic insertion, binary lookup, growth, and removal semantics.
 - `crates/archive/src/catalog_view.rs`: read-only listing of all or one persisted recording descriptor.
-- `crates/archive/src/archive_tool.rs`: bounded read-only `describe` and `describe-all` catalog inspection commands with separate mark-file link resolution; repair, capacity mutation, and segment verification commands remain outside the current boundary.
+- `crates/archive/src/archive_tool.rs`: bounded catalog inspection and administration with `describe`, `describe-all`, state transitions, invalid-record compaction, unknown-segment cleanup, separate mark-file link resolution, and descriptor verification; frame-level repair/checksum, capacity mutation, and detached-range verification remain outside the current boundary.
 - `crates/archive/tests/migration_utils.rs`: legacy v2 mark-file and catalog-frame fixtures for migration coverage.
 - `crates/archive/src/migration.rs`: v2.1.0 mark/catalog conversion, migration timestamp guards, descriptor-gap preservation, and v3.0.0 mark-file versioning.
 - `crates/archive/src/archive_mark_file.rs`: SBE-compatible `archive-mark.dat` layout, aligned file sizing, metadata channels, liveness timestamps, ready/terminated signaling, and error-buffer access; upstream migration and process-ownership machinery remains outside the current boundary.

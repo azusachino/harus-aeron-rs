@@ -4,11 +4,14 @@ use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use aeron_client::logbuffer::FRAME_ALIGNMENT;
+
 use crate::archive_mark_file::{ArchiveMarkFile, ArchiveMarkFileError, FILENAME, LINK_FILENAME};
 use crate::catalog::{Catalog, RecordingState};
 use crate::recording_descriptor::RecordingDescriptor;
 
 const CATALOG_FILE_NAME: &str = "catalog.dat";
+const SEGMENT_FILE_SUFFIX: &str = ".rec";
 
 #[derive(Debug)]
 pub enum ArchiveToolError {
@@ -16,6 +19,12 @@ pub enum ArchiveToolError {
     Io(std::io::Error),
     MarkFile(ArchiveMarkFileError),
     RecordingNotFound(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationReport {
+    pub checked_recordings: usize,
+    pub invalid_recordings: Vec<i64>,
 }
 
 impl fmt::Display for ArchiveToolError {
@@ -140,6 +149,168 @@ pub fn resolve_mark_file(archive_dir: &Path) -> Result<Option<PathBuf>, ArchiveT
 
     let default_path = archive_dir.join(FILENAME);
     Ok(default_path.exists().then_some(default_path))
+}
+
+pub fn catalog_capacity(archive_dir: &Path) -> Result<u64, ArchiveToolError> {
+    Ok(std::fs::metadata(archive_dir.join(CATALOG_FILE_NAME))?.len())
+}
+
+pub fn mark_recording_invalid(
+    archive_dir: &Path,
+    recording_id: i64,
+) -> Result<(), ArchiveToolError> {
+    change_recording_state(
+        archive_dir,
+        recording_id,
+        RecordingState::Valid,
+        RecordingState::Invalid,
+    )
+}
+
+pub fn mark_recording_valid(archive_dir: &Path, recording_id: i64) -> Result<(), ArchiveToolError> {
+    change_recording_state(
+        archive_dir,
+        recording_id,
+        RecordingState::Invalid,
+        RecordingState::Valid,
+    )
+}
+
+fn change_recording_state(
+    archive_dir: &Path,
+    recording_id: i64,
+    expected: RecordingState,
+    target: RecordingState,
+) -> Result<(), ArchiveToolError> {
+    let catalog = load_catalog(archive_dir)?;
+    match catalog.recording_state(recording_id) {
+        None => return Err(ArchiveToolError::RecordingNotFound(recording_id)),
+        Some(state) if state != expected => {
+            return Err(ArchiveToolError::InvalidArguments(format!(
+                "recording {recording_id} is {}, expected {}",
+                state_name(Some(state)),
+                state_name(Some(expected)),
+            )));
+        }
+        Some(_) => {}
+    }
+    if !catalog.change_state(recording_id, target) {
+        return Err(ArchiveToolError::InvalidArguments(format!(
+            "failed to change state for recording {recording_id}"
+        )));
+    }
+    catalog.save_to_file(&archive_dir.join(CATALOG_FILE_NAME))?;
+    Ok(())
+}
+
+pub fn compact(archive_dir: &Path) -> Result<usize, ArchiveToolError> {
+    let mut catalog = load_catalog(archive_dir)?;
+    let invalid_recordings = catalog
+        .recordings()
+        .iter()
+        .filter(|descriptor| {
+            catalog.recording_state(descriptor.recording_id) == Some(RecordingState::Invalid)
+        })
+        .map(|descriptor| descriptor.recording_id)
+        .collect::<Vec<_>>();
+
+    for recording_id in &invalid_recordings {
+        catalog.remove_recording(*recording_id);
+        remove_segment_files(archive_dir, *recording_id)?;
+    }
+    if !invalid_recordings.is_empty() {
+        catalog.save_to_file(&archive_dir.join(CATALOG_FILE_NAME))?;
+    }
+    Ok(invalid_recordings.len())
+}
+
+pub fn delete_orphaned_segments(
+    archive_dir: &Path,
+    target_recording_id: Option<i64>,
+) -> Result<usize, ArchiveToolError> {
+    let catalog = load_catalog(archive_dir)?;
+    let mut deleted = 0;
+    for entry in std::fs::read_dir(archive_dir)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(recording_id) = parse_segment_recording_id(&path) else {
+            continue;
+        };
+        if target_recording_id.is_some_and(|target| target != recording_id)
+            || catalog.get_recording(recording_id).is_some()
+        {
+            continue;
+        }
+        std::fs::remove_file(path)?;
+        deleted += 1;
+    }
+    Ok(deleted)
+}
+
+pub fn verify(archive_dir: &Path) -> Result<VerificationReport, ArchiveToolError> {
+    let catalog = load_catalog(archive_dir)?;
+    let invalid_recordings = catalog
+        .recordings()
+        .iter()
+        .filter(|descriptor| !descriptor_is_valid(descriptor))
+        .map(|descriptor| descriptor.recording_id)
+        .collect::<Vec<_>>();
+    Ok(VerificationReport {
+        checked_recordings: catalog.recordings().len(),
+        invalid_recordings,
+    })
+}
+
+pub fn verify_and_mark_invalid(archive_dir: &Path) -> Result<VerificationReport, ArchiveToolError> {
+    let report = verify(archive_dir)?;
+    if report.invalid_recordings.is_empty() {
+        return Ok(report);
+    }
+
+    let catalog = load_catalog(archive_dir)?;
+    for recording_id in &report.invalid_recordings {
+        if catalog.recording_state(*recording_id) == Some(RecordingState::Valid) {
+            catalog.change_state(*recording_id, RecordingState::Invalid);
+        }
+    }
+    catalog.save_to_file(&archive_dir.join(CATALOG_FILE_NAME))?;
+    Ok(report)
+}
+
+fn descriptor_is_valid(descriptor: &RecordingDescriptor) -> bool {
+    descriptor.start_position >= 0
+        && descriptor.start_position % i64::from(FRAME_ALIGNMENT) == 0
+        && (descriptor.stop_position == -1
+            || (descriptor.stop_position >= descriptor.start_position
+                && descriptor.stop_position % i64::from(FRAME_ALIGNMENT) == 0))
+        && descriptor.segment_file_length > 0
+        && descriptor.term_buffer_length > 0
+        && descriptor.mtu_length > 0
+        && descriptor.segment_file_length % descriptor.term_buffer_length == 0
+}
+
+fn remove_segment_files(archive_dir: &Path, recording_id: i64) -> Result<usize, ArchiveToolError> {
+    let mut removed = 0;
+    for entry in std::fs::read_dir(archive_dir)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        if parse_segment_recording_id(&path) == Some(recording_id) {
+            std::fs::remove_file(path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn parse_segment_recording_id(path: &Path) -> Option<i64> {
+    let name = path.file_name()?.to_str()?;
+    let name = name.strip_suffix(SEGMENT_FILE_SUFFIX)?;
+    let (recording_id, _) = name.split_once('-')?;
+    recording_id.parse().ok()
 }
 
 fn open_mark_file(archive_dir: &Path) -> Result<Option<ArchiveMarkFile>, ArchiveToolError> {
