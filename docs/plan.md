@@ -135,6 +135,8 @@ retryable ListRecordingByIdSession descriptor publication with catalog validity
 re-checks,
 bounded ListRecordingsForUriSession stream/channel filtering with retry and
 exhaustion signaling,
+real-runtime RecordingSession coverage for image-frame writes, stop persistence,
+and replay payloads (the Java mock event-proxy wiring remains outside this API),
 ordered recording-id/catalog-offset indexing, corrected term-aligned
 segment-file math, recording-signal values, bounded recording queries,
 crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay

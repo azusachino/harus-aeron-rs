@@ -172,6 +172,11 @@ fn records_each_image_into_its_own_session_under_one_subscription() {
         .expect("second descriptor");
     assert_eq!(first_descriptor.session_id, 41);
     assert_eq!(second_descriptor.session_id, 42);
+    assert!(
+        archive_dir
+            .join(first_descriptor.segment_file_name(0))
+            .exists()
+    );
 
     std::fs::remove_dir_all(archive_dir).expect("cleanup");
 }
