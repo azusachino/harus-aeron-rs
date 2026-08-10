@@ -1,6 +1,6 @@
 //! Learner stub for incremental Archive catalog listing.
 //!
-//! Reference implementation: `crates/archive/src/list_recordings_session.rs`.
+//! Reference implementation: `crates/archive/src/service/list_recordings_session.rs`.
 
 #[allow(dead_code)]
 pub struct ListRecordingsSession;

@@ -2,21 +2,7 @@
 //!
 //! Reference implementation: `crates/archive`. Course chapter: `docs/tutorial/`.
 
-pub mod catalog;
-pub mod archive_mark_file;
-pub mod archive_tool;
-pub mod client_context;
-pub mod codecs;
-pub mod conductor;
-pub mod control_session;
-pub mod control_session_adapter;
-pub mod list_recordings_session;
-pub mod list_recording_by_id_session;
-pub mod list_recordings_for_uri_session;
-pub mod delete_segments_session;
-pub mod migration;
-pub mod recording_descriptor;
-pub mod recording_pos;
-pub mod recording_subscription_descriptor;
-pub mod runtime;
+pub mod admin;
+pub mod protocol;
 pub mod service;
+pub mod storage;

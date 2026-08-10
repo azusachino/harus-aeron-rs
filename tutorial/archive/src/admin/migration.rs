@@ -1,6 +1,6 @@
 //! Learner stub for Archive storage migration.
 //!
-//! Reference implementation: `crates/archive/src/migration.rs`.
+//! Reference implementation: `crates/archive/src/admin/migration.rs`.
 
 #[allow(dead_code)]
 pub fn migrate_v2_archive() {

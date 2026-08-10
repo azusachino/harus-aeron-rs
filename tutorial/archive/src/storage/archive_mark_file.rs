@@ -1,6 +1,6 @@
 //! Learner stub for the Archive mark file.
 //!
-//! Reference implementation: `crates/archive/src/archive_mark_file.rs`.
+//! Reference implementation: `crates/archive/src/storage/archive_mark_file.rs`.
 
 #[allow(dead_code)]
 pub struct ArchiveMarkFile;

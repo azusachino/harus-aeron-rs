@@ -1,6 +1,6 @@
 //! Learner stub for Catalog.
 //!
-//! Reference implementation: `crates/archive/src/catalog.rs`.
+//! Reference implementation: `crates/archive/src/storage/catalog.rs`.
 
 #[allow(dead_code)]
 pub struct Catalog;

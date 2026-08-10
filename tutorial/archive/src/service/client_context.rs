@@ -1,6 +1,6 @@
 //! Learner stub for Archive client control-channel configuration.
 //!
-//! Reference implementation: `crates/archive/src/client_context.rs`.
+//! Reference implementation: `crates/archive/src/service/client_context.rs`.
 
 #[allow(dead_code)]
 pub struct ArchiveClientContext;

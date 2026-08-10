@@ -1,6 +1,6 @@
 //! Learner stub for ArchiveConductor.
 //!
-//! Reference implementation: `crates/archive/src/conductor.rs`.
+//! Reference implementation: `crates/archive/src/service/conductor.rs`.
 
 #[allow(dead_code)]
 pub struct ArchiveConductor;

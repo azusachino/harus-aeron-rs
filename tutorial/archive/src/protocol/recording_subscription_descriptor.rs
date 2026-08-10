@@ -1,6 +1,6 @@
 //! Learner stub for the recording-subscription descriptor response.
 //!
-//! Reference implementation: `crates/archive/src/recording_subscription_descriptor.rs`.
+//! Reference implementation: `crates/archive/src/protocol/recording_subscription_descriptor.rs`.
 
 #[allow(dead_code)]
 pub struct RecordingSubscriptionDescriptor;

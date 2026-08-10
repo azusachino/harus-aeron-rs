@@ -1,6 +1,6 @@
 //! Learner stub for the managed Archive service.
 //!
-//! Reference implementation: `crates/archive/src/service.rs`.
+//! Reference implementation: `crates/archive/src/service/archive_service.rs`.
 
 #[allow(dead_code)]
 pub struct ArchiveContext;
