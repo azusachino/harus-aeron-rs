@@ -71,6 +71,7 @@ pub struct ReplayCursor {
     descriptor: RecordingDescriptor,
     position: i64,
     limit: i64,
+    max_limit: i64,
     follow: bool,
 }
 
@@ -85,6 +86,18 @@ impl ReplayCursor {
 
     pub fn limit(&self) -> i64 {
         self.limit
+    }
+
+    pub fn refresh_counter_limit(&mut self, counter_limit: i64) {
+        self.limit = self.max_limit.min(counter_limit).max(self.position);
+    }
+
+    pub fn set_counter_limit(&mut self, counter_limit: i64) {
+        if self.follow {
+            self.follow = false;
+            self.max_limit = i64::MAX;
+        }
+        self.refresh_counter_limit(counter_limit);
     }
 
     pub fn is_complete(&self) -> bool {
@@ -423,6 +436,7 @@ impl ArchiveRuntime {
             descriptor,
             position,
             limit,
+            max_limit: limit,
             follow,
         })
     }

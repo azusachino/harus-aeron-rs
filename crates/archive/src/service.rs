@@ -9,7 +9,9 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use aeron_client::cnc_file::{CNC_FILE, CncFile};
+use aeron_client::cnc_file::{
+    CNC_FILE, COUNTER_METADATA_LENGTH, COUNTER_RECORD_ALLOCATED, COUNTER_VALUE_LENGTH, CncFile,
+};
 use aeron_client::conductor::ClientConductor;
 use aeron_client::driver_proxy::DriverProxy;
 use aeron_client::error::AeronError;
@@ -101,6 +103,7 @@ struct PendingReplay {
     recording_id: i64,
     position: i64,
     length: i64,
+    limit_counter_id: Option<i32>,
 }
 
 struct ActiveRecording {
@@ -114,6 +117,7 @@ struct ActiveRecording {
 struct ActiveReplay {
     publication_id: i64,
     cursor: ReplayCursor,
+    limit_counter_id: Option<i32>,
 }
 
 struct LingeringReplayPublication {
@@ -128,6 +132,7 @@ struct QueuedResponse {
 
 pub struct ArchiveService {
     context: ArchiveContext,
+    cnc: CncFile,
     client: ClientConductor<'static>,
     runtime: ArchiveRuntime,
     control_subscription_id: i64,
@@ -148,11 +153,13 @@ impl ArchiveService {
     pub fn launch(context: ArchiveContext) -> Result<Self, ArchiveServiceError> {
         context.validate()?;
         let mut client = connect_client(&context.aeron_directory, context.client_id)?;
+        let cnc = CncFile::map_existing(context.aeron_directory.join(CNC_FILE))?;
         let control_subscription_id =
             client.add_subscription(&context.control_channel, context.control_stream_id)?;
         let runtime = ArchiveRuntime::open(&context.archive_directory)?;
         Ok(Self {
             context,
+            cnc,
             client,
             runtime,
             control_subscription_id,
@@ -352,6 +359,36 @@ impl ArchiveService {
                     recording_id: request.recording_id,
                     position: request.position,
                     length: request.length,
+                    limit_counter_id: None,
+                });
+            }
+            ControlRequest::BoundedReplay(request) => {
+                if !self.sessions.contains_key(&request.control_session_id) {
+                    return Ok(());
+                }
+                if self.counter_value(request.limit_counter_id).is_none() {
+                    self.queue_session_response(
+                        request.control_session_id,
+                        error(
+                            request.control_session_id,
+                            request.correlation_id,
+                            ControlResponseCode::Error,
+                            "replay limit counter is unavailable",
+                        ),
+                    )?;
+                    return Ok(());
+                }
+                let publication_id = self
+                    .client
+                    .add_exclusive_publication(&request.replay_channel, request.replay_stream_id)?;
+                self.pending_replays.push(PendingReplay {
+                    publication_id,
+                    control_session_id: request.control_session_id,
+                    correlation_id: request.correlation_id,
+                    recording_id: request.recording_id,
+                    position: request.position,
+                    length: request.length,
+                    limit_counter_id: Some(request.limit_counter_id),
                 });
             }
             ControlRequest::StopReplay(request) => {
@@ -956,11 +993,30 @@ impl ArchiveService {
         let count = ready.len();
         for index in ready.into_iter().rev() {
             let pending = self.pending_replays.swap_remove(index);
+            if let Some(limit_counter_id) = pending.limit_counter_id {
+                if self.counter_value(limit_counter_id).is_none() {
+                    self.queue_session_response(
+                        pending.control_session_id,
+                        error(
+                            pending.control_session_id,
+                            pending.correlation_id,
+                            ControlResponseCode::Error,
+                            "replay limit counter is unavailable",
+                        ),
+                    )?;
+                    continue;
+                }
+            }
             let result =
                 self.runtime
                     .start_replay(pending.recording_id, pending.position, pending.length);
             let response = match result {
-                Ok(cursor) => {
+                Ok(mut cursor) => {
+                    if let Some(limit_counter_id) = pending.limit_counter_id {
+                        if let Some(limit) = self.counter_value(limit_counter_id) {
+                            cursor.set_counter_limit(limit);
+                        }
+                    }
                     let replay_session_id = self.next_replay_session_id;
                     self.next_replay_session_id += 1;
                     self.active_replays.insert(
@@ -968,6 +1024,7 @@ impl ArchiveService {
                         ActiveReplay {
                             publication_id: pending.publication_id,
                             cursor,
+                            limit_counter_id: pending.limit_counter_id,
                         },
                     );
                     ok(
@@ -999,6 +1056,11 @@ impl ArchiveService {
         let mut work = 0;
         let mut completed = Vec::new();
         for replay_session_id in replay_session_ids {
+            let limit = self
+                .active_replays
+                .get(&replay_session_id)
+                .and_then(|active| active.limit_counter_id)
+                .and_then(|counter_id| self.counter_value(counter_id));
             let Some(active) = self.active_replays.get_mut(&replay_session_id) else {
                 continue;
             };
@@ -1007,6 +1069,9 @@ impl ArchiveService {
                 continue;
             };
             self.runtime.refresh_replay_limit(&mut active.cursor);
+            if let Some(limit) = limit {
+                active.cursor.refresh_counter_limit(limit);
+            }
             match active.cursor.poll(publication, 1) {
                 Ok(count) => work += count,
                 Err(ArchiveRuntimeError::ReplayOffer { .. }) => {
@@ -1059,6 +1124,29 @@ impl ArchiveService {
             });
         }
         Ok(())
+    }
+
+    fn counter_value(&self, counter_id: i32) -> Option<i64> {
+        if counter_id < 0 {
+            return None;
+        }
+        let counter_id = counter_id as usize;
+        let metadata_offset = counter_id.checked_mul(COUNTER_METADATA_LENGTH)?;
+        let value_offset = counter_id.checked_mul(COUNTER_VALUE_LENGTH)?;
+        if metadata_offset + 4 > self.cnc.counters_metadata_length()
+            || value_offset + 8 > self.cnc.counters_values_length()
+        {
+            return None;
+        }
+        let metadata = self.cnc.counters_metadata_buffer();
+        if metadata.get_i32_volatile(metadata_offset) != COUNTER_RECORD_ALLOCATED {
+            return None;
+        }
+        Some(
+            self.cnc
+                .counters_values_buffer()
+                .get_i64_volatile(value_offset),
+        )
     }
 
     fn queue_descriptors(
@@ -1348,6 +1436,9 @@ fn request_key(request: &ControlRequest) -> (u16, i64, i64) {
             (14, request.control_session_id, request.correlation_id)
         }
         ControlRequest::Replay(request) => (6, request.control_session_id, request.correlation_id),
+        ControlRequest::BoundedReplay(request) => {
+            (18, request.control_session_id, request.correlation_id)
+        }
         ControlRequest::StopReplay(request) => {
             (7, request.control_session_id, request.correlation_id)
         }

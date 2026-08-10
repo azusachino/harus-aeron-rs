@@ -109,6 +109,7 @@ pub enum ControlRequestType {
     StopPosition = 15,
     FindLastMatchingRecording = 16,
     ListRecordingSubscriptions = 17,
+    BoundedReplay = 18,
     StartPosition = 52,
     StartRecordingV2 = 63,
     ExtendRecordingV2 = 64,
@@ -332,6 +333,69 @@ impl ReplayRequest {
             },
             replay_token: if header.version >= 10 {
                 get_i64(frame, 56)
+            } else {
+                0
+            },
+            replay_channel: decode_ascii(frame, variable_offset)?.0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedReplayRequest {
+    pub control_session_id: i64,
+    pub correlation_id: i64,
+    pub recording_id: i64,
+    pub position: i64,
+    pub length: i64,
+    pub limit_counter_id: i32,
+    pub replay_stream_id: i32,
+    pub file_io_max_length: i32,
+    pub replay_token: i64,
+    pub replay_channel: String,
+}
+
+impl BoundedReplayRequest {
+    pub const TEMPLATE_ID: u16 = ControlRequestType::BoundedReplay as u16;
+    pub const BLOCK_LENGTH: u16 = 60;
+
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        encode_var_message(
+            Self::TEMPLATE_ID,
+            Self::BLOCK_LENGTH,
+            &self.replay_channel,
+            |frame| {
+                put_i64(frame, 8, self.control_session_id);
+                put_i64(frame, 16, self.correlation_id);
+                put_i64(frame, 24, self.recording_id);
+                put_i64(frame, 32, self.position);
+                put_i64(frame, 40, self.length);
+                put_i32(frame, 48, self.limit_counter_id);
+                put_i32(frame, 52, self.replay_stream_id);
+                put_i32(frame, 56, self.file_io_max_length);
+                put_i64(frame, 60, self.replay_token);
+            },
+        )
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let (header, variable_offset) =
+            decode_message(frame, Self::TEMPLATE_ID, Self::BLOCK_LENGTH)?;
+        Ok(Self {
+            control_session_id: get_i64(frame, 8),
+            correlation_id: get_i64(frame, 16),
+            recording_id: get_i64(frame, 24),
+            position: get_i64(frame, 32),
+            length: get_i64(frame, 40),
+            limit_counter_id: get_i32(frame, 48),
+            replay_stream_id: get_i32(frame, 52),
+            file_io_max_length: if header.version >= 7 {
+                get_i32(frame, 56)
+            } else {
+                0
+            },
+            replay_token: if header.version >= 10 {
+                get_i64(frame, 60)
             } else {
                 0
             },
@@ -1267,6 +1331,23 @@ mod tests {
         assert_eq!(
             ControlResponse::decode(&response.encode().unwrap()).unwrap(),
             response
+        );
+
+        let bounded_replay = BoundedReplayRequest {
+            control_session_id: 7,
+            correlation_id: 55,
+            recording_id: 3,
+            position: 0,
+            length: i64::MAX,
+            limit_counter_id: 17,
+            replay_stream_id: 1003,
+            file_io_max_length: 4096,
+            replay_token: 99,
+            replay_channel: "aeron:ipc".into(),
+        };
+        assert_eq!(
+            BoundedReplayRequest::decode(&bounded_replay.encode().unwrap()).unwrap(),
+            bounded_replay
         );
     }
 

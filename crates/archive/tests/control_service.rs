@@ -3,13 +3,13 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aeron_archive::codecs::{
-    ConnectRequest, ControlResponse, ControlResponseCode, ExtendRecordingRequestV2,
-    FindLastMatchingRecordingRequest, ListRecordingRequest, ListRecordingSubscriptionsRequest,
-    ListRecordingsForUriRequest, ListRecordingsRequest, MaxRecordedPositionRequest,
-    PROTOCOL_SEMANTIC_VERSION, PurgeRecordingRequest, RecordingPositionRequest, ReplayRequest,
-    SourceLocation, StartPositionRequest, StartRecordingRequest, StartRecordingRequestV2,
-    StopPositionRequest, StopRecordingSubscriptionRequest, StopReplayRequest,
-    TruncateRecordingRequest,
+    BoundedReplayRequest, ConnectRequest, ControlResponse, ControlResponseCode,
+    ExtendRecordingRequestV2, FindLastMatchingRecordingRequest, ListRecordingRequest,
+    ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest, ListRecordingsRequest,
+    MaxRecordedPositionRequest, PROTOCOL_SEMANTIC_VERSION, PurgeRecordingRequest,
+    RecordingPositionRequest, ReplayRequest, SourceLocation, StartPositionRequest,
+    StartRecordingRequest, StartRecordingRequestV2, StopPositionRequest,
+    StopRecordingSubscriptionRequest, StopReplayRequest, TruncateRecordingRequest,
 };
 use aeron_archive::recording_descriptor::RecordingDescriptor;
 use aeron_archive::recording_subscription_descriptor::RecordingSubscriptionDescriptor;
@@ -32,6 +32,7 @@ const INVALID_REPLAY_STREAM: i32 = 706;
 const LIVE_FOLLOW_REPLAY_STREAM: i32 = 709;
 const EMPTY_RECORDING_STREAM: i32 = 710;
 const EMPTY_REPLAY_STREAM: i32 = 711;
+const COUNTER_REPLAY_STREAM: i32 = 712;
 
 fn client(driver: &MediaDriver, client_id: i64) -> ClientConductor<'static> {
     let ring = ManyToOneRingBuffer::new(driver.cnc().to_driver_buffer()).expect("driver ring");
@@ -1634,6 +1635,229 @@ fn rejects_empty_all_and_stop_replay_over_control_plane() {
 
     let _ = external.remove_subscription(replay_subscription);
     let _ = external.remove_publication(empty_publication);
+    std::fs::remove_dir_all(archive_dir).expect("cleanup");
+}
+
+#[test]
+fn replays_to_a_counter_bound_over_the_control_plane() {
+    let archive_dir = archive_dir();
+    let _ = std::fs::remove_dir_all(&archive_dir);
+    let mut driver = MediaDriver::launch(Configuration {
+        ipc_term_buffer_length: TERM_MIN_LENGTH as usize,
+        ..Configuration::default()
+    })
+    .expect("driver");
+    let mut archive = ArchiveService::launch(ArchiveContext::new(driver.aeron_dir(), &archive_dir))
+        .expect("archive");
+    let mut external = client(&driver, 8_004);
+    let control_publication = external
+        .add_publication("aeron:ipc", CONTROL_STREAM)
+        .expect("control publication");
+    let response_stream = RESPONSE_STREAM + 30;
+    let response_subscription = external
+        .add_subscription("aeron:ipc", response_stream)
+        .expect("response subscription");
+    await_resources(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        response_subscription,
+    );
+    let session_id = connect(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        response_subscription,
+        1,
+        response_stream,
+    );
+    let live_publication = external
+        .add_publication("aeron:ipc", COUNTER_REPLAY_STREAM)
+        .expect("live publication");
+    let mut start = StartRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 2,
+        stream_id: COUNTER_REPLAY_STREAM,
+        source_location: SourceLocation::Local,
+        channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("start encode");
+    while !offer(&external, control_publication, &mut start) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let subscription_id = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        2,
+    )
+    .relevant_id;
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+
+    let payloads = [
+        b"counter-bounded-first".to_vec(),
+        b"counter-bounded-second".to_vec(),
+        b"counter-bounded-third".to_vec(),
+    ];
+    for payload in &payloads {
+        let mut bytes = payload.clone();
+        while !offer(&external, live_publication, &mut bytes) {
+            cycle(&mut driver, &mut archive, &mut external);
+        }
+    }
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+
+    let mut stop = StopRecordingSubscriptionRequest {
+        control_session_id: session_id,
+        correlation_id: 3,
+        subscription_id,
+    }
+    .encode()
+    .expect("stop encode");
+    while !offer(&external, control_publication, &mut stop) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            3,
+        )
+        .code,
+        ControlResponseCode::Ok
+    );
+
+    let mut list = ListRecordingsRequest {
+        control_session_id: session_id,
+        correlation_id: 4,
+        from_recording_id: 0,
+        record_count: 1,
+    }
+    .encode()
+    .expect("list encode");
+    while !offer(&external, control_publication, &mut list) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let (recordings, terminal) = await_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        4,
+    );
+    assert!(terminal.is_none());
+    assert_eq!(recordings.len(), 1);
+    let recording = &recordings[0];
+    assert!(recording.stop_position > recording.start_position);
+
+    let existing_counter_ids = driver
+        .conductor()
+        .counters()
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    let counter_registration_id = external
+        .driver_proxy()
+        .add_counter(0, &[], "bounded replay limit")
+        .expect("add limit counter");
+    let limit_counter_id = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            cycle(&mut driver, &mut archive, &mut external);
+            if let Some(counter_id) = driver
+                .conductor()
+                .counters()
+                .keys()
+                .find(|counter_id| !existing_counter_ids.contains(counter_id))
+                .copied()
+            {
+                break counter_id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "limit counter did not become ready"
+            );
+        }
+    };
+
+    let replay_subscription = external
+        .add_subscription("aeron:ipc", COUNTER_REPLAY_STREAM + 1)
+        .expect("counter replay subscription");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while external.subscription(replay_subscription).is_none() {
+        cycle(&mut driver, &mut archive, &mut external);
+        assert!(
+            Instant::now() < deadline,
+            "counter replay subscription not ready"
+        );
+    }
+    let mut replay = BoundedReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 5,
+        recording_id: recording.recording_id,
+        position: recording.start_position,
+        length: i64::MAX,
+        limit_counter_id,
+        replay_stream_id: COUNTER_REPLAY_STREAM + 1,
+        file_io_max_length: 0,
+        replay_token: 0,
+        replay_channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("bounded replay encode");
+    while !offer(&external, control_publication, &mut replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    driver.do_work().expect("driver work");
+    for (id, counter) in driver.conductor().counters() {
+        external.register_counter(*id, counter.clone());
+    }
+    driver
+        .cnc()
+        .set_counter_value(limit_counter_id, recording.start_position + 64)
+        .expect("set replay limit");
+    archive.do_work().expect("archive work");
+    external.do_work().expect("client work");
+
+    let response = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        5,
+    );
+    assert_eq!(response.code, ControlResponseCode::Ok);
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let mut replayed = Vec::new();
+    if let Some(subscription) = external.subscription_mut(replay_subscription) {
+        subscription.poll(
+            |buffer, offset, length, _| {
+                let mut payload = vec![0; length];
+                buffer.get_bytes(offset, &mut payload);
+                replayed.push(payload);
+            },
+            10,
+        );
+    }
+    assert_eq!(replayed, vec![payloads[0].clone()]);
+
+    let _ = external
+        .driver_proxy()
+        .remove_counter(counter_registration_id);
+    let _ = external.remove_subscription(replay_subscription);
+    let _ = external.remove_publication(live_publication);
     std::fs::remove_dir_all(archive_dir).expect("cleanup");
 }
 

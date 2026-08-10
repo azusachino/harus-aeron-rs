@@ -1,7 +1,7 @@
 //! Bounded dispatch for Archive control requests received from an Aeron subscription.
 
 use crate::codecs::{
-    CloseSessionRequest, CodecError, ConnectRequest, ExtendRecordingRequest,
+    BoundedReplayRequest, CloseSessionRequest, CodecError, ConnectRequest, ExtendRecordingRequest,
     ExtendRecordingRequestV2, FindLastMatchingRecordingRequest, ListRecordingRequest,
     ListRecordingSubscriptionsRequest, ListRecordingsForUriRequest, ListRecordingsRequest,
     MaxRecordedPositionRequest, MessageHeader, PurgeRecordingRequest, RecordingPositionRequest,
@@ -23,6 +23,7 @@ pub enum ControlRequest {
     StopRecording(StopRecordingRequest),
     StopRecordingSubscription(StopRecordingSubscriptionRequest),
     Replay(ReplayRequest),
+    BoundedReplay(BoundedReplayRequest),
     StopReplay(StopReplayRequest),
     ListRecordings(ListRecordingsRequest),
     ListRecordingsForUri(ListRecordingsForUriRequest),
@@ -83,6 +84,9 @@ impl ControlSessionAdapter {
                 ))
             }
             ReplayRequest::TEMPLATE_ID => Ok(ControlRequest::Replay(ReplayRequest::decode(frame)?)),
+            BoundedReplayRequest::TEMPLATE_ID => Ok(ControlRequest::BoundedReplay(
+                BoundedReplayRequest::decode(frame)?,
+            )),
             StopReplayRequest::TEMPLATE_ID => Ok(ControlRequest::StopReplay(
                 StopReplayRequest::decode(frame)?,
             )),
