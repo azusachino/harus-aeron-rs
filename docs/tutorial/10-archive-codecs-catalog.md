@@ -7,6 +7,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 - `crates/archive/src/archive_exception.rs`: upstream Archive error-code constants and stable string formatting for unknown codes.
 - `crates/archive/src/archive_counters.rs`: Archive-ID keyed counter allocation, lookup, and label formatting over `CountersManager`.
 - `crates/archive/src/recording_pos.rs`: recording-position counter key construction and lookup by recording/session and Archive ID.
+- `crates/archive/src/delete_segments_session.rs`: incremental segment deletion, maximum position parsing, and ordered delete signaling.
 - `crates/archive/src/checksum.rs`: CRC-32 and CRC-32C implementations, aliases, and type-safe custom checksum construction.
 - `crates/archive/src/codecs.rs`: bounded complete-message codecs for the v13 connect, start/stop/extend/truncate/purge recording, replay/stop replay, listing, recording-history position queries, find-last matching, and control-response SBE templates. Each frame uses the exact eight-byte message header, template-specific fixed block, and any required length-prefixed variable ASCII field.
 - `crates/archive/src/control_session_adapter.rs`: validates the SBE header and dispatches complete request frames by their real template IDs.

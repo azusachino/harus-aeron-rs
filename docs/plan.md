@@ -126,7 +126,8 @@ Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
 **Managed-service status (2026-08-10):** catalog descriptor persistence, Archive
 counter allocation/lookup and recording-position metadata, error-code naming,
-CRC-32/CRC-32C checksum factories, read-only catalog views,
+CRC-32/CRC-32C checksum factories, delete-session position parsing and close
+signaling, read-only catalog views,
 ordered recording-id/catalog-offset indexing, corrected term-aligned
 segment-file math, recording-signal values, bounded recording queries,
 crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay
