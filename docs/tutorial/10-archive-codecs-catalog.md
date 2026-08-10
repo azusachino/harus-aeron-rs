@@ -22,7 +22,7 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 
 ## ArchiveConductor & Sessions
 
-- `crates/archive/src/control_session.rs`: `ControlSession` state machine (`Init`, `Connected`, `Closed`).
+- `crates/archive/src/control_session.rs`: `ControlSession` state machine (`Init`, `Connected`, `Closed`), abort-reason capture, active-listing cancellation, and warning classification.
 - `crates/archive/src/conductor.rs`: `ArchiveConductor` for processing client connection requests (`on_connect`) and stream recording sessions (`on_start_recording`).
 - `crates/archive/src/runtime.rs`: persistent recording of aligned frames from a real subscription, validated extension from the exact stopped term position, truncation that clears/deletes the segment tail, purge of segment and catalog state, active and catalog-backed recording-position queries, and an incremental `ReplayCursor` that replays stopped recordings, follows active recordings with `length=-1`, takes a bounded active snapshot with `length=-2`, or obeys a counter-bounded replay limit, validates position/length bounds, and advances only after successful publication offers.
 - `crates/archive/src/service.rs`: `ArchiveContext`, the CnC-backed managed duty cycle, shared recording-subscription ownership with one recording session per joined image, recording-subscription IDs and listing, stop-by-subscription, template-63/64 auto-stop on publisher end-of-stream, request correlation/deduplication, response publication, replay-session IDs, `StopReplay`, and final-fragment publication linger.
