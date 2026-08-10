@@ -30,6 +30,8 @@ const REPLAY_STREAM: i32 = 703;
 const BOUNDED_REPLAY_STREAM: i32 = 705;
 const INVALID_REPLAY_STREAM: i32 = 706;
 const LIVE_FOLLOW_REPLAY_STREAM: i32 = 709;
+const EMPTY_RECORDING_STREAM: i32 = 710;
+const EMPTY_REPLAY_STREAM: i32 = 711;
 
 fn client(driver: &MediaDriver, client_id: i64) -> ClientConductor<'static> {
     let ring = ManyToOneRingBuffer::new(driver.cnc().to_driver_buffer()).expect("driver ring");
@@ -1491,6 +1493,147 @@ fn controls_record_restart_list_and_replay_over_real_aeron_channels() {
         ControlResponseCode::Error
     );
 
+    std::fs::remove_dir_all(archive_dir).expect("cleanup");
+}
+
+#[test]
+fn rejects_empty_all_and_stop_replay_over_control_plane() {
+    let archive_dir = archive_dir();
+    let _ = std::fs::remove_dir_all(&archive_dir);
+    let mut driver = MediaDriver::launch(Configuration {
+        ipc_term_buffer_length: TERM_MIN_LENGTH as usize,
+        ..Configuration::default()
+    })
+    .expect("driver");
+    let mut archive = ArchiveService::launch(ArchiveContext::new(driver.aeron_dir(), &archive_dir))
+        .expect("archive");
+    let mut external = client(&driver, 8_003);
+    let control_publication = external
+        .add_publication("aeron:ipc", CONTROL_STREAM)
+        .expect("control publication");
+    let response_stream = RESPONSE_STREAM + 20;
+    let response_subscription = external
+        .add_subscription("aeron:ipc", response_stream)
+        .expect("response subscription");
+    await_resources(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        response_subscription,
+    );
+    let session_id = connect(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        control_publication,
+        response_subscription,
+        1,
+        response_stream,
+    );
+    let empty_publication = external
+        .add_publication("aeron:ipc", EMPTY_RECORDING_STREAM)
+        .expect("empty recording publication");
+
+    let mut start = StartRecordingRequest {
+        control_session_id: session_id,
+        correlation_id: 2,
+        stream_id: EMPTY_RECORDING_STREAM,
+        source_location: SourceLocation::Local,
+        channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("start encode");
+    while !offer(&external, control_publication, &mut start) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let subscription_id = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        2,
+    )
+    .relevant_id;
+    for _ in 0..20 {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+
+    let mut stop = StopRecordingSubscriptionRequest {
+        control_session_id: session_id,
+        correlation_id: 3,
+        subscription_id,
+    }
+    .encode()
+    .expect("stop encode");
+    while !offer(&external, control_publication, &mut stop) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    assert_eq!(
+        await_response(
+            &mut driver,
+            &mut archive,
+            &mut external,
+            response_subscription,
+            3,
+        )
+        .code,
+        ControlResponseCode::Ok
+    );
+
+    let mut list = ListRecordingsRequest {
+        control_session_id: session_id,
+        correlation_id: 4,
+        from_recording_id: 0,
+        record_count: 1,
+    }
+    .encode()
+    .expect("list encode");
+    while !offer(&external, control_publication, &mut list) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let (recordings, terminal) = await_listing(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        4,
+    );
+    assert!(terminal.is_none());
+    assert_eq!(recordings.len(), 1);
+    assert_eq!(recordings[0].stop_position, recordings[0].start_position);
+
+    let replay_subscription = external
+        .add_subscription("aeron:ipc", EMPTY_REPLAY_STREAM)
+        .expect("empty replay subscription");
+    let mut replay = ReplayRequest {
+        control_session_id: session_id,
+        correlation_id: 5,
+        recording_id: recordings[0].recording_id,
+        position: recordings[0].start_position,
+        length: -2,
+        replay_stream_id: EMPTY_REPLAY_STREAM,
+        file_io_max_length: 0,
+        replay_token: 0,
+        replay_channel: "aeron:ipc".into(),
+    }
+    .encode()
+    .expect("replay encode");
+    while !offer(&external, control_publication, &mut replay) {
+        cycle(&mut driver, &mut archive, &mut external);
+    }
+    let response = await_response(
+        &mut driver,
+        &mut archive,
+        &mut external,
+        response_subscription,
+        5,
+    );
+    assert_eq!(response.code, ControlResponseCode::Error);
+    assert!(response.error_message.contains("empty"));
+
+    let _ = external.remove_subscription(replay_subscription);
+    let _ = external.remove_publication(empty_publication);
     std::fs::remove_dir_all(archive_dir).expect("cleanup");
 }
 

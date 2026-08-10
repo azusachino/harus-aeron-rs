@@ -50,6 +50,8 @@ pub enum ArchiveRuntimeError {
     },
     #[error("invalid replay length: {0}")]
     InvalidReplayLength(i64),
+    #[error("recording {0} is empty")]
+    EmptyRecording(i64),
     #[error("invalid recorded frame at position {position}: length {length}")]
     InvalidFrame { position: i64, length: i32 },
     #[error("replay publication rejected payload at position {position}: result {result}")]
@@ -409,6 +411,9 @@ impl ArchiveRuntime {
             value if value >= 0 => value.min(available),
             value => return Err(ArchiveRuntimeError::InvalidReplayLength(value)),
         };
+        if requested_length == -2 && available == 0 {
+            return Err(ArchiveRuntimeError::EmptyRecording(recording_id));
+        }
         let limit = position.saturating_add(length);
         if position < available_stop {
             let _ = read_recorded_payload(&self.archive_dir, &descriptor, position)?;

@@ -147,7 +147,8 @@ publications linger briefly so subscribers can consume the final fragment.
 Replay follows the upstream all-and-follow sentinel for active recordings: a
 `ReplayRequest` with `length=-1` streams the currently written range and waits for
 later frames until the recording stops. `length=-2` remains a bounded snapshot of the
-currently available range. The real control-service test proves that a payload
+currently available range and rejects an empty stopped recording instead of creating
+an empty replay session. The real control-service test proves that a payload
 published after replay starts is delivered by the still-active replay.
 
 Recording control follows the upstream subscription lifecycle: `StartRecording`
