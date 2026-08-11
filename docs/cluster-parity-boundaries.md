@@ -8,8 +8,10 @@ is [`test/upstream_map.jsonl`](../test/upstream_map.jsonl).
 
 The upstream scope is 38 `aeron-cluster` module test files plus 23
 `aeron-system-tests/cluster` files: 61 rows in total. The bounded
-`ClusterMemberTest` equivalent is resolved; the remaining 37 module rows and all
-23 system rows remain `todo`.
+`ClusterMemberTest` equivalent is resolved. The ledger also records justified
+skips for Java-only harness files or boundaries whose required runtime is not in
+the Rust crate; the remaining 28 module rows and all 23 system rows remain
+`todo`.
 
 The Rust crate currently contains four small in-memory building blocks. The
 bounded `ClusterMemberTest` equivalent covers endpoint parsing, active-member
@@ -25,6 +27,13 @@ other cluster boundaries:
 The existing failover test proves only an in-memory election model. It does not prove
 UDP transport, durable replicated logs, Archive recovery, cluster client traffic,
 clustered services, or concurrent load behavior.
+
+### Skip policy
+
+`skip` is reserved for a boundary that is either a Java test fixture with no
+executable test of its own, or an integration boundary requiring an upstream
+runtime that this crate does not claim to implement. Each skip row names the
+missing boundary in `test/upstream_map.jsonl`; skips do not count as Rust parity.
 
 ## Module-test matrix
 

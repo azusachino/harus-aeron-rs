@@ -66,10 +66,10 @@
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterBackupContextTest.java"}
 {"layer": "cluster", "rust_equivalent": "crates/cluster/src/state_machine.rs: endpoint parsing, active-member quorum position, log comparison, vote suitability, election-result, reset, and active-quorum primitives", "status": "done", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterMemberTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterNodeRestartTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterNodeTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterTestConstants.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterTimerTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterWithNoServicesTest.java"}
+{"layer": "cluster", "rust_equivalent": "Java clustered media-driver/service-container integration; current Rust ClusterNode is intentionally in-memory and its bounded lifecycle is covered by crates/cluster/src/cluster_node.rs", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterNodeTest.java"}
+{"layer": "cluster", "rust_equivalent": "Java test-harness constants only; no executable test boundary to port", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterTestConstants.java"}
+{"layer": "cluster", "rust_equivalent": "Java clustered media-driver timer integration; no matching Rust service-container runtime", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterTimerTest.java"}
+{"layer": "cluster", "rust_equivalent": "Java clustered media-driver/service-container integration; no-services runtime is not implemented in the Rust crate", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterWithNoServicesTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ConsensusModuleAgentTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ConsensusModuleConfigurationTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ConsensusModuleContextCloseTests.java"}
@@ -81,15 +81,15 @@
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/NameResolutionClusterNodeTest.java"}
 {"layer": "cluster", "rust_equivalent": "crates/cluster/src/node_state.rs: versioned candidate-term create/load, persistence, monotonic proposal, and invalid-version rejection; legacy 1.42.x fixture compatibility is explicitly outside this bounded format", "status": "done", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/NodeStateFileTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PendingServiceMessageTrackerTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PriorityHeapTimerServiceClusterTimeTest.java"}
+{"layer": "cluster", "rust_equivalent": "Java test harness specialization with no executable test methods in this file", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PriorityHeapTimerServiceClusterTimeTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PriorityHeapTimerServiceTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PublicationGroupTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/RecordingLogTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/RecordingReplicationTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/SessionEventCodecCompatibilityTest.java"}
+{"layer": "cluster", "rust_equivalent": "Versioned generated-SBE v5/v12 compatibility requires codec artifacts not present in the Rust crate; retained as an explicit interoperability gap", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/SessionEventCodecCompatibilityTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/SnapshotReplicationTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/StandbySnapshotReplicatorTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/WheelTimerServiceClusterTimeTest.java"}
+{"layer": "cluster", "rust_equivalent": "Java test harness specialization with no executable test methods in this file", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/WheelTimerServiceClusterTimeTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/client/AeronClusterAsyncConnectTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/client/AeronClusterContextTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/client/AeronClusterTest.java"}
