@@ -14,7 +14,7 @@ INTEROP_SOAK_MESSAGES ?= 1000
 .PHONY: help fmt fmt-check build build-driver test test-unit test-integration test-py lint check clean run \
        tutorial-check bench stress miri \
        setup-upstream-aeron setup-upstream-tokio \
-       interop interop-smoke interop-rust-smoke status test-parity
+       interop interop-smoke interop-rust-smoke cluster-failover-repro status test-parity
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -88,6 +88,9 @@ interop-smoke:  ## Run the Java<->Rust CnC layout interop smoke test
 
 interop-rust-smoke:  ## Run Rust multi-process IPC and UDP smoke probes
 	uv run scripts/rust_process_smoke.py
+
+cluster-failover-repro:  ## Run the real-process Tokio UDP leader-kill comparison
+	uv run scripts/cluster_failover_repro.py
 
 interop:  ## Run the full interop suite (not yet implemented)
 	@echo "interop not yet implemented — see deploy/interop/"

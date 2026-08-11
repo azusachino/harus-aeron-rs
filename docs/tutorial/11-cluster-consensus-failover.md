@@ -14,9 +14,10 @@ This chapter covers `aeron-cluster` Raft consensus engine, protocol codecs, `Con
 ## Leader Failover Recovery Test
 
 - `crates/cluster/tests/failover_repro_tests.rs`: Integration tests for a 3-node in-memory
-  leader transition and a deterministic 3,000-message failover comparison. The latter
-  demonstrates election recovery for Term 2, but is not the sibling repo's exact UDP/Archive
-  reproduction.
+  leader transition and a deterministic 3,000-message failover comparison.
+- `scripts/cluster_failover_repro.py`: Real Tokio UDP node/client process comparison. It
+  demonstrates recovery across a 100-order, 1-second load with a leader killed at 10 seconds,
+  but uses a custom protocol and is not Aeron wire/Archive replication.
 
 ## Verification
 

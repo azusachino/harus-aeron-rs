@@ -11,7 +11,8 @@ The upstream scope is 38 `aeron-cluster` module test files plus 23
 bounded Rust equivalents are marked `done`, and Java-only or unavailable runtime
 boundaries are documented as `skip`. The bounded rows state their ceiling in the
 ledger; the full Java media-driver, client, service, and Archive runtime remains
-outside this crate.
+outside this crate. The issue #20 comparison now has both an in-memory test and a
+real Tokio UDP process harness, with the custom-protocol limitation recorded.
 
 The Rust crate currently contains bounded cluster-core building blocks. The
 membership equivalent covers endpoint parsing, active-member quorum position,
@@ -28,10 +29,12 @@ the other cluster boundaries:
 - `recording_log.rs`: bounded local term/snapshot metadata persistence.
 - `cluster_clock.rs` and `log_source_validator.rs`: pure clock and source-acceptance contracts.
 
-The failover tests prove only an in-memory election model. The sustained-load
-comparison processes 3,000 deterministic messages and fails the leader halfway
-through, but it does not prove UDP transport, durable replicated logs, Archive
-recovery, cluster client traffic, clustered services, or real concurrent load behavior.
+The failover tests include an in-memory election model and a real Tokio UDP process
+comparison. The deterministic model processes 3,000 messages; the process harness
+ran 100 orders at one-second intervals, killed the leader at ten seconds, and
+acknowledged all 100 orders without repeated survivor elections. Neither harness
+proves Aeron wire compatibility, durable replicated logs, Archive recovery, cluster
+client traffic, or clustered services.
 
 ### Skip policy
 
@@ -65,11 +68,12 @@ missing boundary in `test/upstream_map.jsonl`; skips do not count as Rust parity
    Java-specific skip is recorded in `rust_equivalent`.
 2. A bounded equivalent must state its ceiling in the ledger or this document; an
    in-memory election test must not be reported as cluster or system-test parity.
-3. The milestone must include a bounded issue #20 comparison, and must state whether
-   the exact sibling reproduction was run. The current bounded comparison kills the
-   in-memory leader halfway through 3,000 messages and observes continued progress;
-   the exact approximately-100-message, at-least-90-second UDP/Archive reproduction
-   remains unrun until a real multi-process Rust cluster runtime exists.
+3. The milestone must include a bounded issue #20 comparison, and must state its
+   transport boundary. The current comparison runs independent Tokio processes,
+   sends 100 orders at one-second intervals, kills the leader at ten seconds, and
+   observes 100 acknowledgements with no repeated survivor elections. It uses a
+   custom UDP protocol, so the exact Aeron/Archive reproduction remains outside the
+   supported runtime and must not be reported as wire-level parity.
 4. `make check` and `make test-parity` remain the baseline gates. Passing either gate
    does not prove real multi-node, Archive, or Java interoperability.
 

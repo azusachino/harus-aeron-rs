@@ -242,12 +242,11 @@ their complete upstream scopes are satisfied.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** The
-milestone includes a bounded in-memory comparison that kills the leader halfway through
-3,000 messages and verifies continued election progress. The exact sibling
-stuck-failover-under-load repro still requires a real Rust multi-process UDP/Archive
-runtime; it must not be claimed as run until that runtime exists. Once available, run
-the same leader-kill comparison against Rust/tokio and record whether the suspected
-macOS/XNU behavior reproduces.
+milestone includes a bounded in-memory comparison and a real Tokio UDP process
+comparison: 100 orders at one-second intervals, leader killed at 10 seconds, and all
+orders acknowledged without repeated survivor elections. The harness uses a custom
+protocol and no Archive replication, so this is transport-level comparison evidence,
+not Aeron wire-level parity; the limitation is recorded in the milestone docs.
 
 ### v0.0.9 — Hardening
 Soak tests, fuzz targets for codecs/ring buffer/log buffer, full `make check` green,
