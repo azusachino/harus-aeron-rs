@@ -947,15 +947,14 @@ impl DriverConductor {
         if requested_session_id.is_none() {
             self.next_session_id = self.next_session_id.wrapping_add(1);
         }
-        if let Some(existing) = self.publications.values().find(|publication| {
+        if self.publications.values().any(|publication| {
             publication.stream_id == stream_id
                 && publication_options(&publication.channel)
                     .is_ok_and(|(existing_identity, _)| existing_identity == identity)
-                && publication.session_id != session_id
+                && publication.session_id == session_id
         }) {
             return Err(DriverError::IllegalState(format!(
-                "publication session-id {} does not match existing session-id {}",
-                session_id, existing.session_id
+                "publication session-id {session_id} is already in use"
             )));
         }
         if exclusive
@@ -3388,7 +3387,9 @@ mod tests {
             DriverConductor::new(small_config(), cnc.clone(), dir.0.clone()).unwrap();
         let mut events = BroadcastReceiver::new(cnc.to_clients_buffer()).unwrap();
         let client = proxy(&cnc);
-        client.add_publication("aeron:ipc", 7).unwrap();
+        client
+            .add_publication("aeron:ipc?session-id=4096", 7)
+            .unwrap();
         conductor.do_work(1_000).unwrap();
         let correlation_id = client
             .add_publication("aeron:ipc?session-id=4096", 7)

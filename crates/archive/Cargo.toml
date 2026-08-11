@@ -7,9 +7,14 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "aeron-archive-tool"
+path = "src/bin/aeron-archive-tool.rs"
+
 [dependencies]
 aeron-client.workspace = true
 agrona.workspace = true
+memmap2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

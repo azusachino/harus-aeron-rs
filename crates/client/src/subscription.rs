@@ -171,6 +171,22 @@ impl Subscription {
         self.round_robin_index = (starting_index + 1) % num_images;
         fragments_read
     }
+
+    /// Poll one image without consuming fragments from any sibling image.
+    pub fn poll_image<F>(
+        &mut self,
+        correlation_id: i64,
+        fragment_handler: F,
+        fragment_limit: usize,
+    ) -> usize
+    where
+        F: FnMut(&AtomicBuffer, usize, usize, &Header),
+    {
+        self.images
+            .iter_mut()
+            .find(|image| image.correlation_id() == correlation_id)
+            .map_or(0, |image| image.poll(fragment_handler, fragment_limit))
+    }
 }
 
 #[cfg(test)]

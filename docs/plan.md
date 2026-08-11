@@ -124,9 +124,43 @@ depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 ### v0.0.7 — aeron-archive
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
-**Managed-service status (2026-07-29):** catalog descriptor persistence, corrected
-term-aligned segment-file math, recording-signal values, bounded recording queries, and
-an in-memory recording/replay lifecycle are implemented. Bounded complete v13 SBE
+**Managed-service status (2026-08-10):** catalog descriptor persistence, Archive
+counter allocation/lookup and recording-position metadata, error-code naming,
+CRC-32/CRC-32C checksum factories, delete-session position parsing and close
+signaling, ReplicateRequest2/ReplayTokenRequest adapter decoding, v6-compatible
+replay/replication request framing, ControlSession abort/listing lifecycle,
+ArchiveConductor stripped-channel identity construction, read-only catalog views,
+bounded read-only ArchiveTool `describe` and `describe-all` inspection, including
+separate mark-file directory link resolution,
+catalog state transitions, invalid-record compaction, orphan cleanup, and bounded
+descriptor verification,
+incremental ListRecordingsSession descriptor/unknown/abort behavior,
+retryable ListRecordingByIdSession descriptor publication with catalog validity
+re-checks,
+bounded ListRecordingsForUriSession stream/channel filtering with retry and
+exhaustion signaling,
+long descriptor fields, invalid recording gaps, and multi-batch URI listing,
+bounded recording-history purge/truncate behavior and signal-value coverage,
+invalid truncate/replay request responses over real control channels,
+bounded response-stream selection, independent replay sessions, active-follow replay,
+and explicit replication/replay-token protocol boundaries,
+managed response retry/requeue, authorization-policy, and segment-file cleanup
+boundaries; Archive authentication handshake, abandoned-client stress, and
+cross-recording segment migration remain explicitly unimplemented,
+real-runtime RecordingSession coverage for image-frame writes, stop persistence,
+and replay payloads (the Java mock event-proxy wiring remains outside this API),
+RecordingWriter frame validation and segment rollover (checksum, padding-frame,
+and interrupt-injection paths remain outside the current runtime configuration),
+ReplaySession behavior through `ReplayCursor` and control-service coverage for
+active follow, stopped replay, bounded limits, persistence, and publication
+backpressure (Java-specific CRC/padding publication mechanics remain outside this
+cursor API),
+Archive client context channel/session/default/retry configuration (high-level
+client connection and close orchestration remain outside the current Rust API),
+ordered recording-id/catalog-offset indexing, corrected term-aligned
+segment-file math, recording-signal values, bounded recording queries,
+crash-recoverable catalog recording-ID allocation, and an in-memory recording/replay
+lifecycle are implemented. Bounded complete v13 SBE
 codecs cover connect, start/stop recording, replay/stop replay, listing requests, and
 correlated control responses. `ArchiveService` attaches to a real Media Driver CnC
 file, dispatches those requests from a control subscription, publishes responses on
@@ -142,6 +176,13 @@ requested position/length bounds are validated, backpressure leaves the cursor i
 place, the correlated start response carries a replay-session ID, and `StopReplay`
 aborts an active session while remaining idempotent after completion. Completed replay
 publications linger briefly so subscribers can consume the final fragment.
+
+Replay follows the upstream all-and-follow sentinel for active recordings: a
+`ReplayRequest` with `length=-1` streams the currently written range and waits for
+later frames until the recording stops. `length=-2` remains a bounded snapshot of the
+currently available range and rejects an empty stopped recording instead of creating
+an empty replay session. The real control-service test proves that a payload
+published after replay starts is delivered by the still-active replay.
 
 Recording control follows the upstream subscription lifecycle: `StartRecording`
 responds immediately with the Aeron subscription registration ID, active
@@ -159,6 +200,11 @@ maximum, and preserves finalized query results across Archive restart. Find-last
 matching follows upstream's exact session, stream, channel-fragment, and
 minimum-recording-ID semantics.
 
+Catalog reopen validation now follows the upstream recovery boundary: a zero persisted
+`nextRecordingId` is recomputed from the highest descriptor, while a stale value below
+that descriptor is rejected as invalid catalog data. Runtime reopen coverage exercises
+the recovery path through `ArchiveRuntime::open`.
+
 Recording mutation now covers v13 `ExtendRecordingRequest` (11),
 `TruncateRecordingRequest` (13), and `PurgeRecordingRequest` (104). Extension requires
 an image joining at the stopped descriptor's exact position with matching initial
@@ -174,9 +220,22 @@ the separate publishing client reaches end-of-stream; the legacy templates prese
 manual-stop behavior.
 
 This is still not full Archive parity: shared/ref-counted recording subscriptions
-are not implemented. The current replay path
-supports stopped recordings rather than live follow/bounded-counter replay, and uses
-service-local session IDs rather than upstream's composite replay/publication ID.
+and per-image recording-session ownership are implemented for the current managed
+service boundary. `Subscription::poll_image` keeps joined images isolated, and the
+runtime and control-service tests prove two images under one subscription produce
+separate descriptors and recording files. The Rust Media Driver now permits distinct
+IPC publication sessions on one stream while retaining same-session clash checks.
+The current replay path supports stopped recordings, active `length=-1` follow, bounded
+`length=-2` snapshots, and v13 template-18 counter-bounded replay. The real control-plane
+test bounds a stopped replay to the counter's position. It uses service-local session IDs
+rather than upstream's composite replay/publication ID.
+
+The archive system-test ledger now records bounded equivalents for the core restart,
+listing, replay, truncation, basic recording, and extension flows, backed by the real
+control-service and runtime integration tests. These rows explicitly leave exclusive
+publication, client callback adapters, response-channel mode, authentication,
+replication/merge, detached-segment migration, and long-listing concurrency open; the
+remaining archive system-test rows stay `todo` until those boundaries are implemented.
 Authentication, replication, detached segment operations, marks/counters, and the
 complete upstream test families remain open. Keep Archive ledger rows `todo` until
 their complete upstream scopes are satisfied.

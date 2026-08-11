@@ -1304,11 +1304,11 @@ fn publication_with_conflicting_explicit_session_id_is_rejected() {
     let proxy = client_proxy(&driver, 1);
     let mut events = BroadcastReceiver::new(driver.cnc().to_clients_buffer()).unwrap();
 
-    // An implicit-session publication already owns this channel+stream; a second registration
-    // naming an explicit session id on the same identity is ambiguous (the first publication's
-    // auto-assigned session could already be that value) and the driver must refuse it rather
-    // than silently registering a second, possibly-colliding publication.
-    proxy.add_publication("aeron:ipc", 7001).unwrap();
+    // An explicit session publication already owns this channel+stream; a second registration
+    // naming the same session id must be refused rather than colliding with the existing log.
+    proxy
+        .add_publication("aeron:ipc?session-id=4096", 7001)
+        .unwrap();
     driver.do_work().expect("register first publication");
     assert_eq!(driver.conductor().publications().len(), 1);
 

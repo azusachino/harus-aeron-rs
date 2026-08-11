@@ -18,10 +18,10 @@ pub const METADATA_LENGTH: usize = 512;
 /// Length of each counter value record in bytes (vendor: 2 cache lines, false-sharing pad).
 pub const COUNTER_LENGTH: usize = 128;
 
-/// Size of the key region in a metadata record.
+/// Size of the fixed key region in a metadata record.
 pub const MAX_KEY_LENGTH: usize = 112;
-/// Size of the label region (4-byte length prefix + up to 380 characters).
-pub const MAX_LABEL_LENGTH: usize = 384;
+/// Maximum label payload length in a metadata record (the length prefix is separate).
+pub const MAX_LABEL_LENGTH: usize = 380;
 
 /// State indicating the counter record slot is unused.
 pub const RECORD_UNUSED: i32 = 0;
@@ -145,18 +145,18 @@ impl<'a> CountersManager<'a> {
     ///
     /// Returns the allocated counter ID.
     pub fn allocate(&self, type_id: i32, key: &[u8], label: &str) -> Result<i32> {
-        if key.len() > MAX_KEY_LENGTH - 4 {
+        if key.len() > MAX_KEY_LENGTH {
             return Err(AgronaError::OutOfBounds {
                 offset: 0,
                 length: key.len(),
-                capacity: MAX_KEY_LENGTH - 4,
+                capacity: MAX_KEY_LENGTH,
             });
         }
-        if label.len() > MAX_LABEL_LENGTH - 4 {
+        if label.len() > MAX_LABEL_LENGTH {
             return Err(AgronaError::OutOfBounds {
                 offset: 0,
                 length: label.len(),
-                capacity: MAX_LABEL_LENGTH - 4,
+                capacity: MAX_LABEL_LENGTH,
             });
         }
 
@@ -171,11 +171,12 @@ impl<'a> CountersManager<'a> {
                 self.metadata_buffer
                     .put_i32(meta_offset + TYPE_ID_OFFSET, type_id);
 
-                // Write key (length + bytes)
+                // The upstream metadata layout reserves the complete fixed key region; unlike
+                // labels, keys have no length prefix.
                 self.metadata_buffer
-                    .put_i32(meta_offset + KEY_OFFSET, key.len() as i32);
+                    .put_bytes(meta_offset + KEY_OFFSET, &[0; MAX_KEY_LENGTH]);
                 self.metadata_buffer
-                    .try_put_bytes(meta_offset + KEY_OFFSET + 4, key)?;
+                    .try_put_bytes(meta_offset + KEY_OFFSET, key)?;
 
                 // Write label (length + bytes)
                 self.metadata_buffer
@@ -235,6 +236,9 @@ impl<'a> CountersManager<'a> {
     }
 
     /// Iterate over all currently allocated counters.
+    ///
+    /// The key slice always contains the fixed [`MAX_KEY_LENGTH`] byte region,
+    /// matching the upstream counter metadata layout.
     pub fn for_each<F>(&self, mut consumer: F)
     where
         F: FnMut(i32, i32, &[u8], &str),
@@ -248,11 +252,10 @@ impl<'a> CountersManager<'a> {
             if state == RECORD_ALLOCATED {
                 let type_id = self.metadata_buffer.get_i32(meta_offset + TYPE_ID_OFFSET);
 
-                let key_len = self.metadata_buffer.get_i32(meta_offset + KEY_OFFSET) as usize;
-                let mut key_bytes = vec![0u8; key_len];
+                let mut key_bytes = vec![0u8; MAX_KEY_LENGTH];
                 let _ = self
                     .metadata_buffer
-                    .try_get_bytes(meta_offset + KEY_OFFSET + 4, &mut key_bytes);
+                    .try_get_bytes(meta_offset + KEY_OFFSET, &mut key_bytes);
 
                 let label_len = self.metadata_buffer.get_i32(meta_offset + LABEL_OFFSET) as usize;
                 let mut label_bytes = vec![0u8; label_len];
@@ -315,14 +318,16 @@ mod tests {
         });
 
         assert_eq!(counters_found.len(), 2);
-        assert_eq!(
-            counters_found[0],
-            (0, 100, b"key0".to_vec(), "bytes_received".to_string())
-        );
-        assert_eq!(
-            counters_found[1],
-            (1, 101, b"key1".to_vec(), "bytes_sent".to_string())
-        );
+        assert_eq!(counters_found[0].0, 0);
+        assert_eq!(counters_found[0].1, 100);
+        assert_eq!(&counters_found[0].2[..4], b"key0");
+        assert!(counters_found[0].2[4..].iter().all(|byte| *byte == 0));
+        assert_eq!(counters_found[0].3, "bytes_received");
+        assert_eq!(counters_found[1].0, 1);
+        assert_eq!(counters_found[1].1, 101);
+        assert_eq!(&counters_found[1].2[..4], b"key1");
+        assert!(counters_found[1].2[4..].iter().all(|byte| *byte == 0));
+        assert_eq!(counters_found[1].3, "bytes_sent");
 
         // Free counter 0 and re-allocate
         manager.free(c0_id).unwrap();
