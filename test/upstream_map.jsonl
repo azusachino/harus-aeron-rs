@@ -79,7 +79,7 @@
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/IngressAdapterTest.java"}
 {"layer": "cluster", "rust_equivalent": "crates/cluster/src/log_source_validator.rs: Leader, Follower, and Any source acceptance rules", "status": "done", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/LogSourceValidatorTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/NameResolutionClusterNodeTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/NodeStateFileTest.java"}
+{"layer": "cluster", "rust_equivalent": "crates/cluster/src/node_state.rs: versioned candidate-term create/load, persistence, monotonic proposal, and invalid-version rejection; legacy 1.42.x fixture compatibility is explicitly outside this bounded format", "status": "done", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/NodeStateFileTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PendingServiceMessageTrackerTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PriorityHeapTimerServiceClusterTimeTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PriorityHeapTimerServiceTest.java"}

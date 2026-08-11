@@ -11,4 +11,5 @@ pub mod cluster_node;
 pub mod codecs;
 pub mod consensus_module;
 pub mod log_source_validator;
+pub mod node_state;
 pub mod state_machine;
