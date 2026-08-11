@@ -241,12 +241,13 @@ complete upstream test families remain open. Keep Archive ledger rows `todo` unt
 their complete upstream scopes are satisfied.
 
 ### v0.0.8 — aeron-cluster
-Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** This is
-the milestone that matters most for the sibling-project comparison: run the same
-stuck-failover-under-load repro from `harus-aeron-zig` (kill the leader mid-load, watch
-for permanent stall) against this Rust/tokio implementation. If it reproduces here too,
-that's strong evidence for the zig repo's macOS/XNU kernel hypothesis rather than a
-zig-specific defect. If it doesn't, the zig repo has a real bug to go find.
+Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** The
+milestone includes a bounded in-memory comparison that kills the leader halfway through
+3,000 messages and verifies continued election progress. The exact sibling
+stuck-failover-under-load repro still requires a real Rust multi-process UDP/Archive
+runtime; it must not be claimed as run until that runtime exists. Once available, run
+the same leader-kill comparison against Rust/tokio and record whether the suspected
+macOS/XNU behavior reproduces.
 
 ### v0.0.9 — Hardening
 Soak tests, fuzz targets for codecs/ring buffer/log buffer, full `make check` green,

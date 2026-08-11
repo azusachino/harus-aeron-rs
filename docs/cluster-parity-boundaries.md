@@ -7,27 +7,32 @@ is [`test/upstream_map.jsonl`](../test/upstream_map.jsonl).
 ## Baseline
 
 The upstream scope is 38 `aeron-cluster` module test files plus 23
-`aeron-system-tests/cluster` files: 61 rows in total. The bounded
-`ClusterMemberTest` equivalent is resolved. The ledger also records justified
-skips for Java-only harness files or boundaries whose required runtime is not in
-the Rust crate; the remaining 26 module rows and 19 system rows remain `todo`,
-with appointed-leader, recording-log, and single-node boundaries in progress.
-One pure clock boundary is resolved and its Java-only helper is skipped.
+`aeron-system-tests/cluster` files: 61 rows in total. The bounded membership,
+log-source, node-state, and clock equivalents are resolved. The ledger records
+justified skips for Java-only harness files or boundaries whose required runtime is
+not in the Rust crate. Election, recording-log, appointed-leader, single-node,
+truncated-log, and the bounded stuck-failover comparison remain `in-progress`
+because their full Java/runtime boundaries are not present.
 
-The Rust crate currently contains four small in-memory building blocks. The
-bounded `ClusterMemberTest` equivalent covers endpoint parsing, active-member
-quorum position, log-ranking, vote suitability, election-result, reset, and
-active-quorum primitives. Runtime membership integration remains open in the
-other cluster boundaries:
+The Rust crate currently contains bounded cluster-core building blocks. The
+membership equivalent covers endpoint parsing, active-member quorum position,
+log-ranking, vote suitability, election-result, reset, and active-quorum primitives;
+the node-state, recording-log, clock, appointed-leader, and single-node slices add
+their corresponding local contracts. Runtime membership integration remains open in
+the other cluster boundaries:
 
 - `codecs.rs`: cluster role/message enums and a fixed-size cluster header.
 - `state_machine.rs`: member identity and deterministic role/term transitions.
-- `consensus_module.rs`: vote collection, majority quorum, and heartbeat handling.
+- `consensus_module.rs`: vote collection, majority quorum, appointed leadership, and heartbeat handling.
 - `cluster_node.rs`: a minimal node context and step loop.
+- `node_state.rs`: versioned local candidate-term persistence.
+- `recording_log.rs`: bounded local term/snapshot metadata persistence.
+- `cluster_clock.rs` and `log_source_validator.rs`: pure clock and source-acceptance contracts.
 
-The existing failover test proves only an in-memory election model. It does not prove
-UDP transport, durable replicated logs, Archive recovery, cluster client traffic,
-clustered services, or concurrent load behavior.
+The failover tests prove only an in-memory election model. The sustained-load
+comparison processes 3,000 deterministic messages and fails the leader halfway
+through, but it does not prove UDP transport, durable replicated logs, Archive
+recovery, cluster client traffic, clustered services, or real concurrent load behavior.
 
 ### Skip policy
 
@@ -61,9 +66,11 @@ missing boundary in `test/upstream_map.jsonl`; skips do not count as Rust parity
    Java-specific skip is recorded in `rust_equivalent`.
 2. A bounded equivalent must state its ceiling in the ledger or this document; an
    in-memory election test must not be reported as cluster or system-test parity.
-3. The milestone must include the issue #20 comparison: kill the leader during
-   approximately 100 messages over at least 90 seconds of traffic and observe
-   whether failover permanently stalls.
+3. The milestone must include a bounded issue #20 comparison, and must state whether
+   the exact sibling reproduction was run. The current bounded comparison kills the
+   in-memory leader halfway through 3,000 messages and observes continued progress;
+   the exact approximately-100-message, at-least-90-second UDP/Archive reproduction
+   remains unrun until a real multi-process Rust cluster runtime exists.
 4. `make check` and `make test-parity` remain the baseline gates. Passing either gate
    does not prove real multi-node, Archive, or Java interoperability.
 

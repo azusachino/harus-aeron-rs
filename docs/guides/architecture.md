@@ -47,4 +47,7 @@ Aeron uses explicit single-threaded agent duty cycles (`do_work()`) rather than 
 
 ## Leader Failover & Parity Verification
 
-The `aeron-cluster` implementation resolves the stuck-failover scenario identified in `harus-aeron-zig` by maintaining strict majority quorum checks (`(len / 2) + 1`) and deterministic state transitions.
+The in-memory `aeron-cluster` model exercises strict majority quorum checks (`(len / 2) + 1`)
+and deterministic state transitions after a leader failure. It does not yet resolve the
+stuck-failover scenario identified in `harus-aeron-zig`, because the Rust repository has
+no real multi-process UDP/Archive cluster runtime for that comparison.
