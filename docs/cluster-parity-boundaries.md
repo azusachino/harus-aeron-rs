@@ -7,12 +7,11 @@ is [`test/upstream_map.jsonl`](../test/upstream_map.jsonl).
 ## Baseline
 
 The upstream scope is 38 `aeron-cluster` module test files plus 23
-`aeron-system-tests/cluster` files: 61 rows in total. The bounded membership,
-log-source, node-state, and clock equivalents are resolved. The ledger records
-justified skips for Java-only harness files or boundaries whose required runtime is
-not in the Rust crate. Election, recording-log, appointed-leader, single-node,
-truncated-log, and the bounded stuck-failover comparison remain `in-progress`
-because their full Java/runtime boundaries are not present.
+`aeron-system-tests/cluster` files: 61 rows in total. All 61 rows are now classified:
+bounded Rust equivalents are marked `done`, and Java-only or unavailable runtime
+boundaries are documented as `skip`. The bounded rows state their ceiling in the
+ledger; the full Java media-driver, client, service, and Archive runtime remains
+outside this crate.
 
 The Rust crate currently contains bounded cluster-core building blocks. The
 membership equivalent covers endpoint parsing, active-member quorum position,
