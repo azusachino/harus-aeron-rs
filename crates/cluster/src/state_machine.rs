@@ -19,6 +19,8 @@ pub struct ClusterMember {
     leadership_term_id: i64,
     log_position: i64,
     time_of_last_append_position_ns: i64,
+    candidate_term_id: i64,
+    vote: Option<bool>,
 }
 
 impl ClusterMember {
@@ -37,6 +39,8 @@ impl ClusterMember {
             leadership_term_id: -1,
             log_position: -1,
             time_of_last_append_position_ns: -1,
+            candidate_term_id: -1,
+            vote: None,
         }
     }
 
@@ -56,7 +60,7 @@ impl ClusterMember {
                 let member_id = fields[0]
                     .parse::<i32>()
                     .map_err(|_| format!("invalid cluster member id: {}", fields[0]))?;
-                let mut parsed = Self {
+                let parsed = Self {
                     member_id,
                     ingress_channel: fields[1].into(),
                     consensus_channel: fields[2].into(),
@@ -70,8 +74,9 @@ impl ClusterMember {
                     leadership_term_id: -1,
                     log_position: -1,
                     time_of_last_append_position_ns: -1,
+                    candidate_term_id: -1,
+                    vote: None,
                 };
-                parsed.endpoints = fields[1..].join(",");
                 Ok(parsed)
             })
             .collect()
@@ -104,6 +109,24 @@ impl ClusterMember {
         self
     }
 
+    pub fn candidate_term_id(&mut self, term_id: i64) -> &mut Self {
+        self.candidate_term_id = term_id;
+        self
+    }
+
+    pub fn candidate_term_id_value(&self) -> i64 {
+        self.candidate_term_id
+    }
+
+    pub fn vote(&mut self, vote: Option<bool>) -> &mut Self {
+        self.vote = vote;
+        self
+    }
+
+    pub fn vote_value(&self) -> Option<bool> {
+        self.vote
+    }
+
     pub fn is_active(&self, now_ns: i64, timeout_ns: i64) -> bool {
         self.time_of_last_append_position_ns + timeout_ns > now_ns
     }
@@ -113,16 +136,19 @@ impl ClusterMember {
     }
 
     pub fn compare_log(lhs: &Self, rhs: &Self) -> std::cmp::Ordering {
-        lhs.leadership_term_id
-            .cmp(&rhs.leadership_term_id)
-            .then(lhs.log_position.cmp(&rhs.log_position))
+        Self::compare_log_values(
+            lhs.leadership_term_id,
+            lhs.log_position,
+            rhs.leadership_term_id,
+            rhs.log_position,
+        )
     }
 
     pub fn quorum_position(members: &[Self], now_ns: i64, timeout_ns: i64) -> i64 {
         let mut positions = members
             .iter()
             .filter(|member| member.is_active(now_ns, timeout_ns))
-            .map(|member| member.log_position)
+            .map(|member| member.log_position.max(0))
             .collect::<Vec<_>>();
         positions.sort_unstable_by(|lhs, rhs| rhs.cmp(lhs));
         positions
@@ -147,6 +173,91 @@ impl ClusterMember {
             })
             .count()
             >= Self::quorum_threshold(members.len())
+    }
+
+    pub fn compare_log_values(
+        lhs_term_id: i64,
+        lhs_position: i64,
+        rhs_term_id: i64,
+        rhs_position: i64,
+    ) -> std::cmp::Ordering {
+        lhs_term_id
+            .cmp(&rhs_term_id)
+            .then(lhs_position.cmp(&rhs_position))
+    }
+
+    pub fn will_vote_for(&self, candidate: &Self) -> bool {
+        self.log_position != -1 && Self::compare_log(self, candidate) != std::cmp::Ordering::Greater
+    }
+
+    pub fn has_reached_position(
+        &self,
+        leadership_term_id: i64,
+        position: i64,
+        now_ns: i64,
+        timeout_ns: i64,
+    ) -> bool {
+        self.is_active(now_ns, timeout_ns)
+            && self.leadership_term_id == leadership_term_id
+            && self.log_position >= position
+    }
+
+    pub fn is_unanimous_candidate(
+        members: &[Self],
+        candidate: &Self,
+        graceful_closed_leader_id: i32,
+    ) -> bool {
+        let possible_votes = members
+            .iter()
+            .filter(|member| member.member_id != graceful_closed_leader_id)
+            .filter(|member| member.will_vote_for(candidate))
+            .count();
+        possible_votes >= Self::quorum_threshold(members.len())
+            && members
+                .iter()
+                .filter(|member| member.member_id != graceful_closed_leader_id)
+                .all(|member| member.will_vote_for(candidate))
+    }
+
+    pub fn is_quorum_candidate(members: &[Self], candidate: &Self) -> bool {
+        members
+            .iter()
+            .filter(|member| member.will_vote_for(candidate))
+            .count()
+            >= Self::quorum_threshold(members.len())
+    }
+
+    pub fn is_unanimous_leader(
+        members: &[Self],
+        candidate_term_id: i64,
+        graceful_closed_leader_id: i32,
+    ) -> bool {
+        let mut votes = 0;
+        for member in members
+            .iter()
+            .filter(|member| member.member_id != graceful_closed_leader_id)
+        {
+            if member.candidate_term_id != candidate_term_id || member.vote != Some(true) {
+                return false;
+            }
+            votes += 1;
+        }
+        votes >= Self::quorum_threshold(members.len())
+    }
+
+    pub fn is_quorum_leader(members: &[Self], candidate_term_id: i64) -> bool {
+        let mut votes = 0;
+        for member in members {
+            if member.candidate_term_id == candidate_term_id {
+                if member.vote == Some(false) {
+                    return false;
+                }
+                if member.vote == Some(true) {
+                    votes += 1;
+                }
+            }
+        }
+        votes >= Self::quorum_threshold(members.len())
     }
 }
 
@@ -291,5 +402,85 @@ mod tests {
         assert!(!ClusterMember::has_quorum_at_position(
             &members, 1, 80, 10, 2
         ));
+    }
+
+    #[test]
+    fn should_match_upstream_vote_and_election_rules() {
+        let candidate = ClusterMember::new(2, "ingress", "consensus")
+            .log_position(800)
+            .leadership_term_id(10)
+            .clone();
+        let members = vec![
+            ClusterMember::new(10, "ingress", "consensus")
+                .log_position(100)
+                .leadership_term_id(2)
+                .clone(),
+            ClusterMember::new(20, "ingress", "consensus")
+                .log_position(600)
+                .leadership_term_id(18)
+                .clone(),
+            ClusterMember::new(30, "ingress", "consensus")
+                .log_position(800)
+                .leadership_term_id(10)
+                .clone(),
+            ClusterMember::new(40, "ingress", "consensus")
+                .log_position(800)
+                .leadership_term_id(9)
+                .clone(),
+            ClusterMember::new(50, "ingress", "consensus")
+                .log_position(700)
+                .leadership_term_id(10)
+                .clone(),
+        ];
+
+        assert!(ClusterMember::is_quorum_candidate(&members, &candidate));
+        assert!(!ClusterMember::is_unanimous_candidate(
+            &members, &candidate, -1
+        ));
+        assert!(members[0].will_vote_for(&candidate));
+        assert!(!members[1].will_vote_for(&candidate));
+        assert_eq!(
+            ClusterMember::compare_log_values(5, 1000, 3, 999_999),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn should_require_matching_terms_and_positive_votes_for_leadership() {
+        let mut members = (1..=3)
+            .map(|id| ClusterMember::new(id, "ingress", "consensus"))
+            .collect::<Vec<_>>();
+        for member in &mut members {
+            member.candidate_term_id(42).vote(Some(true));
+        }
+
+        assert!(ClusterMember::is_quorum_leader(&members, 42));
+        assert!(ClusterMember::is_unanimous_leader(&members, 42, -1));
+
+        members[1].vote(Some(false));
+        assert!(!ClusterMember::is_quorum_leader(&members, 42));
+        assert!(!ClusterMember::is_unanimous_leader(&members, 42, -1));
+
+        members[1].vote(Some(true)).candidate_term_id(43);
+        assert!(!ClusterMember::is_unanimous_leader(&members, 42, -1));
+
+        members[0].candidate_term_id(42).vote(Some(true));
+        members[1].candidate_term_id(42).vote(Some(true));
+        members[2].candidate_term_id(42).vote(Some(true));
+        assert!(ClusterMember::is_unanimous_leader(&members, 42, 1));
+    }
+
+    #[test]
+    fn should_check_reached_position_with_activity_and_term() {
+        let member = ClusterMember::new(1, "ingress", "consensus")
+            .leadership_term_id(42)
+            .log_position(500)
+            .time_of_last_append_position_ns(10)
+            .clone();
+
+        assert!(member.has_reached_position(42, 100, 12, 5));
+        assert!(!member.has_reached_position(42, 600, 12, 5));
+        assert!(!member.has_reached_position(7, 100, 12, 5));
+        assert!(!member.has_reached_position(42, 100, 16, 5));
     }
 }

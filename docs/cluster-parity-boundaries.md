@@ -13,7 +13,8 @@ rows remain `todo`.
 
 The Rust crate currently contains four small in-memory building blocks. The first
 `ClusterMemberTest` slice covers endpoint parsing, active-member quorum position,
-and log-ranking primitives; the full member election lifecycle remains open:
+log-ranking, vote suitability, and election-result primitives; endpoint validation
+and the full member lifecycle remain open:
 
 - `codecs.rs`: cluster role/message enums and a fixed-size cluster header.
 - `state_machine.rs`: member identity and deterministic role/term transitions.
