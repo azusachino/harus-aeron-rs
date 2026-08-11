@@ -7,10 +7,13 @@ is [`test/upstream_map.jsonl`](../test/upstream_map.jsonl).
 ## Baseline
 
 The upstream scope is 38 `aeron-cluster` module test files plus 23
-`aeron-system-tests/cluster` files: 61 rows in total. All 61 rows are currently
-`todo` in the ledger.
+`aeron-system-tests/cluster` files: 61 rows in total. The ledger begins with
+`ClusterMemberTest` in progress; the remaining 37 module rows and all 23 system
+rows remain `todo`.
 
-The Rust crate currently contains four small in-memory building blocks:
+The Rust crate currently contains four small in-memory building blocks. The first
+`ClusterMemberTest` slice covers endpoint parsing, active-member quorum position,
+and log-ranking primitives; the full member election lifecycle remains open:
 
 - `codecs.rs`: cluster role/message enums and a fixed-size cluster header.
 - `state_machine.rs`: member identity and deterministic role/term transitions.
