@@ -82,6 +82,39 @@ impl ClusterMember {
             .collect()
     }
 
+    pub fn parse_endpoints(member_id: i32, endpoints: &str) -> Result<Self, String> {
+        let fields = endpoints.split(',').collect::<Vec<_>>();
+        if fields.len() != 5 {
+            return Err(format!("invalid member value: {endpoints}"));
+        }
+
+        Ok(Self {
+            member_id,
+            ingress_channel: fields[0].into(),
+            consensus_channel: fields[1].into(),
+            log_channel: fields[2].into(),
+            catchup_channel: fields[3].into(),
+            archive_channel: fields[4].into(),
+            archive_response_channel: None,
+            egress_response_channel: None,
+            endpoints: endpoints.into(),
+            is_leader: false,
+            leadership_term_id: -1,
+            log_position: -1,
+            time_of_last_append_position_ns: -1,
+            candidate_term_id: -1,
+            vote: None,
+        })
+    }
+
+    pub fn encode_as_string(members: &[Self]) -> String {
+        members
+            .iter()
+            .map(|member| format!("{},{}", member.member_id, member.endpoints))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
     pub fn endpoints(&self) -> &str {
         &self.endpoints
     }
@@ -129,6 +162,22 @@ impl ClusterMember {
 
     pub fn is_active(&self, now_ns: i64, timeout_ns: i64) -> bool {
         self.time_of_last_append_position_ns + timeout_ns > now_ns
+    }
+
+    pub fn has_active_quorum(members: &[Self], now_ns: i64, timeout_ns: i64) -> bool {
+        members
+            .iter()
+            .filter(|member| member.is_active(now_ns, timeout_ns))
+            .count()
+            >= Self::quorum_threshold(members.len())
+    }
+
+    pub fn reset(&mut self) {
+        self.is_leader = false;
+        self.vote = None;
+        self.candidate_term_id = -1;
+        self.leadership_term_id = -1;
+        self.log_position = -1;
     }
 
     pub fn quorum_threshold(member_count: usize) -> usize {
@@ -370,6 +419,16 @@ mod tests {
             members[0].egress_response_channel.as_deref(),
             Some("egress-response")
         );
+
+        let parsed =
+            ClusterMember::parse_endpoints(7, "ingress,consensus,log,catchup,archive").unwrap();
+        assert_eq!(parsed.member_id, 7);
+        assert_eq!(parsed.endpoints(), "ingress,consensus,log,catchup,archive");
+        assert_eq!(
+            ClusterMember::encode_as_string(&[parsed]),
+            "7,ingress,consensus,log,catchup,archive"
+        );
+        assert!(ClusterMember::parse_endpoints(7, "ingress,consensus").is_err());
     }
 
     #[test]
@@ -482,5 +541,31 @@ mod tests {
         assert!(!member.has_reached_position(42, 600, 12, 5));
         assert!(!member.has_reached_position(7, 100, 12, 5));
         assert!(!member.has_reached_position(42, 100, 16, 5));
+    }
+
+    #[test]
+    fn should_reset_election_state_and_detect_active_quorum() {
+        let mut members = (0..3)
+            .map(|id| ClusterMember::new(id, "ingress", "consensus"))
+            .collect::<Vec<_>>();
+        members[0].is_leader = true;
+        members[0]
+            .candidate_term_id(42)
+            .leadership_term_id(42)
+            .log_position(100)
+            .vote(Some(true))
+            .time_of_last_append_position_ns(9);
+        members[1].time_of_last_append_position_ns(9);
+        members[2].time_of_last_append_position_ns(0);
+
+        assert!(ClusterMember::has_active_quorum(&members, 10, 2));
+        assert!(!ClusterMember::has_active_quorum(&members, 10, 0));
+
+        members[0].reset();
+        assert!(!members[0].is_leader);
+        assert_eq!(members[0].candidate_term_id_value(), -1);
+        assert_eq!(members[0].leadership_term_id_value(), -1);
+        assert_eq!(members[0].log_position_value(), -1);
+        assert_eq!(members[0].vote_value(), None);
     }
 }

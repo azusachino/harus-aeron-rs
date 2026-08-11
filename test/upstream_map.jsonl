@@ -64,7 +64,7 @@
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/AuthenticationTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterBackupAgentTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterBackupContextTest.java"}
-{"layer": "cluster", "rust_equivalent": "crates/cluster/src/state_machine.rs: bounded endpoint parsing, active-member quorum position, log comparison, vote suitability, and election-result primitives; endpoint validation and full member lifecycle remain in progress", "status": "in-progress", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterMemberTest.java"}
+{"layer": "cluster", "rust_equivalent": "crates/cluster/src/state_machine.rs: endpoint parsing, active-member quorum position, log comparison, vote suitability, election-result, reset, and active-quorum primitives", "status": "done", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterMemberTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterNodeRestartTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterNodeTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ClusterTestConstants.java"}
