@@ -241,8 +241,8 @@
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/MultiClusteredServicesTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/MultiModuleSharedDriverTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/MultiNodeTest.java"}
-{"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/OffsetMillisecondClusterClock.java"}
-{"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/OffsetMillisecondClusterClockTest.java"}
+{"layer": "system-tests", "rust_equivalent": "Java test helper paired with OffsetMillisecondClusterClockTest; the executable clock behavior is covered by crates/cluster/src/cluster_clock.rs", "status": "skip", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/OffsetMillisecondClusterClock.java"}
+{"layer": "system-tests", "rust_equivalent": "crates/cluster/src/cluster_clock.rs: delegated millisecond time with atomic offset accumulation", "status": "done", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/OffsetMillisecondClusterClockTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/RacingCatchupClusterTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/RecoverAfterFailedCatchupClusterTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/ServiceIpcIngressMessageTest.java"}
