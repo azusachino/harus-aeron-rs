@@ -84,7 +84,7 @@
 {"layer": "cluster", "rust_equivalent": "Java test harness specialization with no executable test methods in this file", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PriorityHeapTimerServiceClusterTimeTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PriorityHeapTimerServiceTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PublicationGroupTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/RecordingLogTest.java"}
+{"layer": "cluster", "rust_equivalent": "crates/cluster/src/recording_log.rs: durable term/snapshot metadata, reload, commit position, snapshot invalidation, truncation, and ordering primitives; Archive recovery-plan and legacy binary-format compatibility remain open", "status": "in-progress", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/RecordingLogTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/RecordingReplicationTest.java"}
 {"layer": "cluster", "rust_equivalent": "Versioned generated-SBE v5/v12 compatibility requires codec artifacts not present in the Rust crate; retained as an explicit interoperability gap", "status": "skip", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/SessionEventCodecCompatibilityTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/SnapshotReplicationTest.java"}
@@ -234,7 +234,7 @@
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/ClusterNetworkTopologyTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/ClusterSessionReliabilityTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/ClusterTest.java"}
-{"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/ClusterToolTest.java"}
+{"layer": "system-tests", "rust_equivalent": "crates/cluster/src/recording_log.rs: bounded local recording-log metadata operations; Java ClusterTool command/control integration remains open", "status": "in-progress", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/ClusterToolTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/FailedFirstElectionClusterTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/InitiateShutdownThenImmediatelyCloseLeaderTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/MethodCallBlocker.java"}
@@ -248,7 +248,7 @@
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/ServiceIpcIngressMessageTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/SingleNodeTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/StalledLeaderLogReplicationClusterTest.java"}
-{"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/StartFromTruncatedRecordingLogTest.java"}
+{"layer": "system-tests", "rust_equivalent": "crates/cluster/src/recording_log.rs: bounded metadata truncation preserving term entries; three-node Archive restart and replay remain open", "status": "in-progress", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/StartFromTruncatedRecordingLogTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/cluster/TestClusterTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/driver/BytesSentAndReceivedTest.java"}
 {"layer": "system-tests", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-system-tests/src/test/java/io/aeron/driver/DriverNameResolverTest.java"}
