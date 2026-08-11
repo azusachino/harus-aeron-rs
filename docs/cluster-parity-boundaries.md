@@ -10,8 +10,9 @@ The upstream scope is 38 `aeron-cluster` module test files plus 23
 `aeron-system-tests/cluster` files: 61 rows in total. The bounded
 `ClusterMemberTest` equivalent is resolved. The ledger also records justified
 skips for Java-only harness files or boundaries whose required runtime is not in
-the Rust crate; the remaining 28 module rows and 21 system rows remain
-`todo`; one pure clock boundary is resolved and its Java-only helper is skipped.
+the Rust crate; the remaining 27 module rows and 20 system rows remain `todo`,
+with appointed-leader boundaries in progress. One pure clock boundary is
+resolved and its Java-only helper is skipped.
 
 The Rust crate currently contains four small in-memory building blocks. The
 bounded `ClusterMemberTest` equivalent covers endpoint parsing, active-member

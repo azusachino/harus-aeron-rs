@@ -368,6 +368,11 @@ impl ClusterStateMachine {
         self.state = ConsensusModuleState::Active;
     }
 
+    pub fn transition_to_appointed_leader(&mut self) {
+        self.term_id += 1;
+        self.transition_to_leader();
+    }
+
     pub fn transition_to_follower(&mut self, leader_member_id: i32, term_id: i64) {
         self.role = ClusterRole::Follower;
         self.leader_member_id = leader_member_id;
