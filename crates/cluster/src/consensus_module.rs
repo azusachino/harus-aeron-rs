@@ -208,6 +208,18 @@ mod tests {
     }
 
     #[test]
+    fn should_elect_a_single_node_from_its_self_vote() {
+        let members = vec![ClusterMember::new(0, "aeron:ipc", "aeron:ipc")];
+        let mut consensus = ConsensusModule::new(0, members);
+        consensus.start_election();
+
+        assert_eq!(consensus.quorum_size(), 1);
+        assert_eq!(consensus.do_work().unwrap(), 1);
+        assert_eq!(consensus.state_machine().role(), ClusterRole::Leader);
+        assert_eq!(consensus.state_machine().leader_member_id(), 0);
+    }
+
+    #[test]
     fn should_not_start_an_election_for_a_different_appointed_member() {
         let members = vec![
             ClusterMember::new(0, "aeron:ipc", "aeron:ipc"),

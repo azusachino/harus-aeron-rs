@@ -361,15 +361,15 @@ fn parse<T: std::str::FromStr>(value: &str) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "aeron-cluster-recording-log-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "aeron-cluster-recording-log-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
         ))
     }
 
