@@ -77,7 +77,7 @@
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ConsensusModuleSnapshotTakerTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/ElectionTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/IngressAdapterTest.java"}
-{"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/LogSourceValidatorTest.java"}
+{"layer": "cluster", "rust_equivalent": "crates/cluster/src/log_source_validator.rs: Leader, Follower, and Any source acceptance rules", "status": "done", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/LogSourceValidatorTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/NameResolutionClusterNodeTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/NodeStateFileTest.java"}
 {"layer": "cluster", "rust_equivalent": null, "status": "todo", "upstream": "vendor/aeron/aeron-cluster/src/test/java/io/aeron/cluster/PendingServiceMessageTrackerTest.java"}
