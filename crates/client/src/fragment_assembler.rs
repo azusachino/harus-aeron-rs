@@ -186,4 +186,120 @@ mod tests {
 
         assert!(called);
     }
+
+    #[test]
+    fn should_free_session_buffer() {
+        let mut assembler = FragmentAssembler::default();
+        let mut src_bytes = vec![0u8; 256];
+        let src_buf = AtomicBuffer::new(&mut src_bytes);
+
+        let mut header_bytes = vec![0u8; 64];
+        let header_buf = AtomicBuffer::new(&mut header_bytes);
+        let data_header = DataHeaderFlyweight::new(header_buf.clone());
+        data_header.set_flags(BEGIN_FRAG_FLAG);
+        data_header.set_session_id(SESSION_ID);
+        data_header.set_term_offset(HEADER_LENGTH);
+        data_header.set_frame_length(HEADER_LENGTH + 16);
+
+        let mut header = Header::new(INITIAL_TERM_ID, 16);
+        header.set_buffer(header_buf);
+        assembler.on_fragment(
+            &src_buf,
+            HEADER_LENGTH as usize,
+            16,
+            &header,
+            |_, _, _, _| {},
+        );
+
+        assert!(assembler.free_session_buffer(SESSION_ID));
+        assert!(!assembler.free_session_buffer(SESSION_ID));
+    }
+
+    #[test]
+    fn should_ignore_fragments_without_a_begin() {
+        let mut assembler = FragmentAssembler::default();
+        let mut src_bytes = vec![0u8; 256];
+        let src_buf = AtomicBuffer::new(&mut src_bytes);
+
+        let mut header_bytes = vec![0u8; 64];
+        let header_buf = AtomicBuffer::new(&mut header_bytes);
+        let data_header = DataHeaderFlyweight::new(header_buf.clone());
+        data_header.set_flags(END_FRAG_FLAG);
+        data_header.set_session_id(SESSION_ID);
+        data_header.set_term_offset(HEADER_LENGTH);
+
+        let mut header = Header::new(INITIAL_TERM_ID, 16);
+        header.set_buffer(header_buf);
+
+        let mut called = false;
+        assembler.on_fragment(
+            &src_buf,
+            HEADER_LENGTH as usize,
+            16,
+            &header,
+            |_, _, _, _| called = true,
+        );
+
+        assert!(!called);
+    }
+
+    #[test]
+    fn should_reset_session_after_a_fragment_gap() {
+        let mut assembler = FragmentAssembler::default();
+        let mut src_bytes = vec![0u8; 512];
+        let src_buf = AtomicBuffer::new(&mut src_bytes);
+
+        let mut begin_bytes = vec![0u8; 64];
+        let begin_buf = AtomicBuffer::new(&mut begin_bytes);
+        let begin_data = DataHeaderFlyweight::new(begin_buf.clone());
+        begin_data.set_flags(BEGIN_FRAG_FLAG);
+        begin_data.set_session_id(SESSION_ID);
+        begin_data.set_term_offset(HEADER_LENGTH);
+        begin_data.set_frame_length(HEADER_LENGTH + 16);
+        let mut begin_header = Header::new(INITIAL_TERM_ID, 16);
+        begin_header.set_buffer(begin_buf);
+        assembler.on_fragment(
+            &src_buf,
+            HEADER_LENGTH as usize,
+            16,
+            &begin_header,
+            |_, _, _, _| {},
+        );
+
+        let mut middle_bytes = vec![0u8; 64];
+        let middle_buf = AtomicBuffer::new(&mut middle_bytes);
+        let middle_data = DataHeaderFlyweight::new(middle_buf.clone());
+        middle_data.set_flags(0);
+        middle_data.set_session_id(SESSION_ID);
+        middle_data.set_term_offset(HEADER_LENGTH + 64);
+        let mut middle_header = Header::new(INITIAL_TERM_ID, 16);
+        middle_header.set_buffer(middle_buf);
+        assembler.on_fragment(
+            &src_buf,
+            (HEADER_LENGTH + 64) as usize,
+            16,
+            &middle_header,
+            |_, _, _, _| {},
+        );
+
+        let mut end_bytes = vec![0u8; 64];
+        let end_buf = AtomicBuffer::new(&mut end_bytes);
+        let end_data = DataHeaderFlyweight::new(end_buf.clone());
+        end_data.set_flags(END_FRAG_FLAG);
+        end_data.set_session_id(SESSION_ID);
+        end_data.set_term_offset(HEADER_LENGTH + 16);
+        let mut end_header = Header::new(INITIAL_TERM_ID, 16);
+        end_header.set_buffer(end_buf);
+
+        let mut called = false;
+        assembler.on_fragment(
+            &src_buf,
+            (HEADER_LENGTH + 16) as usize,
+            16,
+            &end_header,
+            |_, _, _, _| called = true,
+        );
+
+        assert!(!called);
+    }
 }

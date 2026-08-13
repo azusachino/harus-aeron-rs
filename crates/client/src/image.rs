@@ -275,6 +275,26 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_backward_and_unaligned_positions() {
+        let subscriber_pos = Arc::new(AtomicI64::new(0));
+        let log_buffers = create_test_log_buffers();
+        let mut image = Image::new(
+            1,
+            SESSION_ID,
+            INITIAL_TERM_ID,
+            0,
+            subscriber_pos,
+            log_buffers,
+            "ipc".to_string(),
+            CORRELATION_ID,
+        );
+
+        image.set_position(64).unwrap();
+        assert!(image.set_position(32).is_err());
+        assert!(image.set_position(65).is_err());
+    }
+
+    #[test]
     fn should_report_correct_position_on_reception() {
         let position_bits_to_shift = (TERM_MIN_LENGTH as usize).trailing_zeros() as i32;
         let initial_position =
