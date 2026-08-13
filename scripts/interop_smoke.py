@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import socket
 import subprocess
@@ -44,6 +45,17 @@ def _aeron_all_jar() -> Path:
     return jars[-1]
 
 
+def _interop_message_count() -> int:
+    value = os.environ.get("INTEROP_SOAK_MESSAGES", "1")
+    try:
+        message_count = int(value)
+    except ValueError as error:
+        raise RuntimeError("INTEROP_SOAK_MESSAGES must be a positive integer") from error
+    if message_count <= 0:
+        raise RuntimeError("INTEROP_SOAK_MESSAGES must be a positive integer")
+    return message_count
+
+
 def main() -> int:
     if shutil.which("java") is None or shutil.which("javac") is None:
         print("interop-smoke requires java and javac", file=sys.stderr)
@@ -54,6 +66,7 @@ def main() -> int:
 
     print("[2/6] Resolving vendored Aeron Java runtime jar (source is vendor/aeron)...")
     aeron_all_jar = _aeron_all_jar()
+    message_count = _interop_message_count()
 
     print("[3/6] Compiling Java compatibility probes...")
     with tempfile.TemporaryDirectory(prefix="aeron-interop-") as temp_dir:
@@ -114,7 +127,10 @@ def main() -> int:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe_socket:
                 probe_socket.bind(("127.0.0.1", 0))
                 udp_port = str(probe_socket.getsockname()[1])
-            print("[6/6] Running Java Aeron UDP round-trip through Rust driver...")
+            print(
+                "[6/6] Running Java Aeron UDP round-trip through Rust driver "
+                f"(messages={message_count})..."
+            )
             _run(
                 [
                     "java",
@@ -124,6 +140,7 @@ def main() -> int:
                     "JavaUdpPubSubProbe",
                     str(Path(cnc_path).parent),
                     udp_port,
+                    str(message_count),
                 ],
                 cwd=ROOT,
             )

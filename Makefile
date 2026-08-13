@@ -14,7 +14,7 @@ INTEROP_SOAK_MESSAGES ?= 1000
 .PHONY: help fmt fmt-check build build-driver test test-unit test-integration test-py lint check clean run \
        tutorial-check bench fuzz fuzz-check stress miri \
        setup-upstream-aeron setup-upstream-tokio \
-       interop interop-smoke interop-rust-smoke interop-rust-soak cluster-failover-repro status test-parity
+       interop interop-smoke interop-soak interop-rust-smoke interop-rust-soak cluster-failover-repro status test-parity
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -96,7 +96,10 @@ test-parity:  ## Report Rust test-file parity against vendor/aeron's upstream te
 	uv run scripts/upstream_tests.py
 
 interop-smoke:  ## Run the Java<->Rust CnC layout interop smoke test
-	uv run scripts/interop_smoke.py
+	INTEROP_SOAK_MESSAGES=1 uv run scripts/interop_smoke.py
+
+interop-soak:  ## Run a bounded Java Aeron UDP soak through the Rust driver
+	INTEROP_SOAK_MESSAGES=$(INTEROP_SOAK_MESSAGES) uv run scripts/interop_smoke.py
 
 interop-rust-smoke:  ## Run Rust multi-process IPC and UDP smoke probes
 	INTEROP_SOAK_MESSAGES=1 uv run scripts/rust_process_smoke.py

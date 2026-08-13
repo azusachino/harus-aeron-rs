@@ -269,8 +269,8 @@ or full upstream system-test parity claims; the boundaries remain documented in 
 driver and cluster parity notes.
 
 ### v0.1.0 — Release
-268-test-file parity (minus documented Java-specific exceptions), interop-smoke +
-interop-soak green against real Java Aeron `1.50.x`, `CHANGELOG.md` cut, tag.
+268-test-file parity (minus documented Java-specific exceptions), `make interop-smoke` +
+`make interop-soak` green against real Java Aeron `1.50.x`, `CHANGELOG.md` cut, tag.
 
 ## Workflow
 
