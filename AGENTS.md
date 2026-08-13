@@ -50,6 +50,8 @@ make check            # fmt-check + lint + build + test
 make clean            # cargo clean
 make run              # run media driver
 make tutorial-check   # build tutorial/ learner-stub workspace
+make docs-serve       # preview the MkDocs Material tutorial site
+make docs-build       # strict documentation build
 ```
 
 ## Coding Conventions

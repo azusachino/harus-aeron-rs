@@ -85,8 +85,8 @@ repo's `INTEROP_STATUS.md` gate) — build out `deploy/interop/` here.
 The file ledger is fully classified, with 43 bounded equivalents and 40 explicit skips;
 the skips do not count as Rust parity. A method-level audit of vendor
 `aeron-system-tests` (319 `@Test` methods across 65 files, not the 83-file estimate
-above — see [the boundary matrix](system-test-parity-boundaries.md) and the original
-[audit](../.agents/system-test-audit.md)) found 20 genuine Rust system tests in
+above — see [the boundary matrix](system-test-parity-boundaries.md) and the local
+`.agents/system-test-audit.md` audit) found 20 genuine Rust system tests in
 `crates/driver/tests/system_tests.rs`, covering IPC/UDP pub/sub roundtrip, network spy,
 fragmented-message reassembly, bounded resource cleanup across repeated churn, manual
 multi-destination cast (MDC), subscription reconnect, silent-client liveness reaping,

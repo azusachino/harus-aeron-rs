@@ -2,7 +2,7 @@
 
 This document is the starting matrix for the `v0.0.8 — aeron-cluster` milestone.
 The authoritative source is the pinned `vendor/aeron` checkout; the row-level ledger
-is [`test/upstream_map.jsonl`](../test/upstream_map.jsonl).
+is [`test/upstream_map.jsonl`](https://github.com/azusachino/harus-aeron-rs/blob/main/test/upstream_map.jsonl).
 
 ## Baseline
 
