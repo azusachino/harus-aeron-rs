@@ -21,7 +21,8 @@ ledger is 268/268 files resolved: 175 bounded equivalents and 93 documented skip
 The 83 driver/client system-test rows are specifically 43 bounded equivalents and 40
 skips; this is a complete audit, not a claim of full Java method parity. See
 [`docs/plan.md`](docs/plan.md), [`docs/system-test-parity-boundaries.md`](docs/system-test-parity-boundaries.md),
-and [`docs/cluster-parity-boundaries.md`](docs/cluster-parity-boundaries.md).
+[`docs/cluster-parity-boundaries.md`](docs/cluster-parity-boundaries.md), and
+[`docs/interop-soak.md`](docs/interop-soak.md).
 
 ## Getting Started
 

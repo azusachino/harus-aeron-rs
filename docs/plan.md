@@ -261,7 +261,12 @@ equivalent or an explicit skip; the remaining skip boundaries are recorded in
 open work rather than being counted as full parity. The fuzz slice now has four
 `libfuzzer-sys` targets for frame flyweights, URI parsing, ring-buffer reads, and
 term-buffer reads; `make fuzz-check` compiles them and `make fuzz` runs them when
-`cargo-fuzz` is installed.
+`cargo-fuzz` is installed. The bounded Rust process soak is available as
+`make interop-rust-soak` (1,000 ordered UDP messages by default), while `make stress`
+also runs the existing three-process custom-protocol cluster failover comparison.
+These are process and transport gates, not Java wire, Archive replication, packet-loss,
+or full upstream system-test parity claims; the boundaries remain documented in the
+driver and cluster parity notes.
 
 ### v0.1.0 — Release
 268-test-file parity (minus documented Java-specific exceptions), interop-smoke +

@@ -1,6 +1,7 @@
 //! Cross-process Rust client probe used by the driver interop smoke harness.
 
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,25 @@ const UDP_PUBLISHER_CLIENT_ID: i64 = 9_102;
 const UDP_SUBSCRIBER_CLIENT_ID: i64 = 9_103;
 const PAYLOAD: &[u8] = b"rust-client-through-rust-driver";
 const TIMEOUT: Duration = Duration::from_secs(15);
+
+fn configured_message_count() -> Result<usize> {
+    let value = env::var("INTEROP_SOAK_MESSAGES").unwrap_or_else(|_| "1".to_string());
+    let count = value.parse::<usize>().map_err(|_| {
+        AeronError::IllegalState("INTEROP_SOAK_MESSAGES must be a positive integer".into())
+    })?;
+    if count == 0 {
+        return Err(AeronError::IllegalState(
+            "INTEROP_SOAK_MESSAGES must be a positive integer".into(),
+        ));
+    }
+    Ok(count)
+}
+
+fn soak_payload(sequence: usize) -> Vec<u8> {
+    let mut payload = PAYLOAD.to_vec();
+    payload.extend_from_slice(&(sequence as u64).to_le_bytes());
+    payload
+}
 
 fn client(directory: PathBuf, client_id: i64) -> Result<ClientConductor<'static>> {
     let cnc = CncFile::map_existing(directory.join(CNC_FILE))?;
@@ -82,28 +102,32 @@ fn run_udp_publisher(directory: PathBuf, endpoint: &str) -> Result<()> {
     let channel = format!("aeron:udp?endpoint={endpoint}");
     let registration = conductor.add_publication(&channel, STREAM_ID)?;
     let deadline = Instant::now() + TIMEOUT;
-    let mut payload = PAYLOAD.to_vec();
-    let source = AtomicBuffer::new(&mut payload);
-    let mut offered = false;
+    let message_count = configured_message_count()?;
+    let mut offered = 0;
 
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && offered < message_count {
         conductor.do_work()?;
         if let Some(publication) = conductor.publication(registration) {
-            let position = publication.offer(&source, 0, PAYLOAD.len())?;
-            offered |= position > 0;
-            if offered {
-                // Keep the datagram in flight long enough for the independent subscriber
-                // process to complete its SETUP/SM handshake and poll the payload.
-                std::thread::sleep(Duration::from_millis(100));
-                println!("Rust multi-process UDP publisher passed");
-                return Ok(());
+            let mut payload = soak_payload(offered);
+            let payload_len = payload.len();
+            let source = AtomicBuffer::new(&mut payload);
+            if publication.offer(&source, 0, payload_len)? > 0 {
+                offered += 1;
             }
         }
         std::thread::yield_now();
     }
 
+    if offered == message_count {
+        // Keep the final datagram in flight long enough for the independent subscriber
+        // process to complete its poll before the publisher exits.
+        std::thread::sleep(Duration::from_millis(100));
+        println!("Rust multi-process UDP publisher passed: messages={offered}");
+        return Ok(());
+    }
+
     Err(AeronError::IllegalState(format!(
-        "Rust UDP publisher timed out: offered={offered}"
+        "Rust UDP publisher timed out: offered={offered}, expected={message_count}"
     )))
 }
 
@@ -112,28 +136,55 @@ fn run_udp_subscriber(directory: PathBuf, endpoint: &str) -> Result<()> {
     let channel = format!("aeron:udp?endpoint={endpoint}");
     let registration = conductor.add_subscription(&channel, STREAM_ID)?;
     let deadline = Instant::now() + TIMEOUT;
-    let mut received = Vec::new();
+    let message_count = configured_message_count()?;
+    let mut ready = false;
+    let mut received = 0;
+    let mut mismatch = None;
 
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && received < message_count {
         conductor.do_work()?;
+        if !ready && conductor.subscription(registration).is_some() {
+            println!("Rust UDP subscriber ready");
+            std::io::stdout()
+                .flush()
+                .map_err(|error| AeronError::IllegalState(error.to_string()))?;
+            ready = true;
+        }
         if let Some(subscription) = conductor.subscription_mut(registration) {
             subscription.poll(
-                |buffer, offset, length, _header| {
-                    received.resize(length, 0);
-                    buffer.get_bytes(offset, &mut received);
+                |buffer, offset, length, header| {
+                    let mut payload = vec![0; length];
+                    buffer.get_bytes(offset, &mut payload);
+                    let expected = soak_payload(received);
+                    if mismatch.is_none() && payload != expected {
+                        mismatch = Some(format!(
+                            "unexpected payload at sequence {received}: term_offset={}",
+                            header.term_offset()
+                        ));
+                    }
+                    received += 1;
                 },
                 10,
             );
         }
-        if received == PAYLOAD {
-            println!("Rust multi-process UDP subscriber passed");
-            return Ok(());
-        }
         std::thread::yield_now();
     }
 
+    if received >= message_count {
+        if let Some(mismatch) = mismatch {
+            return Err(AeronError::IllegalState(mismatch));
+        }
+        if received != message_count {
+            return Err(AeronError::IllegalState(format!(
+                "Rust UDP subscriber received extra messages: received={received}, expected={message_count}"
+            )));
+        }
+        println!("Rust multi-process UDP subscriber passed: messages={received}");
+        return Ok(());
+    }
+
     Err(AeronError::IllegalState(format!(
-        "Rust UDP subscriber timed out: received={received:?}"
+        "Rust UDP subscriber timed out: received={received}, expected={message_count}"
     )))
 }
 
