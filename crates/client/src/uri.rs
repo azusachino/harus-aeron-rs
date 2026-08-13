@@ -583,13 +583,45 @@ mod tests {
 
     #[test]
     fn should_parse_with_multiple_parameters() {
-        let uri =
-            ChannelUri::parse("aeron:udp?endpoint=224.10.9.8:4567|interface=192.168.0.3|ttl=16")
-                .unwrap();
+        let uri = ChannelUri::parse(
+            "aeron:udp?endpoint=224.10.9.8|port=4567|interface=192.168.0.3|ttl=16",
+        )
+        .unwrap();
 
-        assert_eq!(uri.get("endpoint"), Some("224.10.9.8:4567"));
+        assert_eq!(uri.get("endpoint"), Some("224.10.9.8"));
+        assert_eq!(uri.get("port"), Some("4567"));
         assert_eq!(uri.get("interface"), Some("192.168.0.3"));
         assert_eq!(uri.get("ttl"), Some("16"));
+    }
+
+    #[test]
+    fn should_allow_return_default_if_param_not_specified() {
+        let uri = ChannelUri::parse("aeron:udp?endpoint=224.10.9.8").unwrap();
+
+        assert_eq!(uri.get("interface"), None);
+        assert_eq!(uri.get_or("interface", "192.168.0.0"), "192.168.0.0");
+    }
+
+    #[test]
+    fn should_round_trip_to_string() {
+        let uri_string = "aeron:udp?endpoint=224.10.9.8:777";
+        let uri = ChannelUri::parse(uri_string).unwrap();
+
+        assert_eq!(uri.to_string(), uri_string);
+    }
+
+    #[test]
+    fn should_round_trip_to_string_builder_with_prefix() {
+        let mut builder = ChannelUriStringBuilder::new();
+        builder
+            .prefix(SPY_QUALIFIER)
+            .media(UDP_MEDIA)
+            .endpoint("224.10.9.8:777");
+        let uri_string = builder.build();
+        let uri = ChannelUri::parse(&uri_string).unwrap();
+
+        assert_eq!(uri_string, "aeron-spy:aeron:udp?endpoint=224.10.9.8:777");
+        assert_eq!(uri.to_string(), uri_string);
     }
 
     #[test]
@@ -605,6 +637,14 @@ mod tests {
         let uri_str = ChannelUri::add_session_id("aeron:ipc", 42).unwrap();
         let parsed = ChannelUri::parse(&uri_str).unwrap();
         assert_eq!(parsed.get(SESSION_ID_PARAM_NAME), Some("42"));
+    }
+
+    #[test]
+    fn should_build_basic_ipc_channel() {
+        let mut builder = ChannelUriStringBuilder::new();
+        builder.media(IPC_MEDIA);
+
+        assert_eq!(builder.build(), "aeron:ipc");
     }
 
     #[test]
