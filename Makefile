@@ -12,7 +12,7 @@ INTEROP_SOAK_MESSAGES ?= 1000
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check build build-driver test test-unit test-integration test-py lint check clean run \
-       tutorial-check bench stress miri \
+       tutorial-check bench fuzz fuzz-check stress miri \
        setup-upstream-aeron setup-upstream-tokio \
        interop interop-smoke interop-rust-smoke cluster-failover-repro status test-parity
 
@@ -66,6 +66,19 @@ tutorial-check:  ## Build the tutorial learner-stub workspace
 
 bench:  ## Run benchmarks (once crates/*/benches exist)
 	$(NIX_RUN) cargo bench --workspace
+
+fuzz-check:  ## Format and compile the libFuzzer targets without running them
+	$(NIX_RUN) cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+	$(NIX_RUN) env RUSTFLAGS="--cfg fuzzing" cargo build --manifest-path fuzz/Cargo.toml
+
+FUZZ_TIME ?= 10
+FUZZ_TARGETS := frame_decode uri_parse ring_buffer_read log_buffer_read
+
+fuzz: fuzz-check  ## Run each libFuzzer target for FUZZ_TIME seconds
+	@command -v cargo-fuzz >/dev/null || { echo "cargo-fuzz is required; install it with cargo install cargo-fuzz"; exit 1; }
+	@for target in $(FUZZ_TARGETS); do \
+		cargo fuzz run $$target -- -max_total_time=$(FUZZ_TIME); \
+	done
 
 stress:  ## Run long-running soak scenarios (once test/stress exists)
 	@echo "stress targets not yet implemented — see test/stress/"

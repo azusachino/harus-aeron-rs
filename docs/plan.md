@@ -258,7 +258,10 @@ close any parity gaps found during v0.0.2–v0.0.8, document intentional Java-sp
 test skips. The current hardening audit resolves all 268 ledger rows as either a bounded
 equivalent or an explicit skip; the remaining skip boundaries are recorded in
 [`docs/system-test-parity-boundaries.md`](system-test-parity-boundaries.md) and remain
-open work rather than being counted as full parity.
+open work rather than being counted as full parity. The fuzz slice now has four
+`libfuzzer-sys` targets for frame flyweights, URI parsing, ring-buffer reads, and
+term-buffer reads; `make fuzz-check` compiles them and `make fuzz` runs them when
+`cargo-fuzz` is installed.
 
 ### v0.1.0 — Release
 268-test-file parity (minus documented Java-specific exceptions), interop-smoke +
