@@ -5,6 +5,18 @@ command is identified by a correlation id, and the driver later publishes a type
 Agrona broadcast buffer. The conductor must reconcile those responses into resources without
 assuming that the driver is trustworthy or that responses arrive in command order.
 
+The whole chapter is one lookup table: `registration_states: HashMap<i64, RegistrationState>`,
+keyed by the correlation id that Chapter 3 introduced. `RegistrationState` in
+`crates/client/src/conductor.rs` is a plain three-value enum — `Pending`, `Ready`, `Closed` — and
+nearly every method on `ClientConductor` is really just "look up a correlation id in this map,
+check its state, and transition it." A publication-ready event promotes `Pending` to `Ready`; an
+error, a client-timeout, a close, or a completed removal moves it to `Closed`. Because the driver
+is untrusted and asynchronous, the conductor never assumes an event arrives once, in order, or at
+all — it only trusts what the table says the current state is. That's why the struct also keeps a
+parallel `pending_since: HashMap<i64, Instant>`: a command's row in the table has a birth time, so
+`do_work` can notice a correlation id that has sat in `Pending` past the inter-service timeout and
+raise a timeout instead of waiting forever.
+
 ## Response flyweights and demultiplexing
 
 `driver_events.rs` mirrors the upstream response layouts: publication-ready, subscription-ready,

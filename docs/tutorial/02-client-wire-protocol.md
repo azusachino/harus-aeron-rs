@@ -4,6 +4,15 @@ The Aeron Client (`aeron-client` in Rust, `io.aeron` in Java) manages the wire p
 
 In this chapter, you will learn the design principles behind Aeron's wire protocol and log buffer operations, and implement the learner stubs in `tutorial/client`.
 
+Two tables carry this whole chapter, and they're both small enough to hold in your head at once.
+The first is the 32-byte `DataHeaderFlyweight` that rides in front of every payload on the wire —
+learn its field offsets and you've learned the wire protocol, because everything else (SM, NAK,
+SETUP, RTTM) is a variation on the same 8-byte common header. The second is the log buffer's
+metadata descriptor: four 64-bit counters that between them encode which of the three term
+partitions is being written, which is being read, and which is sitting clean waiting for its turn.
+Neither table needs a flowchart next to it — the rotation logic falls out of the layout once you
+see it.
+
 ---
 
 ## 1. Wire Protocol Frame Layouts (`protocol.rs`)
@@ -28,6 +37,20 @@ All messages sent over UDP or shared memory IPC are framed with standard Aeron h
 ---
 
 ## 2. Three-Term Log Buffer Architecture (`logbuffer.rs`)
+
+Every `DataHeaderFlyweight` you just read carries a `term_id` and a `term_offset`, and those two
+fields only make sense once you know where they land: a fixed-size ring of exactly three term
+buffers. `crates/client/src/logbuffer.rs` is deliberately table-first about this — most of the
+file is offset constants (`LOG_MTU_LENGTH_OFFSET` = 272, `LOG_TERM_LENGTH_OFFSET` = 276,
+`LOG_PAGE_SIZE_OFFSET` = 280, `LOG_IS_CONNECTED_OFFSET` = 136, `LOG_END_OF_STREAM_POSITION_OFFSET`
+= 128) into a 4096-byte metadata buffer that sits alongside the three term buffers on disk. The
+three tail counters at `TERM_TAIL_COUNTERS_OFFSET` (one 64-bit counter per partition, packing
+`term_id` in the high 32 bits and `term_offset` in the low 32 bits) plus the single
+`LOG_ACTIVE_TERM_COUNT_OFFSET` counter are the entire rotation mechanism: `active_term_count %
+PARTITION_COUNT` tells you which of the three partitions is currently being written, and bumping
+that counter by one (paired with resetting the next partition's tail) is the entire "flowchart" of
+term rotation. Everything downstream — `compute_position`, gap scanning, term rebuilding — is just
+arithmetic over those four numbers.
 
 Aeron streams use a 3-partition rotated log buffer layout. At any moment:
 - Partition $i \bmod 3$ is active for append/write.

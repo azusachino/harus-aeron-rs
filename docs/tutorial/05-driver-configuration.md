@@ -2,6 +2,19 @@
 
 This chapter covers the media driver configuration defaults and `PublicationParams` URI parsing logic.
 
+There's no exotic data structure to draw here — the property-name/default-value table in
+`configuration.rs` *is* the chapter's table, and it's already exactly the shape you'd want it in:
+a flat list of `(PROP_NAME, DEFAULT)` pairs like `MTU_LENGTH_PROP_NAME` / `MTU_LENGTH_DEFAULT =
+1408` or `TERM_BUFFER_LENGTH_PROP_NAME` / `TERM_BUFFER_LENGTH_DEFAULT = 16 * 1024 * 1024`. The
+useful framing isn't the table itself, it's what `PublicationParams` does with it:
+`crates/driver/src/publication_params.rs` parses a channel URI exactly once per publication and
+folds the result — URI overrides layered on top of the configuration defaults — into a single flat
+`PublicationParams` struct (`linger_timeout_ns`, `term_length`, `mtu_length`,
+`publication_window_length`, `initial_term_id`/`term_id`/`term_offset`, `session_id`, and so on).
+Everything downstream in the driver — the log factory sizing a term buffer, the sender computing a
+publication window — reads that struct once and never re-parses the URI. Treat `PublicationParams`
+as derived, cached state, not a parser you re-run on every duty cycle.
+
 ## Configuration Defaults
 
 `crates/driver/src/configuration.rs` mirrors upstream `io.aeron.driver.Configuration.java`. It defines:
