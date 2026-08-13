@@ -47,4 +47,8 @@ Aeron uses explicit single-threaded agent duty cycles (`do_work()`) rather than 
 
 ## Leader Failover & Parity Verification
 
-The `aeron-cluster` implementation resolves the stuck-failover scenario identified in `harus-aeron-zig` by maintaining strict majority quorum checks (`(len / 2) + 1`) and deterministic state transitions.
+The cluster core exercises strict majority quorum checks (`(len / 2) + 1`) and
+deterministic state transitions after a leader failure. The Tokio UDP comparison
+harness also runs independent node/client processes under load, but it is a custom
+comparison protocol without Aeron wire compatibility or Archive replication; it does
+not claim full resolution of the sibling project's Aeron cluster issue.

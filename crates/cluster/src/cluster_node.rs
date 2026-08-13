@@ -64,6 +64,7 @@ impl ClusterNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codecs::ClusterRole;
 
     #[test]
     fn should_launch_and_step_cluster_node() {
@@ -80,5 +81,18 @@ mod tests {
 
         node.close();
         assert_eq!(node.step().unwrap(), 0);
+    }
+
+    #[test]
+    fn should_step_a_single_node_into_leadership() {
+        let ctx = ClusterNodeContext::new(0, vec![ClusterMember::new(0, "aeron:ipc", "aeron:ipc")]);
+        let mut node = ClusterNode::launch(ctx);
+        node.consensus_module_mut().start_election();
+
+        assert_eq!(node.step().unwrap(), 1);
+        assert_eq!(
+            node.consensus_module().state_machine().role(),
+            ClusterRole::Leader
+        );
     }
 }

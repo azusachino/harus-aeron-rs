@@ -13,12 +13,13 @@ Cargo workspace mirroring upstream Aeron's actual module boundaries: `agrona`
 (Conductor/Sender/Receiver + UDP transport, also home to the `aeron-driver` binary),
 `aeron-archive`, and `aeron-cluster`.
 
-The current branch has a working driver slice: shared mmap CnC/log buffers, real
-`DriverConductor` command processing, IPC and UDP publication paths, flow control and
-NAK retransmission, and a managed `MediaDriver` lifecycle. The latest parity ledger is
-52/268 upstream test files (39/41 driver files); this is evidence for the v0.1 driver
-milestone, not a claim of full Aeron parity. `aeron-archive` and `aeron-cluster` remain
-future phases — see [`docs/plan.md`](docs/plan.md).
+The current branch has working driver and Archive slices plus a bounded cluster core:
+shared mmap CnC/log buffers, real `DriverConductor` command processing, IPC and UDP
+publication paths, Archive control/runtime services, deterministic cluster election,
+node state, recording-log metadata, and failover comparison tests. The latest parity
+ledger is 165/268 upstream test files; the cluster rows are bounded equivalents or
+documented skips, not full Java multi-process/Archive parity. See
+[`docs/plan.md`](docs/plan.md) and [`docs/cluster-parity-boundaries.md`](docs/cluster-parity-boundaries.md).
 
 ## Getting Started
 

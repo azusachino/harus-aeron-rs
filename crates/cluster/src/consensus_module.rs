@@ -16,6 +16,7 @@ pub struct ConsensusModule {
     heartbeat_interval: Duration,
     last_heartbeat: Instant,
     votes_received: HashSet<i32>,
+    appointed_leader_id: Option<i32>,
 }
 
 impl ConsensusModule {
@@ -32,6 +33,7 @@ impl ConsensusModule {
             heartbeat_interval: Duration::from_millis(50),
             last_heartbeat: Instant::now(),
             votes_received: HashSet::new(),
+            appointed_leader_id: None,
         }
     }
 
@@ -43,8 +45,34 @@ impl ConsensusModule {
         (self.members.len() / 2) + 1
     }
 
+    pub fn appointed_leader_id(&self) -> Option<i32> {
+        self.appointed_leader_id
+    }
+
+    pub fn set_appointed_leader(&mut self, member_id: Option<i32>) {
+        self.appointed_leader_id = member_id;
+        self.last_heartbeat = Instant::now();
+    }
+
     pub fn do_work(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
         let mut work_count = 0;
+
+        if let Some(appointed_leader_id) = self.appointed_leader_id {
+            if appointed_leader_id == self.state_machine.member_id()
+                && self.state_machine.role() != ClusterRole::Leader
+            {
+                self.state_machine.transition_to_appointed_leader();
+                return Ok(1);
+            }
+
+            if appointed_leader_id != self.state_machine.member_id()
+                && self.state_machine.role() == ClusterRole::Candidate
+            {
+                self.state_machine
+                    .transition_to_follower(appointed_leader_id, self.state_machine.term_id());
+                return Ok(1);
+            }
+        }
 
         match self.state_machine.role() {
             ClusterRole::Follower => {
@@ -160,5 +188,50 @@ mod tests {
         consensus.on_vote_response(2, 1, true);
         consensus.do_work().unwrap();
         assert_eq!(consensus.state_machine().role(), ClusterRole::Leader);
+    }
+
+    #[test]
+    fn should_elect_the_appointed_member_without_a_ballot() {
+        let members = vec![
+            ClusterMember::new(0, "aeron:ipc", "aeron:ipc"),
+            ClusterMember::new(1, "aeron:ipc", "aeron:ipc"),
+            ClusterMember::new(2, "aeron:ipc", "aeron:ipc"),
+        ];
+        let mut consensus = ConsensusModule::new(1, members);
+        consensus.set_appointed_leader(Some(1));
+
+        assert_eq!(consensus.do_work().unwrap(), 1);
+        assert_eq!(consensus.appointed_leader_id(), Some(1));
+        assert_eq!(consensus.state_machine().role(), ClusterRole::Leader);
+        assert_eq!(consensus.state_machine().leader_member_id(), 1);
+        assert_eq!(consensus.state_machine().term_id(), 1);
+    }
+
+    #[test]
+    fn should_elect_a_single_node_from_its_self_vote() {
+        let members = vec![ClusterMember::new(0, "aeron:ipc", "aeron:ipc")];
+        let mut consensus = ConsensusModule::new(0, members);
+        consensus.start_election();
+
+        assert_eq!(consensus.quorum_size(), 1);
+        assert_eq!(consensus.do_work().unwrap(), 1);
+        assert_eq!(consensus.state_machine().role(), ClusterRole::Leader);
+        assert_eq!(consensus.state_machine().leader_member_id(), 0);
+    }
+
+    #[test]
+    fn should_not_start_an_election_for_a_different_appointed_member() {
+        let members = vec![
+            ClusterMember::new(0, "aeron:ipc", "aeron:ipc"),
+            ClusterMember::new(1, "aeron:ipc", "aeron:ipc"),
+            ClusterMember::new(2, "aeron:ipc", "aeron:ipc"),
+        ];
+        let mut consensus = ConsensusModule::new(0, members);
+        consensus.set_appointed_leader(Some(1));
+        consensus.start_election();
+
+        assert_eq!(consensus.do_work().unwrap(), 1);
+        assert_eq!(consensus.state_machine().role(), ClusterRole::Follower);
+        assert_eq!(consensus.state_machine().leader_member_id(), 1);
     }
 }
