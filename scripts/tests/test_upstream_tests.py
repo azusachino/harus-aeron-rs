@@ -99,6 +99,22 @@ def test_report_counts_match_totals(ut, tmp_path, capsys):
     assert "1/3 resolved" in out
 
 
+def test_report_rejects_unknown_status(ut, tmp_path, capsys):
+    upstream = tmp_path / "vendor" / "aeron"
+    _touch_test_file(upstream, "aeron-client", "FooTest.java")
+    ut.cmd_init()
+
+    entries = ut.load_map()
+    key = next(iter(entries))
+    entries[key]["status"] = "implemented"
+    ut.write_map(entries)
+
+    assert ut.cmd_report() == 1
+    err = capsys.readouterr().err
+    assert "unknown parity status" in err
+    assert "implemented" in err
+
+
 def test_main_defaults_to_report(ut, tmp_path, monkeypatch, capsys):
     upstream = tmp_path / "vendor" / "aeron"
     _touch_test_file(upstream, "aeron-client", "FooTest.java")

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -83,6 +84,18 @@ def cmd_report() -> int:
     if not entries:
         rel = MAP.relative_to(ROOT)
         print(f"{rel} is empty or missing — run `scripts/upstream_tests.py init` first")
+        return 1
+
+    invalid = [
+        (entry["upstream"], entry.get("status"))
+        for entry in entries.values()
+        if entry.get("status") not in STATUSES
+    ]
+    if invalid:
+        print("unknown parity status in upstream map:", file=sys.stderr)
+        for upstream, status in invalid:
+            print(f"  {upstream}: {status!r}", file=sys.stderr)
+        print(f"expected one of: {', '.join(STATUSES)}", file=sys.stderr)
         return 1
 
     by_layer: dict[str, Counter[str]] = {}
