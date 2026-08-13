@@ -163,17 +163,34 @@ impl<'a> OneToOneRingBuffer<'a> {
         let mut current_head = head;
 
         while current_head < tail && work_count < limit {
+            if current_head < 0 {
+                break;
+            }
             let index = (current_head as usize) & (self.capacity - 1);
+            if index + HEADER_LENGTH > self.capacity {
+                break;
+            }
             let length = self.buffer.get_i32_volatile(index + LENGTH_OFFSET);
             if length <= 0 {
                 break;
             }
 
             let msg_type_id = self.buffer.get_i32(index + TYPE_OFFSET);
-            let aligned_record_length = align(length as usize, ALIGNMENT);
+            let record_length = length as usize;
+            let aligned_record_length = align(record_length, ALIGNMENT);
+            if record_length < HEADER_LENGTH
+                || aligned_record_length > self.capacity
+                || index.saturating_add(aligned_record_length) > self.capacity
+                || (aligned_record_length as i64) > tail.saturating_sub(current_head)
+            {
+                break;
+            }
+            let Some(next_head) = current_head.checked_add(aligned_record_length as i64) else {
+                break;
+            };
 
             if msg_type_id == PADDING_MSG_TYPE_ID {
-                current_head += aligned_record_length as i64;
+                current_head = next_head;
                 continue;
             }
 
@@ -181,10 +198,10 @@ impl<'a> OneToOneRingBuffer<'a> {
                 msg_type_id,
                 &self.buffer,
                 index + HEADER_LENGTH,
-                (length as usize) - HEADER_LENGTH,
+                record_length - HEADER_LENGTH,
             );
 
-            current_head += aligned_record_length as i64;
+            current_head = next_head;
             work_count += 1;
         }
 
@@ -233,6 +250,20 @@ mod tests {
         assert_eq!(read_count, 1);
         assert!(called);
         assert_eq!(rb.head(), 16);
+    }
+
+    #[cfg(not(loom))]
+    #[test]
+    fn test_spsc_ring_buffer_stops_on_malformed_record_length() {
+        let mut backing = [0u8; 128 + TRAILER_LENGTH];
+        let buffer = AtomicBuffer::new(&mut backing);
+        let rb = OneToOneRingBuffer::new(buffer.clone()).unwrap();
+
+        buffer.put_i32(0, 4);
+        buffer.put_i64(rb.capacity() + TAIL_POSITION_OFFSET, 8);
+
+        assert_eq!(rb.read(|_, _, _, _| {}), 0);
+        assert_eq!(rb.head(), 0);
     }
 
     #[cfg(not(loom))]

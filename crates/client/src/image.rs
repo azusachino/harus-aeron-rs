@@ -6,6 +6,7 @@ use crate::logbuffer::{
     Header, NO_END_OF_STREAM_POSITION, TermReader, end_of_stream_position, index_by_position,
 };
 use agrona::AtomicBuffer;
+use agrona::counters::AtomicCounter;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -20,6 +21,7 @@ pub struct Image {
     correlation_id: i64,
     source_identity: String,
     subscriber_position: Arc<AtomicI64>,
+    cnc_subscriber_position: Option<AtomicCounter<'static>>,
     // Kept alive so `term_buffers`' raw-pointer AtomicBuffer views stay valid; both this
     // Image and any Publication/Subscription over the same log clone the same Arc, so writes
     // through one are visible through all — see LogBuffers' doc comment.
@@ -59,6 +61,7 @@ impl Image {
             correlation_id,
             source_identity,
             subscriber_position,
+            cnc_subscriber_position: None,
             log_buffers,
             term_buffers,
             is_closed: false,
@@ -118,6 +121,10 @@ impl Image {
         self.is_closed = true;
     }
 
+    pub(crate) fn set_cnc_subscriber_position(&mut self, counter: AtomicCounter<'static>) {
+        self.cnc_subscriber_position = Some(counter);
+    }
+
     pub fn position(&self) -> i64 {
         if self.is_closed {
             0
@@ -149,6 +156,9 @@ impl Image {
 
         self.subscriber_position
             .store(new_position, Ordering::Release);
+        if let Some(counter) = &self.cnc_subscriber_position {
+            counter.set_ordered(new_position);
+        }
         Ok(())
     }
 
@@ -188,6 +198,9 @@ impl Image {
             let new_position = position + bytes_read as i64;
             self.subscriber_position
                 .store(new_position, Ordering::Release);
+            if let Some(counter) = &self.cnc_subscriber_position {
+                counter.set_ordered(new_position);
+            }
         }
 
         fragments_read
@@ -197,6 +210,10 @@ impl Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cnc_file::{
+        COUNTER_METADATA_LENGTH, CncFile, DEFAULT_COUNTER_VALUES_LENGTH, DEFAULT_ERROR_LOG_LENGTH,
+        DEFAULT_TO_CLIENTS_LENGTH, DEFAULT_TO_DRIVER_LENGTH,
+    };
     use crate::logbuffer::{
         FRAME_ALIGNMENT, HEADER_LENGTH, PAGE_MIN_SIZE, TERM_MIN_LENGTH, align, compute_position,
     };
@@ -275,6 +292,26 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_backward_and_unaligned_positions() {
+        let subscriber_pos = Arc::new(AtomicI64::new(0));
+        let log_buffers = create_test_log_buffers();
+        let mut image = Image::new(
+            1,
+            SESSION_ID,
+            INITIAL_TERM_ID,
+            0,
+            subscriber_pos,
+            log_buffers,
+            "ipc".to_string(),
+            CORRELATION_ID,
+        );
+
+        image.set_position(64).unwrap();
+        assert!(image.set_position(32).is_err());
+        assert!(image.set_position(65).is_err());
+    }
+
+    #[test]
     fn should_report_correct_position_on_reception() {
         let position_bits_to_shift = (TERM_MIN_LENGTH as usize).trailing_zeros() as i32;
         let initial_position =
@@ -300,6 +337,25 @@ mod tests {
 
         terms[0].put_bytes(0, &frame_bytes);
 
+        let cnc_path = std::env::temp_dir().join(format!(
+            "aeron-client-image-cnc-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&cnc_path);
+        let cnc = CncFile::create_new_with_regions(
+            &cnc_path,
+            DEFAULT_TO_DRIVER_LENGTH,
+            DEFAULT_TO_CLIENTS_LENGTH,
+            COUNTER_METADATA_LENGTH,
+            DEFAULT_COUNTER_VALUES_LENGTH,
+            DEFAULT_ERROR_LOG_LENGTH,
+            10_000_000_000,
+        )
+        .unwrap();
+        cnc.write_counter_metadata(0, 1, 0, initial_position, "subscriber")
+            .unwrap();
+
         let mut image = Image::new(
             1,
             SESSION_ID,
@@ -310,6 +366,7 @@ mod tests {
             "ipc".to_string(),
             CORRELATION_ID,
         );
+        image.set_cnc_subscriber_position(AtomicCounter::new(cnc.counters_values_buffer(), 0));
 
         let mut called = false;
         let read = image.poll(
@@ -328,5 +385,12 @@ mod tests {
             subscriber_pos.load(Ordering::Acquire),
             initial_position + aligned_frame_len as i64
         );
+        assert_eq!(
+            cnc.counters_values_buffer().get_i64_volatile(0),
+            initial_position + aligned_frame_len as i64
+        );
+
+        drop(cnc);
+        let _ = std::fs::remove_file(cnc_path);
     }
 }

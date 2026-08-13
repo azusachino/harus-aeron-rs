@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import selectors
 import socket
 import subprocess
@@ -32,6 +33,7 @@ def _start_driver() -> tuple[subprocess.Popen[str], Path]:
     process = subprocess.Popen(
         [str(DRIVER_BINARY)],
         cwd=ROOT,
+        env=os.environ.copy(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -71,6 +73,22 @@ def _stop_driver(process: subprocess.Popen[str]) -> None:
         process.wait()
 
 
+def _wait_for_line(process: subprocess.Popen[str], marker: str) -> None:
+    if process.stdout is None:
+        raise RuntimeError("Rust UDP subscriber stdout was not available")
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    try:
+        ready = selector.select(timeout=PROCESS_TIMEOUT)
+    finally:
+        selector.close()
+    if not ready:
+        raise RuntimeError(f"Rust UDP subscriber did not report readiness: {marker}")
+    line = process.stdout.readline().strip()
+    if marker not in line:
+        raise RuntimeError(f"Rust UDP subscriber reported unexpected output: {line}")
+
+
 def _run_probe(args: list[str]) -> None:
     _run([str(PROBE_BINARY), *args])
 
@@ -100,18 +118,22 @@ def main() -> int:
     subscriber = subprocess.Popen(
         [str(PROBE_BINARY), "udp-subscriber", str(subscriber_cnc.parent), endpoint],
         cwd=ROOT,
+        env=os.environ.copy(),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    publisher = subprocess.Popen(
-        [str(PROBE_BINARY), "udp-publisher", str(publisher_cnc.parent), endpoint],
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    publisher: subprocess.Popen[str] | None = None
     try:
+        _wait_for_line(subscriber, "Rust UDP subscriber ready")
+        publisher = subprocess.Popen(
+            [str(PROBE_BINARY), "udp-publisher", str(publisher_cnc.parent), endpoint],
+            cwd=ROOT,
+            env=os.environ.copy(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         subscriber_stdout, subscriber_stderr = subscriber.communicate(timeout=PROCESS_TIMEOUT)
         publisher_stdout, publisher_stderr = publisher.communicate(timeout=PROCESS_TIMEOUT)
         if subscriber.returncode or publisher.returncode:
@@ -124,7 +146,7 @@ def main() -> int:
             )
     finally:
         for process in (subscriber, publisher):
-            if process.poll() is None:
+            if process is not None and process.poll() is None:
                 process.kill()
                 process.wait()
         _stop_driver(subscriber_driver)

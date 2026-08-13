@@ -41,7 +41,10 @@ The driver boundary is verified with:
 - `make check`
 - `make test-parity`
 - `make interop-rust-smoke`
+- `make interop-rust-soak`
 - `make interop-smoke`
 
-These checks prove the Rust multi-process IPC/UDP paths and bidirectional Java CnC/IPC/UDP
-interop. They do not claim archive, cluster, or system-test parity.
+The smoke and soak checks prove the Rust multi-process IPC/UDP paths; the soak validates
+ordered delivery of a bounded sequence-tagged message run. `make interop-smoke` proves
+the separate bidirectional Java CnC/IPC/UDP probes. These checks do not claim archive,
+cluster, or full system-test parity.

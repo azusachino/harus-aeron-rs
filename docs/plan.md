@@ -81,14 +81,18 @@ the driver/client-relevant subset of system-tests root (67). **Exit: 83/83 drive
 system-test parity.** This is also where Java interop-smoke goes green (mirrors the zig
 repo's `INTEROP_STATUS.md` gate) — build out `deploy/interop/` here.
 
-**Current state (2026-07-27, honest re-audit):** the exit criterion is not met. A full
-method-level audit of vendor `aeron-system-tests` (319 `@Test` methods across 65 files,
-not the 83-file estimate above — see `.agents/system-test-audit.md` for the complete
-mapping) found only 15 genuine Rust system tests in `crates/driver/tests/system_tests.rs`,
-covering: IPC/UDP pub/sub roundtrip, network spy, fragmented-message reassembly, bounded
-resource cleanup across repeated churn, manual multi-destination cast (MDC), subscription
-reconnect, silent-client liveness reaping, one client running two concurrent streams, and
-single- and multi-gap NAK/retransmit loss recovery. `tutorial/driver/tests/system_tests.rs`
+**Current state (2026-08-13, honest re-audit):** the 83-file exit criterion is not met.
+The file ledger is fully classified, with 43 bounded equivalents and 40 explicit skips;
+the skips do not count as Rust parity. A method-level audit of vendor
+`aeron-system-tests` (319 `@Test` methods across 65 files, not the 83-file estimate
+above — see [the boundary matrix](system-test-parity-boundaries.md) and the original
+[audit](../.agents/system-test-audit.md)) found 20 genuine Rust system tests in
+`crates/driver/tests/system_tests.rs`, covering IPC/UDP pub/sub roundtrip, network spy,
+fragmented-message reassembly, bounded resource cleanup across repeated churn, manual
+multi-destination cast (MDC), subscription reconnect, silent-client liveness reaping,
+one client running two concurrent streams, session conflict handling, flow-control
+gating, and single- and multi-gap NAK/retransmit loss recovery. The adjacent flow-control
+integration file adds two more real endpoint tests. `tutorial/driver/tests/system_tests.rs`
 and `tutorial/driver/tests/flow_control_tests.rs` are learner stubs with zero assertions
 and do not count as coverage.
 
@@ -232,13 +236,13 @@ rather than upstream's composite replay/publication ID.
 
 The archive system-test ledger now records bounded equivalents for the core restart,
 listing, replay, truncation, basic recording, and extension flows, backed by the real
-control-service and runtime integration tests. These rows explicitly leave exclusive
-publication, client callback adapters, response-channel mode, authentication,
-replication/merge, detached-segment migration, and long-listing concurrency open; the
-remaining archive system-test rows stay `todo` until those boundaries are implemented.
+control-service and runtime integration tests. All 20 Archive system-test rows are
+classified, but those rows explicitly leave exclusive publication, client callback
+adapters, response-channel mode, authentication, replication/merge, detached-segment
+migration, and long-listing concurrency open. The classifications are bookkeeping for
+bounded evidence, not a claim that those complete upstream method families are done.
 Authentication, replication, detached segment operations, marks/counters, and the
-complete upstream test families remain open. Keep Archive ledger rows `todo` until
-their complete upstream scopes are satisfied.
+complete upstream test families remain open implementation boundaries.
 
 ### v0.0.8 — aeron-cluster
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** The
@@ -251,7 +255,18 @@ not Aeron wire-level parity; the limitation is recorded in the milestone docs.
 ### v0.0.9 — Hardening
 Soak tests, fuzz targets for codecs/ring buffer/log buffer, full `make check` green,
 close any parity gaps found during v0.0.2–v0.0.8, document intentional Java-specific
-test skips.
+test skips. The current hardening audit resolves all 268 ledger rows as either a bounded
+equivalent or an explicit skip; the remaining skip boundaries are recorded in
+[`docs/system-test-parity-boundaries.md`](system-test-parity-boundaries.md) and remain
+open work rather than being counted as full parity. The fuzz slice now has four
+`libfuzzer-sys` targets for frame flyweights, URI parsing, ring-buffer reads, and
+term-buffer reads; `make fuzz-check` compiles them and `make fuzz` runs them when
+`cargo-fuzz` is installed. The bounded Rust process soak is available as
+`make interop-rust-soak` (1,000 ordered UDP messages by default), while `make stress`
+also runs the existing three-process custom-protocol cluster failover comparison.
+These are process and transport gates, not Java wire, Archive replication, packet-loss,
+or full upstream system-test parity claims; the boundaries remain documented in the
+driver and cluster parity notes.
 
 ### v0.1.0 — Release
 268-test-file parity (minus documented Java-specific exceptions), interop-smoke +

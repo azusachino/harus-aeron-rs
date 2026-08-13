@@ -11,6 +11,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use agrona::AtomicBuffer;
+use agrona::counters::AtomicCounter;
 
 use crate::cnc_file::{
     COUNTER_METADATA_LENGTH, COUNTER_RECORD_ALLOCATED, COUNTER_VALUE_LENGTH, CncFile,
@@ -198,6 +199,15 @@ impl<'a> ClientConductor<'a> {
                 );
             }
         }
+    }
+
+    fn cnc_counter(&self, counter_id: i32) -> Option<AtomicCounter<'static>> {
+        if !self.cnc_counter_offsets.contains_key(&counter_id) {
+            return None;
+        }
+        self.cnc_file
+            .as_ref()
+            .map(|cnc| AtomicCounter::new(cnc.counters_values_buffer(), counter_id))
     }
 
     /// Register an already-open log buffer by the name used in a driver event. This is useful
@@ -518,7 +528,8 @@ impl<'a> ClientConductor<'a> {
         // a fresh network rebuild buffer, the publication's current tail for a subscriber
         // joining an already-active IPC/spy publication) -- read it rather than assuming 0.
         let initial_position = position.load(Ordering::Acquire);
-        let image = Image::new(
+        let cnc_counter = self.cnc_counter(subscriber_position_id);
+        let mut image = Image::new(
             subscription_registration_id,
             session_id,
             initial_term_id,
@@ -528,6 +539,9 @@ impl<'a> ClientConductor<'a> {
             source_identity.into(),
             correlation_id,
         );
+        if let Some(counter) = cnc_counter {
+            image.set_cnc_subscriber_position(counter);
+        }
         if let Some(subscription) = self.subscriptions.get_mut(&subscription_registration_id) {
             if subscription.stream_id() != stream_id {
                 return Err(AeronError::IllegalState(format!(

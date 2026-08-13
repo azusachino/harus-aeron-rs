@@ -12,9 +12,9 @@ INTEROP_SOAK_MESSAGES ?= 1000
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check build build-driver test test-unit test-integration test-py lint check clean run \
-       tutorial-check bench stress miri \
+       tutorial-check bench fuzz fuzz-check stress miri \
        setup-upstream-aeron setup-upstream-tokio \
-       interop interop-smoke interop-rust-smoke cluster-failover-repro status test-parity
+       interop interop-smoke interop-rust-smoke interop-rust-soak cluster-failover-repro status test-parity
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -67,8 +67,20 @@ tutorial-check:  ## Build the tutorial learner-stub workspace
 bench:  ## Run benchmarks (once crates/*/benches exist)
 	$(NIX_RUN) cargo bench --workspace
 
-stress:  ## Run long-running soak scenarios (once test/stress exists)
-	@echo "stress targets not yet implemented — see test/stress/"
+fuzz-check:  ## Format and compile the libFuzzer targets without running them
+	$(NIX_RUN) cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+	$(NIX_RUN) env RUSTFLAGS="--cfg fuzzing" cargo build --manifest-path fuzz/Cargo.toml
+
+FUZZ_TIME ?= 10
+FUZZ_TARGETS := frame_decode uri_parse ring_buffer_read log_buffer_read
+
+fuzz: fuzz-check  ## Run each libFuzzer target for FUZZ_TIME seconds
+	@command -v cargo-fuzz >/dev/null || { echo "cargo-fuzz is required; install it with cargo install cargo-fuzz"; exit 1; }
+	@for target in $(FUZZ_TARGETS); do \
+		cargo fuzz run $$target -- -max_total_time=$(FUZZ_TIME); \
+	done
+
+stress: interop-rust-soak cluster-failover-repro  ## Run bounded process soak and cluster failover gates
 
 setup-upstream-aeron:  ## Shadow-clone upstream Aeron into vendor/aeron
 	git submodule update --init --depth 1 --remote $(AERON_UPSTREAM_DIR)
@@ -87,7 +99,10 @@ interop-smoke:  ## Run the Java<->Rust CnC layout interop smoke test
 	uv run scripts/interop_smoke.py
 
 interop-rust-smoke:  ## Run Rust multi-process IPC and UDP smoke probes
-	uv run scripts/rust_process_smoke.py
+	INTEROP_SOAK_MESSAGES=1 uv run scripts/rust_process_smoke.py
+
+interop-rust-soak:  ## Run a bounded multi-process Rust UDP message soak
+	INTEROP_SOAK_MESSAGES=$(INTEROP_SOAK_MESSAGES) uv run scripts/rust_process_smoke.py
 
 cluster-failover-repro:  ## Run the real-process Tokio UDP leader-kill comparison
 	uv run scripts/cluster_failover_repro.py

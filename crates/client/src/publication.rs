@@ -480,6 +480,39 @@ mod tests {
     }
 
     #[test]
+    fn should_write_distinct_sequential_messages() {
+        let log_buffers = create_test_log_buffers(4096);
+        crate::logbuffer::set_is_connected(&log_buffers.meta_data_buffer(), true);
+        let publication_limit = Arc::new(AtomicI64::new((TERM_MIN_LENGTH * 2) as i64));
+        let publication = ConcurrentPublication::new(
+            "aeron:ipc".to_string(),
+            1,
+            42,
+            1,
+            2000,
+            2000,
+            publication_limit,
+            log_buffers.clone(),
+        );
+
+        for sequence in 0..2u8 {
+            let mut msg = [0u8; 8];
+            msg[0] = sequence;
+            let msg_len = msg.len();
+            let msg_buf = AtomicBuffer::new(&mut msg);
+            assert!(publication.offer(&msg_buf, 0, msg_len).unwrap() > 0);
+        }
+
+        let terms = log_buffers.duplicate_term_buffers();
+        assert_eq!(terms[0].get_i32(0), HEADER_LENGTH + 8);
+        assert_eq!(terms[0].get_i32(64), HEADER_LENGTH + 8);
+        assert_eq!(terms[0].get_i32(8), 0);
+        assert_eq!(terms[0].get_i32(72), 64);
+        assert_eq!(terms[0].get_u8(HEADER_LENGTH as usize), 0);
+        assert_eq!(terms[0].get_u8(64 + HEADER_LENGTH as usize), 1);
+    }
+
+    #[test]
     fn should_deliver_offered_message_to_an_independently_constructed_image() {
         // End-to-end proof that Publication and Image share real memory: a message written
         // through `Publication::offer` must be observable by an `Image` built from a *clone*
