@@ -461,6 +461,21 @@ mod tests {
     }
 
     #[test]
+    fn should_start_in_an_existing_empty_aeron_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "aeron-driver-existing-directory-{}",
+            DRIVER_INSTANCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let driver = MediaDriver::launch_in(Configuration::default(), &directory).unwrap();
+        assert!(directory.join(aeron_client::cnc_file::CNC_FILE).exists());
+
+        drop(driver);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn should_reject_launch_in_a_directory_with_existing_cnc() {
         let directory = std::env::temp_dir().join(format!(
             "aeron-driver-existing-cnc-{}",

@@ -17,9 +17,11 @@ The current branch has working driver and Archive slices plus a bounded cluster 
 shared mmap CnC/log buffers, real `DriverConductor` command processing, IPC and UDP
 publication paths, Archive control/runtime services, deterministic cluster election,
 node state, recording-log metadata, and failover comparison tests. The latest parity
-ledger is 185/268 upstream test files; the cluster rows are bounded equivalents or
-documented skips, not full Java multi-process/Archive parity. See
-[`docs/plan.md`](docs/plan.md) and [`docs/cluster-parity-boundaries.md`](docs/cluster-parity-boundaries.md).
+ledger is 268/268 files resolved: 175 bounded equivalents and 93 documented skips.
+The 83 driver/client system-test rows are specifically 43 bounded equivalents and 40
+skips; this is a complete audit, not a claim of full Java method parity. See
+[`docs/plan.md`](docs/plan.md), [`docs/system-test-parity-boundaries.md`](docs/system-test-parity-boundaries.md),
+and [`docs/cluster-parity-boundaries.md`](docs/cluster-parity-boundaries.md).
 
 ## Getting Started
 

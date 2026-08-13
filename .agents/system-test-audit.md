@@ -2,7 +2,9 @@
 
 Task: `harus-aeron-rs:driver-client-system-tests:task-1`.
 Scope: map vendor `aeron-system-tests` Java behavioral tests to Rust coverage or an explicit
-boundary. Research only — no code changed.
+boundary. This file records the original research baseline; the v0.0.9 row-level outcome is
+maintained in [`docs/system-test-parity-boundaries.md`](../docs/system-test-parity-boundaries.md)
+and `test/upstream_map.jsonl`.
 
 ## 1. Vendor file inventory
 
@@ -66,7 +68,7 @@ Method count sums to **319**, matching the epic's stated total exactly.
 
 ## 2. Rust test inventory checked
 
-- `crates/driver/tests/system_tests.rs` (670 lines, 7 `#[test]`s) — confirmed real: launches an
+- `crates/driver/tests/system_tests.rs` (about 1,540 lines, 20 `#[test]`s) — confirmed real: launches an
   actual `MediaDriver`, drives real `ClientConductor`/`DriverProxy` over CnC ring buffers, real
   IPC/UDP roundtrips, a real captured SETUP/DATA exchange, and a real relay-socket NAK/retransmit
   test.
@@ -86,7 +88,10 @@ Method count sums to **319**, matching the epic's stated total exactly.
   are explicitly labeled "Learner stub" pointing at the `crates/driver/tests/` files as the real
   reference implementation. **Not counted as coverage.**
 
-**Total Rust system-test methods doing real work: 9** (7 + 2), all in `crates/driver/tests/`.
+**Original baseline total:** 9 Rust system-test methods doing real work (7 + 2). The current
+branch has 20 tests in `crates/driver/tests/system_tests.rs` plus 2 endpoint tests in
+`flow_control_tests.rs`; the extra bounded scenarios and their ceilings are recorded in the
+v0.0.9 boundary matrix.
 
 ## 3. Category mapping (sums to 319)
 
