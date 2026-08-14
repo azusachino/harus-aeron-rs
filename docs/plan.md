@@ -85,8 +85,8 @@ repo's `INTEROP_STATUS.md` gate) — build out `deploy/interop/` here.
 The file ledger is fully classified, with 43 bounded equivalents and 40 explicit skips;
 the skips do not count as Rust parity. A method-level audit of vendor
 `aeron-system-tests` (319 `@Test` methods across 65 files, not the 83-file estimate
-above — see [the boundary matrix](system-test-parity-boundaries.md) and the original
-[audit](../.agents/system-test-audit.md)) found 20 genuine Rust system tests in
+above — see [the boundary matrix](system-test-parity-boundaries.md) and the local
+`.agents/system-test-audit.md` audit) found 20 genuine Rust system tests in
 `crates/driver/tests/system_tests.rs`, covering IPC/UDP pub/sub roundtrip, network spy,
 fragmented-message reassembly, bounded resource cleanup across repeated churn, manual
 multi-destination cast (MDC), subscription reconnect, silent-client liveness reaping,
@@ -269,8 +269,8 @@ or full upstream system-test parity claims; the boundaries remain documented in 
 driver and cluster parity notes.
 
 ### v0.1.0 — Release
-268-test-file parity (minus documented Java-specific exceptions), interop-smoke +
-interop-soak green against real Java Aeron `1.50.x`, `CHANGELOG.md` cut, tag.
+268-test-file parity (minus documented Java-specific exceptions), `make interop-smoke` +
+`make interop-soak` green against real Java Aeron `1.50.x`, `CHANGELOG.md` cut, tag.
 
 ## Workflow
 

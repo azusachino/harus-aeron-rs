@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0 (unreleased)
+
+- Implemented the bounded driver, client, Archive, and cluster foundations described
+  in the roadmap, including shared CnC/log buffers, IPC and UDP transport, Archive
+  control/runtime services, and deterministic cluster failover primitives.
+- Completed the upstream Aeron `1.50.x` test-file ledger: 175 bounded Rust
+  equivalents and 93 documented skips, resolving all 268 tracked files without
+  claiming full Java method or system-test parity.
+- Added real Java Aeron `1.50.x` CnC, IPC, and UDP interop probes plus a bounded,
+  ordered Java UDP soak through the Rust MediaDriver.
+- Added fuzz coverage and bounded process/transport gates, with the remaining
+  Java-specific, Archive, cluster, and protocol boundaries documented.
+
 ## 0.0.1 (unreleased)
 
 - Initial skeleton: Cargo workspace with stub crates `agrona`, `aeron-client`,

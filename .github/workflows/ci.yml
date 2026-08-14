@@ -31,6 +31,9 @@ jobs:
 
       - run: make check
 
+      - name: Build MkDocs site
+        run: make docs-build
+
       - name: Build tutorial learner-stub workspace
         run: make tutorial-check
 

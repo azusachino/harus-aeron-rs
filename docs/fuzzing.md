@@ -1,6 +1,6 @@
 # Fuzzing
 
-The standalone [`fuzz/`](../fuzz/) package uses `libfuzzer-sys` and stays outside
+The standalone [`fuzz/`](https://github.com/azusachino/harus-aeron-rs/tree/main/fuzz) package uses `libfuzzer-sys` and stays outside
 the main Cargo workspace. It has four deliberately small targets:
 
 - `frame_decode` exercises fixed-size Aeron DATA, ERROR, STATUS, NAK, SETUP, and

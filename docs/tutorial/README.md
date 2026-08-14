@@ -8,8 +8,8 @@ Welcome to the `harus-aeron-rs` structured course. This course mirrors the archi
 |---|---|---|
 | 01 | [Agrona Core](01-agrona-core.md) | Atomic buffers, ring buffers, and broadcast primitives |
 | 02 | [Client Wire Protocol](02-client-wire-protocol.md) | Header flyweights and SBE frame layouts |
-| 03 | [Client Log Buffers](03-client-logbuffer.md) | Shared-memory term layout and rotation |
-| 04 | [Client API](04-client-api.md) | Publications, subscriptions, and conductor interaction |
+| 03 | [Client Publication, Subscription, and Conductor](03-client-pub-sub.md) | Publications, subscriptions, and client data paths |
+| 04 | [Client Conductor and Driver Events](04-client-conductor.md) | Asynchronous registration and resource lifecycle |
 | 05 | [Driver Configuration](05-driver-configuration.md) | Configuration defaults and publication parameters |
 | 06 | [MediaDriver UDP Channel & Interface Parsing](06-driver-udp-channel.md) | Unicast, Multicast, & Control Mode URIs |
 | 07 | [MediaDriver Transport Poller & Channel Endpoints](07-driver-transport-endpoints.md) | Non-blocking UDP sockets & socket options |

@@ -1,6 +1,6 @@
 # Driver/client system-test parity boundaries
 
-The authoritative row-level ledger is [`test/upstream_map.jsonl`](../test/upstream_map.jsonl).
+The authoritative row-level ledger is [`test/upstream_map.jsonl`](https://github.com/azusachino/harus-aeron-rs/blob/main/test/upstream_map.jsonl).
 This document records the v0.0.9 hardening audit of the 83 upstream
 `aeron-system-tests` driver/client rows: 43 bounded Rust equivalents and 40
 intentional skips.
@@ -13,7 +13,7 @@ upstream file has been ported. Each ledger entry names the Rust test or source
 boundary and states the missing ceiling where the behavior is narrower.
 
 The strongest evidence is in
-[`crates/driver/tests/system_tests.rs`](../crates/driver/tests/system_tests.rs):
+[`crates/driver/tests/system_tests.rs`](https://github.com/azusachino/harus-aeron-rs/blob/main/crates/driver/tests/system_tests.rs):
 
 - real CnC registration and IPC publication/subscription;
 - real UDP publication/subscription across two drivers;

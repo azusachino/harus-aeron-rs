@@ -2,6 +2,17 @@
 
 The Aeron client turns channel/stream configuration into driver commands and exposes the data path through `ConcurrentPublication`, `Subscription`, and `Image`. The reference implementation lives under `crates/client`; the learner surface is mirrored under `tutorial/client`.
 
+The client and the driver are separate processes that never call each other directly — every
+request crosses a many-to-one ring buffer (Chapter 1) as a flat, fixed-offset record, and every
+response comes back on a broadcast buffer as another flat record. `crates/client/src/command.rs`
+defines the shape of the request side: `CorrelatedMessageFlyweight` is a 16-byte header —
+`client_id` at offset 0, `correlation_id` at offset 8 — that every command (publication add,
+subscription add, remove, counter add/remove) wraps as its first field. That `correlation_id` is
+the one piece of state that ties an asynchronous request to its eventual reply; the client
+generates it, writes it into the ring buffer, and then watches the broadcast buffer for a response
+flyweight carrying the same value. There's no request/response pairing at the transport level —
+the correlation id in this little table *is* the pairing.
+
 ## 1. Channel configuration
 
 `ChannelUri` parses `aeron:ipc` and `aeron:udp?...` strings. `ChannelUriStringBuilder` provides typed setters for endpoints, aliases, reliability, term configuration, and session identifiers. A URI must round-trip through parse and formatting without changing its meaning.

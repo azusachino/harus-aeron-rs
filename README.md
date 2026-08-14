@@ -38,6 +38,10 @@ make test
 
 # Check everything (fmt + lint + build + test)
 make check
+
+# Preview and strictly build the MkDocs Material site
+make docs-serve
+make docs-build
 ```
 
 ## Stack

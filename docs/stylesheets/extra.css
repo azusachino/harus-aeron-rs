@@ -1,0 +1,35 @@
+:root {
+  --md-text-font: "Inter";
+  --md-code-font: "JetBrains Mono";
+  --md-primary-fg-color: #4051b5;
+  --md-primary-fg-color--light: #5d6ec8;
+  --md-primary-fg-color--dark: #303f9f;
+  --md-accent-fg-color: #00b8d4;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #5d6ec8;
+  --md-primary-fg-color--light: #7986d6;
+  --md-primary-fg-color--dark: #4051b5;
+  --md-accent-fg-color: #26c6da;
+}
+
+.md-typeset h1 {
+  font-weight: 750;
+}
+
+.md-typeset h2 {
+  margin-top: 1.75em;
+}
+
+.md-typeset table:not([class]) {
+  font-size: 0.72rem;
+}
+
+.md-typeset code {
+  border-radius: 0.2rem;
+}
+
+.md-typeset .highlight pre {
+  border-radius: 0.35rem;
+}

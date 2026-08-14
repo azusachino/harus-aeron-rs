@@ -8,13 +8,15 @@ TOKIO_UPSTREAM_REPO ?= https://github.com/tokio-rs/tokio.git
 TOKIO_UPSTREAM_REF ?= tokio-1.53.1
 TOKIO_UPSTREAM_DIR ?= vendor/tokio
 INTEROP_SOAK_MESSAGES ?= 1000
+DOCS_PORT ?= 8000
 
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check build build-driver test test-unit test-integration test-py lint check clean run \
        tutorial-check bench fuzz fuzz-check stress miri \
        setup-upstream-aeron setup-upstream-tokio \
-       interop interop-smoke interop-rust-smoke interop-rust-soak cluster-failover-repro status test-parity
+       interop interop-smoke interop-soak interop-rust-smoke interop-rust-soak cluster-failover-repro status test-parity \
+       docs docs-serve docs-build
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -64,6 +66,14 @@ run:  ## Run the media driver
 tutorial-check:  ## Build the tutorial learner-stub workspace
 	$(NIX_RUN) cargo build --manifest-path tutorial/Cargo.toml --workspace
 
+docs: docs-serve  ## Preview the MkDocs tutorial site locally
+
+docs-serve:  ## Preview the MkDocs tutorial site locally
+	NO_MKDOCS_2_WARNING=1 DISABLE_MKDOCS_2_WARNING=true uv run mkdocs serve --dev-addr 127.0.0.1:$(DOCS_PORT)
+
+docs-build:  ## Build the MkDocs tutorial site strictly
+	NO_MKDOCS_2_WARNING=1 DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict
+
 bench:  ## Run benchmarks (once crates/*/benches exist)
 	$(NIX_RUN) cargo bench --workspace
 
@@ -96,7 +106,10 @@ test-parity:  ## Report Rust test-file parity against vendor/aeron's upstream te
 	uv run scripts/upstream_tests.py
 
 interop-smoke:  ## Run the Java<->Rust CnC layout interop smoke test
-	uv run scripts/interop_smoke.py
+	INTEROP_SOAK_MESSAGES=1 uv run scripts/interop_smoke.py
+
+interop-soak:  ## Run a bounded Java Aeron UDP soak through the Rust driver
+	INTEROP_SOAK_MESSAGES=$(INTEROP_SOAK_MESSAGES) uv run scripts/interop_smoke.py
 
 interop-rust-smoke:  ## Run Rust multi-process IPC and UDP smoke probes
 	INTEROP_SOAK_MESSAGES=1 uv run scripts/rust_process_smoke.py

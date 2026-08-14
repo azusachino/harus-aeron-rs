@@ -2,6 +2,30 @@
 
 This chapter introduces the `aeron-archive` module architecture, protocol codecs, persistent recording catalog, and conductor sessions.
 
+This is the chapter where the theaeronfiles philosophy pays off directly, because Archive's state
+genuinely is a set of files you might have to read cold, at 3am, after a crash — not an
+abstraction that happens to be backed by files. Two tables matter more than any control-flow
+diagram here.
+
+The first is the recording descriptor itself. `crates/archive/src/protocol/recording_descriptor.rs`
+defines `RecordingDescriptor` as SBE template 22 with an 80-byte fixed block
+(`RecordingDescriptor::BLOCK_LENGTH = 80`) — `control_session_id`, `correlation_id`,
+`recording_id`, `start_position`/`stop_position`, `start_timestamp`/`stop_timestamp`,
+`initial_term_id`, `segment_file_length`, `term_buffer_length`, `mtu_length`, `session_id`,
+`stream_id` — followed by three length-prefixed ASCII fields (`stripped_channel`,
+`original_channel`, `source_identity`). That fixed block is small and dense on purpose: it's the
+part of a recording's identity that's cheap to scan across thousands of recordings without
+touching the variable-length tail.
+
+The second is the catalog that indexes those descriptors. `crates/archive/src/storage/catalog.rs`
+wraps a `CatalogHeader` (`version`, `length`, `next_recording_id`) around a `HashMap<i64,
+RecordingDescriptor>` plus an ordered `Vec` for range scans, and hands out recording IDs
+sequentially from `next_recording_id`. `archive-mark.dat`
+(`crates/archive/src/storage/archive_mark_file.rs`) is the liveness half of the same story: a
+fixed header plus an embedded error buffer that a *separate* process — `aeron-archive-tool` — can
+open and read without disturbing a running Archive, to answer "is this Archive alive, and what did
+it last log," entirely from the file, no RPC required.
+
 ## Archive Control Protocol & Flyweights
 
 - `crates/archive/src/protocol/archive_exception.rs`: upstream Archive error-code constants and stable string formatting for unknown codes.
@@ -18,12 +42,20 @@ This chapter introduces the `aeron-archive` module architecture, protocol codecs
 
 - `crates/archive/src/storage/catalog.rs`: `CatalogHeader` and `Catalog` manager handling sequential `recording_id` allocation, crash-recovery validation of the next ID, and descriptor indexing.
 - `crates/archive/tests/catalog_tests.rs`: catalog state transitions, stream/history lookup, stop/extend/remove index updates, and persisted descriptor behavior; legacy page-layout, checksum, growth, and segment-scan recovery remain outside the current format.
+- `crates/archive/tests/catalog_jumbo_recordings.rs`: catalog and listing-session behavior across a large (192) recording population, proving index growth, ranged listing, and URI-filtered scans stay correct at jumbo scale.
+- `crates/archive/tests/properties.rs`: `proptest` coverage for catalog recording-ID allocation and recording-descriptor round-trip properties.
+- `crates/archive/tests/archive_tests.rs`: integration coverage for the catalog, SBE connect/start-recording/control-response codecs, and `ArchiveConductor` lifecycle in combination, independent of the full external-client `control_service.rs` test.
 - `crates/archive/tests/fail_control_response_listener.rs`: callback-result equivalent of the upstream fail-on-unexpected-response/descriptor helper; a null-correlation response is allowed, while other responses and all descriptors produce full diagnostics because the Rust Archive client listener trait is not implemented yet.
 - `crates/archive/tests/fail_recording_events_listener.rs`: callback-result equivalent of the upstream fail-on-recording-event helper, covering start, progress, and stop diagnostics without claiming a Rust client listener API that does not exist yet.
 - `crates/archive/src/storage/catalog_index.rs`: ordered recording-id to catalog-offset index with monotonic insertion, binary lookup, growth, and removal semantics.
 - `crates/archive/src/storage/catalog_view.rs`: read-only listing of all or one persisted recording descriptor.
 - `crates/archive/src/admin/archive_tool.rs`: bounded catalog inspection and administration with `describe`, `describe-all`, state transitions, invalid-record compaction, unknown-segment cleanup, separate mark-file link resolution, and descriptor verification; frame-level repair/checksum, capacity mutation, and detached-range verification remain outside the current boundary.
+- `crates/archive/src/bin/aeron-archive-tool.rs`: read-only Archive catalog inspection CLI entry point wrapping `archive_tool::run`.
+- `crates/archive/tests/archive_tool_tests.rs`: unit-level coverage of `archive_tool`'s capacity, compaction, orphaned-segment deletion, and verify/mark-invalid functions against a real catalog.
+- `crates/archive/tests/archive_tool_cli.rs`: end-to-end CLI coverage of `archive_tool::run`'s `describe`/`describe-all` output and state-transition commands.
+- `crates/archive/tests/archive_tool_separate_mark_file.rs`: proves `resolve_mark_file` and `archive_tool::run` follow a separate mark-file directory through its `archive-mark.lnk` indirection.
 - `crates/archive/tests/migration_utils.rs`: legacy v2 mark-file and catalog-frame fixtures for migration coverage.
+- `crates/archive/tests/archive_migration.rs`: end-to-end v2.1.0-to-v3.0.0 migration coverage over the `migration_utils` fixtures, proving mark-file and catalog conversion together.
 - `crates/archive/src/admin/migration.rs`: v2.1.0 mark/catalog conversion, migration timestamp guards, descriptor-gap preservation, and v3.0.0 mark-file versioning.
 - `crates/archive/src/storage/archive_mark_file.rs`: SBE-compatible `archive-mark.dat` layout, aligned file sizing, metadata channels, liveness timestamps, ready/terminated signaling, and error-buffer access; upstream migration and process-ownership machinery remains outside the current boundary.
 - `crates/archive/src/service/client_context.rs`: Archive control-channel session-ID/default injection and retry-attempt validation; connection ownership remains outside the current Rust client boundary.
