@@ -4,6 +4,9 @@
 //! `io.aeron.driver.StaticWindowCongestionControl`, whose window is the min of the configured
 //! initial window and half a term length and never changes over the life of the image.
 
+use aeron_client::uri::CC_PARAM_NAME;
+
+use crate::error::{DriverError, Result};
 use crate::flow_control;
 use crate::media::udp_channel::UdpChannel;
 
@@ -123,6 +126,59 @@ impl StaticWindowCongestionControl {
     }
 }
 
+/// Resolved per-image congestion-control strategy, dispatching on the channel's `cc=` parameter.
+///
+/// Mirrors `io.aeron.driver.DefaultCongestionControlSupplier`: `cc=` names the strategy
+/// (`static`/`cubic`), defaulting to `static` (upstream `Configuration.CONGESTION_CONTROL_STRATEGY`
+/// default), overriding the ad-hoc `(term_length / 2).max(mtu_length)` formula the receiver used
+/// before this resolver existed — which ignored both `rcv-wnd=` and `cc=` entirely.
+pub enum CongestionControl {
+    Static(StaticWindowCongestionControl),
+    Cubic(CubicCongestionControl),
+}
+
+impl CongestionControl {
+    /// Resolve `udp_channel`'s `cc=` strategy and initialize its window.
+    pub fn new_for_channel(
+        udp_channel: &UdpChannel,
+        term_length: i32,
+        mtu_length: i32,
+        context_initial_window_length: i32,
+    ) -> Result<Self> {
+        match udp_channel.channel_uri.get(CC_PARAM_NAME) {
+            None | Some(StaticWindowCongestionControl::CC_PARAM_VALUE) => Ok(
+                CongestionControl::Static(StaticWindowCongestionControl::new(
+                    udp_channel,
+                    term_length,
+                    context_initial_window_length,
+                )),
+            ),
+            Some(CubicCongestionControl::CC_PARAM_VALUE) => {
+                Ok(CongestionControl::Cubic(CubicCongestionControl::new(
+                    udp_channel,
+                    term_length,
+                    mtu_length,
+                    context_initial_window_length,
+                )))
+            }
+            Some(other) => Err(DriverError::IllegalArgument(format!(
+                "unsupported congestion control strategy: cc={other}"
+            ))),
+        }
+    }
+
+    /// The receiver window to advertise for this image (upstream `initialWindowLength`).
+    ///
+    /// Cubic's dynamic growth is not implemented (see the module doc), so its window is the
+    /// static negotiated maximum expressed in bytes rather than a value that grows over time.
+    pub fn initial_window_length(&self, mtu_length: i32) -> i32 {
+        match self {
+            CongestionControl::Static(cc) => cc.initial_window_length(),
+            CongestionControl::Cubic(cc) => cc.max_congestion_window() * mtu_length,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Faithful port of
@@ -179,5 +235,64 @@ mod tests {
         let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|rcv-wnd=8192").unwrap();
         let cc = CubicCongestionControl::new(&channel, 8192, 1024, 65_536);
         assert_eq!(cc.max_congestion_window(), 8192 / 2 / 1024);
+    }
+
+    #[test]
+    fn resolver_should_default_to_static_when_cc_param_absent() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999").unwrap();
+        let cc = CongestionControl::new_for_channel(
+            &channel,
+            1_000_000,
+            1408,
+            CONTEXT_INITIAL_WINDOW_LENGTH,
+        )
+        .unwrap();
+        assert!(matches!(cc, CongestionControl::Static(_)));
+        assert_eq!(
+            cc.initial_window_length(1408),
+            CONTEXT_INITIAL_WINDOW_LENGTH
+        );
+    }
+
+    #[test]
+    fn resolver_should_select_static_from_cc_param() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|cc=static").unwrap();
+        let cc = CongestionControl::new_for_channel(
+            &channel,
+            1_000_000,
+            1408,
+            CONTEXT_INITIAL_WINDOW_LENGTH,
+        )
+        .unwrap();
+        assert!(matches!(cc, CongestionControl::Static(_)));
+    }
+
+    #[test]
+    fn resolver_should_select_cubic_from_cc_param() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|cc=cubic").unwrap();
+        let cc = CongestionControl::new_for_channel(&channel, 8192, 1024, 65_536).unwrap();
+        assert!(matches!(cc, CongestionControl::Cubic(_)));
+        assert_eq!(cc.initial_window_length(1024), (8192 / 2 / 1024) * 1024);
+    }
+
+    #[test]
+    fn resolver_should_reject_unsupported_cc_value() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|cc=vegas").unwrap();
+        assert!(
+            CongestionControl::new_for_channel(
+                &channel,
+                1_000_000,
+                1408,
+                CONTEXT_INITIAL_WINDOW_LENGTH
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resolver_should_honor_rcv_wnd_over_context_default_when_smaller_than_half_term() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|rcv-wnd=4096").unwrap();
+        let cc = CongestionControl::new_for_channel(&channel, 64 * 1024, 1408, 128 * 1024).unwrap();
+        assert_eq!(cc.initial_window_length(1408), 4096);
     }
 }

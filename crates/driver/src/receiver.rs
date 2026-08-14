@@ -13,7 +13,9 @@ use aeron_client::protocol::{
 };
 use agrona::AtomicBuffer;
 
+use crate::congestion_control::CongestionControl;
 use crate::error::Result;
+use crate::flow_control::INITIAL_WINDOW_LENGTH_DEFAULT;
 use crate::media::receive_channel_endpoint::ReceiveChannelEndpoint;
 
 /// Matches vendored `Configuration.STATUS_MESSAGE_TIMEOUT_DEFAULT_NS`.
@@ -193,7 +195,13 @@ impl Receiver {
                     setup.term_offset(),
                     source,
                 );
-                let window = (setup.term_length() / 2).max(setup.mtu_length());
+                let congestion_control = CongestionControl::new_for_channel(
+                    self.receive_channel_endpoints[endpoint_index].udp_channel(),
+                    setup.term_length(),
+                    setup.mtu_length(),
+                    INITIAL_WINDOW_LENGTH_DEFAULT,
+                )?;
+                let window = congestion_control.initial_window_length(setup.mtu_length());
                 self.expected_positions
                     .entry((
                         endpoint_index,
@@ -650,6 +658,58 @@ mod tests {
             &mut status_bytes[..status_length],
         ));
         assert_eq!(status.consumption_term_offset(), aligned_length as i32);
+    }
+
+    #[test]
+    fn should_honor_channel_rcv_wnd_in_the_setup_status_message() {
+        // A large term with a small explicit rcv-wnd=: the old hardcoded
+        // `(term_length / 2).max(mtu_length)` formula would have advertised half the term
+        // (32768) here regardless of the channel's configured window.
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0|rcv-wnd=4096").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        let endpoint_addr = transport.local_addr().unwrap();
+        let peer = UdpSocket::bind(bind_addr).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+
+        let mut receiver = Receiver::new();
+        receiver.add_receive_channel_endpoint(ReceiveChannelEndpoint::new(channel, transport));
+
+        let mut setup_bytes = [0u8; aeron_client::protocol::SETUP_HEADER_LENGTH];
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
+        setup
+            .header()
+            .set_frame_length(aeron_client::protocol::SETUP_HEADER_LENGTH as i32)
+            .set_version(aeron_client::protocol::CURRENT_VERSION)
+            .set_flags(0)
+            .set_header_type(aeron_client::protocol::HDR_TYPE_SETUP);
+        setup
+            .set_session_id(9)
+            .set_stream_id(13)
+            .set_initial_term_id(1)
+            .set_active_term_id(1)
+            .set_term_offset(0)
+            .set_term_length(64 * 1024)
+            .set_mtu_length(1408)
+            .set_ttl(0);
+        peer.send_to(&setup_bytes, endpoint_addr).unwrap();
+
+        let mut work = 0;
+        for _ in 0..10 {
+            work = receiver.do_work_at(1).unwrap();
+            if work > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(work, 1);
+
+        let mut status_bytes = [0u8; 256];
+        let (status_length, _) = peer.recv_from(&mut status_bytes).unwrap();
+        let status = aeron_client::protocol::StatusMessageFlyweight::new(AtomicBuffer::new(
+            &mut status_bytes[..status_length],
+        ));
+        assert_eq!(status.receiver_window_length(), 4096);
     }
 
     #[test]

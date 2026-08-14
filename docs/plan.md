@@ -108,11 +108,16 @@ Explicit boundaries found during this pass (not silently dropped — see the
 - `crates/client` has no `ExclusivePublication` type, `try_claim`/`BufferClaim`, or
   controlled-poll API, so ~15 vendor methods in that area cannot get a system test until
   the client exposes them.
-- `multicast_flow_control.rs` (891 lines, min/max/tagged strategies) and
-  `congestion_control.rs` are unit-tested in isolation but never called from
-  `network_publication.rs`/`sender.rs`/`conductor.rs` — every publication behaves as
-  `fc=max` regardless of the channel's `fc=` parameter, so strategy *selection* has
-  nothing to system-test yet (~15 vendor methods).
+- `multicast_flow_control.rs` (891 lines, min/max/tagged strategies) was unit-tested in
+  isolation but never called from `network_publication.rs`/`sender.rs`/`conductor.rs` at
+  the time of this audit — fixed same-day (`feat: wire multicast flow-control strategy
+  selection into the sender`): `NetworkPublication` now resolves `fc=` at construction and
+  routes real Status Messages through Min/Tagged/Max instead of a hardcoded max.
+  `congestion_control.rs`'s receiver-side `StaticWindowCongestionControl`/
+  `CubicCongestionControl` had the same gap and were fixed later (2026-08-14): the receiver's
+  SETUP handling used an ad-hoc `(term_length / 2).max(mtu_length)` formula that ignored both
+  `rcv-wnd=` and `cc=` entirely, now replaced with a `CongestionControl` resolver mirroring
+  the `fc=` one. Both fixes are unit- and system-test covered (~15 vendor methods each).
 - Untethered-subscriber timeout requires 0.75x term lag, but real IPC backpressure caps
   reachable lag at 0.5x term, so the Linger transition is unreachable via genuine
   `offer()` calls — only the existing unit test (which pokes `raw_tail` directly) covers
