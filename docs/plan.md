@@ -105,14 +105,30 @@ position through.
 
 Explicit boundaries found during this pass (not silently dropped — see the
 `harus-aeron-rs:pitfall:*` entries in the project's Asobi graph for full detail):
-- `crates/client` has no `ExclusivePublication` type, `try_claim`/`BufferClaim`, or
-  controlled-poll API, so ~15 vendor methods in that area cannot get a system test until
-  the client exposes them.
-- `multicast_flow_control.rs` (891 lines, min/max/tagged strategies) and
-  `congestion_control.rs` are unit-tested in isolation but never called from
-  `network_publication.rs`/`sender.rs`/`conductor.rs` — every publication behaves as
-  `fc=max` regardless of the channel's `fc=` parameter, so strategy *selection* has
-  nothing to system-test yet (~15 vendor methods).
+- `crates/client` had no `try_claim`/`BufferClaim` zero-copy claim API, controlled-poll API, or
+  `ExclusivePublication` type at the time of this audit — all three added 2026-08-14.
+  `ConcurrentPublication::try_claim` reserves frame space the same way `offer()` does and
+  returns a `BufferClaim` the caller fills and commits (or aborts) directly, mirroring upstream
+  `ConcurrentPublication.tryClaim`/`BufferClaim`. `TermReader::controlled_read` plus
+  `Image::controlled_poll`/`Subscription::controlled_poll` give handlers per-fragment
+  abort/break/commit control over the scan, mirroring upstream
+  `ControlledFragmentHandler`/`Image.controlledPoll`/`Subscription.controlledPoll`.
+  `crates/client/src/exclusive_publication.rs` ports the single-writer `offer`/`try_claim`
+  path — local `term_id`/`term_offset`/`active_partition_index`/`term_begin_position` fields
+  replace `ConcurrentPublication`'s CAS-based tail reservation, since a lone writer never needs
+  to arbitrate with a concurrent one. Bounded relative to upstream: no two-buffer `offer`,
+  `appendPadding`, or revoke support, and no end-to-end multi-driver/concurrent-publication
+  system-test coverage — see the `ExclusivePublicationTest.java` ledger row.
+- `multicast_flow_control.rs` (891 lines, min/max/tagged strategies) was unit-tested in
+  isolation but never called from `network_publication.rs`/`sender.rs`/`conductor.rs` at
+  the time of this audit — fixed same-day (`feat: wire multicast flow-control strategy
+  selection into the sender`): `NetworkPublication` now resolves `fc=` at construction and
+  routes real Status Messages through Min/Tagged/Max instead of a hardcoded max.
+  `congestion_control.rs`'s receiver-side `StaticWindowCongestionControl`/
+  `CubicCongestionControl` had the same gap and were fixed later (2026-08-14): the receiver's
+  SETUP handling used an ad-hoc `(term_length / 2).max(mtu_length)` formula that ignored both
+  `rcv-wnd=` and `cc=` entirely, now replaced with a `CongestionControl` resolver mirroring
+  the `fc=` one. Both fixes are unit- and system-test covered (~15 vendor methods each).
 - Untethered-subscriber timeout requires 0.75x term lag, but real IPC backpressure caps
   reachable lag at 0.5x term, so the Linger transition is unreachable via genuine
   `offer()` calls — only the existing unit test (which pokes `raw_tail` directly) covers

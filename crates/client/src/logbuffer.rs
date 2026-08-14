@@ -513,6 +513,105 @@ impl HeaderWriter {
     }
 }
 
+/// A claimed frame-sized region of a term buffer, filled and committed without copy semantics.
+///
+/// Mirrors upstream `io.aeron.logbuffer.BufferClaim`, returned by
+/// `ConcurrentPublication::try_claim`. Deviates from upstream's zero-based sub-buffer wrap:
+/// this codebase addresses term buffers by absolute offset everywhere (`Header`, `TermReader`,
+/// `HeaderWriter` above), so [`BufferClaim::buffer`] returns the underlying term buffer itself
+/// and [`BufferClaim::offset`]/[`BufferClaim::length`] are the claim's absolute payload bounds
+/// within it, rather than a fresh zero-offset view.
+pub struct BufferClaim {
+    buffer: AtomicBuffer<'static>,
+    frame_offset: usize,
+    frame_length: i32,
+}
+
+impl BufferClaim {
+    pub(crate) fn wrap(
+        buffer: AtomicBuffer<'static>,
+        frame_offset: usize,
+        frame_length: i32,
+    ) -> Self {
+        Self {
+            buffer,
+            frame_offset,
+            frame_length,
+        }
+    }
+
+    /// The underlying term buffer; write payload bytes at `offset()..offset() + length()`.
+    pub fn buffer(&self) -> &AtomicBuffer<'static> {
+        &self.buffer
+    }
+
+    /// Absolute offset in [`BufferClaim::buffer`] at which the claimed payload region begins.
+    pub fn offset(&self) -> usize {
+        self.frame_offset + HEADER_LENGTH as usize
+    }
+
+    /// Length of the claimed payload region in bytes (excludes the frame header).
+    pub fn length(&self) -> usize {
+        (self.frame_length - HEADER_LENGTH) as usize
+    }
+
+    /// The value of the header type field (lower 16 bits valid). See [`protocol::HDR_TYPE_PAD`].
+    pub fn header_type(&self) -> u16 {
+        self.buffer
+            .get_i16(self.frame_offset + protocol::TYPE_FIELD_OFFSET) as u16
+    }
+
+    /// Set the value of the header type field.
+    pub fn set_header_type(&self, header_type: u16) -> &Self {
+        set_frame_type(&self.buffer, self.frame_offset, header_type);
+        self
+    }
+
+    /// The value of the header flags field.
+    pub fn flags(&self) -> u8 {
+        self.buffer
+            .get_u8(self.frame_offset + protocol::FLAGS_FIELD_OFFSET)
+    }
+
+    /// Set the value of the header flags field.
+    pub fn set_flags(&self, flags: u8) -> &Self {
+        set_frame_flags(&self.buffer, self.frame_offset, flags);
+        self
+    }
+
+    /// The value stored in the reserved space at the end of the data frame header.
+    pub fn reserved_value(&self) -> i64 {
+        self.buffer
+            .get_i64(self.frame_offset + protocol::DATA_RESERVED_VALUE_OFFSET)
+    }
+
+    /// Write a value into the reserved space at the end of the data frame header.
+    pub fn set_reserved_value(&self, value: i64) -> &Self {
+        set_frame_reserved_value(&self.buffer, self.frame_offset, value);
+        self
+    }
+
+    /// Copy bytes into the claimed buffer space for a message.
+    ///
+    /// To write multiple parts, use [`BufferClaim::buffer`] and [`BufferClaim::offset`] directly.
+    pub fn put_bytes(&self, src_buffer: &AtomicBuffer, src_offset: usize, length: usize) -> &Self {
+        self.buffer
+            .put_bytes_from(self.offset(), src_buffer, src_offset, length);
+        self
+    }
+
+    /// Commit the message to the log buffer so it is available to subscribers.
+    pub fn commit(&self) {
+        set_frame_length_ordered(&self.buffer, self.frame_offset, self.frame_length);
+    }
+
+    /// Abort the claim so the log can progress by ignoring this claim (marks it as padding).
+    pub fn abort(&self) {
+        set_frame_type(&self.buffer, self.frame_offset, protocol::HDR_TYPE_PAD);
+        set_frame_length_ordered(&self.buffer, self.frame_offset, self.frame_length);
+    }
+}
+
 /// Read frame length at `term_offset` using volatile load.
 pub fn frame_length_volatile(term_buffer: &AtomicBuffer, term_offset: usize) -> i32 {
     term_buffer.get_i32_volatile(term_offset)
@@ -752,6 +851,89 @@ impl TermReader {
 
         Self::pack(offset as i32, fragments_read as i32)
     }
+
+    /// Reads data from a term, giving the handler control over commit/abort/break of the scan.
+    ///
+    /// Returns packed `(offset, fragments_read)`, same convention as [`TermReader::read`]. Kept
+    /// as a separate loop rather than sharing one with `read`, mirroring how upstream keeps
+    /// `Image.poll`/`Image.controlledPoll` as two distinct methods rather than one shared loop —
+    /// the two have materially different position-commit semantics. `on_commit(offset)` is
+    /// invoked with the absolute term offset whenever the handler returns
+    /// [`ControlledPollAction::Commit`], so the caller (which owns the subscriber-position
+    /// handle) can apply an intermediate flow-control commit.
+    pub fn controlled_read<'a, F, C>(
+        term_buffer: &AtomicBuffer<'a>,
+        term_offset: usize,
+        mut handler: F,
+        fragments_limit: usize,
+        header: &mut Header<'a>,
+        mut on_commit: C,
+    ) -> i64
+    where
+        F: FnMut(&AtomicBuffer<'a>, usize, i32, &Header<'a>) -> ControlledPollAction,
+        C: FnMut(usize),
+    {
+        let mut fragments_read = 0;
+        let mut offset = term_offset;
+        let capacity = term_buffer.capacity();
+        header.set_buffer(term_buffer.clone());
+
+        while fragments_read < fragments_limit && offset < capacity {
+            let frame_length = frame_length_volatile(term_buffer, offset);
+            if frame_length <= 0 {
+                break;
+            }
+
+            let frame_offset = offset;
+            let aligned_length = align(frame_length, FRAME_ALIGNMENT) as usize;
+            offset += aligned_length;
+
+            if is_padding_frame(term_buffer, frame_offset) {
+                continue;
+            }
+
+            fragments_read += 1;
+            header.set_offset(frame_offset);
+
+            let action = handler(
+                term_buffer,
+                frame_offset + HEADER_LENGTH as usize,
+                frame_length - HEADER_LENGTH,
+                header,
+            );
+
+            match action {
+                ControlledPollAction::Abort => {
+                    fragments_read -= 1;
+                    offset -= aligned_length;
+                    break;
+                }
+                ControlledPollAction::Break => break,
+                ControlledPollAction::Commit => on_commit(offset),
+                ControlledPollAction::Continue => {}
+            }
+        }
+
+        Self::pack(offset as i32, fragments_read as i32)
+    }
+}
+
+/// Action returned from a controlled-fragment handler to direct [`TermReader::controlled_read`].
+///
+/// Mirrors upstream `io.aeron.logbuffer.ControlledFragmentHandler.Action`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlledPollAction {
+    /// Abort the current polling operation and do not advance the position for this fragment.
+    Abort,
+    /// Break from the current polling operation and commit the position as of the end of the
+    /// current fragment being handled.
+    Break,
+    /// Continue processing but commit the position as of the end of the current fragment, so
+    /// that flow control is applied to this point.
+    Commit,
+    /// Continue processing until the fragment limit or no fragments remain, committing position
+    /// at the end of the poll as [`TermReader::read`] does.
+    Continue,
 }
 
 /// Offset at which default frame headers begin in the metadata buffer.

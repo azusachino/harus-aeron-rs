@@ -3,7 +3,8 @@
 use crate::error::{AeronError, Result};
 use crate::log_buffers::LogBuffers;
 use crate::logbuffer::{
-    Header, NO_END_OF_STREAM_POSITION, TermReader, end_of_stream_position, index_by_position,
+    ControlledPollAction, Header, NO_END_OF_STREAM_POSITION, TermReader, end_of_stream_position,
+    index_by_position,
 };
 use agrona::AtomicBuffer;
 use agrona::counters::AtomicCounter;
@@ -205,6 +206,68 @@ impl Image {
 
         fragments_read
     }
+
+    /// Poll for new messages, giving `fragment_handler` control over commit/abort/break of the
+    /// scan via [`ControlledPollAction`], instead of always committing the whole batch at once.
+    ///
+    /// Mirrors upstream `Image.controlledPoll`. Use [`ControlledPollAction::Commit`] to make
+    /// flow control apply as of a fragment before the batch completes, or
+    /// [`ControlledPollAction::Abort`] to leave a fragment for the next poll call entirely.
+    pub fn controlled_poll<F>(&mut self, mut fragment_handler: F, fragment_limit: usize) -> usize
+    where
+        F: FnMut(&AtomicBuffer, usize, usize, &Header) -> ControlledPollAction,
+    {
+        if self.is_closed {
+            return 0;
+        }
+
+        let position = self.subscriber_position.load(Ordering::Acquire);
+        let index = index_by_position(position, self.position_bits_to_shift);
+        let term_offset = (position & self.term_length_mask as i64) as usize;
+
+        let term_buffer = self.term_buffers[index].clone();
+        let is_closed = self.is_closed;
+        let subscriber_position = &self.subscriber_position;
+        let cnc_subscriber_position = &self.cnc_subscriber_position;
+
+        let mut handler_adapter = |buf: &AtomicBuffer, offset: usize, length: i32, hdr: &Header| {
+            fragment_handler(buf, offset, length as usize, hdr)
+        };
+
+        let mut header = Header::new(self.initial_term_id, self.position_bits_to_shift as i32);
+
+        let read_result = TermReader::controlled_read(
+            &term_buffer,
+            term_offset,
+            &mut handler_adapter,
+            fragment_limit,
+            &mut header,
+            |commit_offset| {
+                let new_position = position + (commit_offset - term_offset) as i64;
+                if !is_closed {
+                    subscriber_position.store(new_position, Ordering::Release);
+                    if let Some(counter) = cnc_subscriber_position {
+                        counter.set_ordered(new_position);
+                    }
+                }
+            },
+        );
+
+        let fragments_read = TermReader::fragments_read(read_result) as usize;
+        let final_offset = TermReader::offset(read_result) as usize;
+        let bytes_read = final_offset - term_offset;
+
+        if bytes_read > 0 {
+            let new_position = position + bytes_read as i64;
+            self.subscriber_position
+                .store(new_position, Ordering::Release);
+            if let Some(counter) = &self.cnc_subscriber_position {
+                counter.set_ordered(new_position);
+            }
+        }
+
+        fragments_read
+    }
 }
 
 #[cfg(test)]
@@ -392,5 +455,130 @@ mod tests {
 
         drop(cnc);
         let _ = std::fs::remove_file(cnc_path);
+    }
+
+    /// Write one aligned data frame at `offset` in `term`, returning the aligned frame length.
+    fn write_frame_at(
+        term: &AtomicBuffer,
+        offset: usize,
+        term_id: i32,
+        payload_len: usize,
+    ) -> usize {
+        let msg_len = HEADER_LENGTH as usize + payload_len;
+        let aligned_len = align(msg_len as i32, FRAME_ALIGNMENT) as usize;
+
+        let mut frame_bytes = vec![0u8; aligned_len];
+        let frame_buf = AtomicBuffer::new(&mut frame_bytes);
+        let data_header = DataHeaderFlyweight::new(frame_buf);
+        data_header.set_header_type(crate::protocol::HDR_TYPE_DATA);
+        data_header.set_frame_length(msg_len as i32);
+        data_header.set_session_id(SESSION_ID);
+        data_header.set_term_id(term_id);
+        data_header.set_term_offset(offset as i32);
+
+        term.put_bytes(offset, &frame_bytes);
+        aligned_len
+    }
+
+    fn image_with_three_frames() -> (Image, Arc<AtomicI64>, i64, usize) {
+        let position_bits_to_shift = (TERM_MIN_LENGTH as usize).trailing_zeros() as i32;
+        let initial_position =
+            compute_position(INITIAL_TERM_ID, 0, position_bits_to_shift, INITIAL_TERM_ID);
+        let subscriber_pos = Arc::new(AtomicI64::new(initial_position));
+        let log_buffers = create_test_log_buffers();
+        let terms = log_buffers.duplicate_term_buffers();
+
+        let mut offset = 0usize;
+        let mut frame_len = 0usize;
+        for _ in 0..3 {
+            frame_len = write_frame_at(&terms[0], offset, INITIAL_TERM_ID, 8);
+            offset += frame_len;
+        }
+
+        let image = Image::new(
+            1,
+            SESSION_ID,
+            INITIAL_TERM_ID,
+            initial_position,
+            subscriber_pos.clone(),
+            log_buffers,
+            "ipc".to_string(),
+            CORRELATION_ID,
+        );
+
+        (image, subscriber_pos, initial_position, frame_len)
+    }
+
+    #[test]
+    fn controlled_poll_abort_leaves_position_and_fragment_uncounted() {
+        let (mut image, _subscriber_pos, initial_position, _frame_len) = image_with_three_frames();
+
+        let mut calls = 0;
+        let read = image.controlled_poll(
+            |_buf, _offset, _len, _hdr| {
+                calls += 1;
+                ControlledPollAction::Abort
+            },
+            usize::MAX,
+        );
+
+        assert_eq!(read, 0);
+        assert_eq!(calls, 1, "abort must stop the scan at the first fragment");
+        assert_eq!(image.position(), initial_position);
+    }
+
+    #[test]
+    fn controlled_poll_break_commits_only_up_to_the_break_point() {
+        let (mut image, _subscriber_pos, initial_position, frame_len) = image_with_three_frames();
+
+        let mut calls = 0;
+        let read = image.controlled_poll(
+            |_buf, _offset, _len, _hdr| {
+                calls += 1;
+                if calls == 1 {
+                    ControlledPollAction::Continue
+                } else {
+                    ControlledPollAction::Break
+                }
+            },
+            usize::MAX,
+        );
+
+        assert_eq!(read, 2);
+        assert_eq!(calls, 2);
+        assert_eq!(image.position(), initial_position + (frame_len as i64) * 2);
+    }
+
+    #[test]
+    fn controlled_poll_commit_applies_position_before_batch_completes() {
+        // Prove COMMIT is applied immediately, not just batched into the final store: read the
+        // shared position counter from inside the handler for fragment 3, after fragment 2
+        // already returned Commit but before controlled_poll itself has returned.
+        let (mut image, subscriber_pos, initial_position, frame_len) = image_with_three_frames();
+
+        let mut calls = 0;
+        let mut position_seen_before_third_fragment = -1i64;
+        let read = image.controlled_poll(
+            |_buf, _offset, _len, _hdr| {
+                calls += 1;
+                match calls {
+                    2 => ControlledPollAction::Commit,
+                    3 => {
+                        position_seen_before_third_fragment =
+                            subscriber_pos.load(Ordering::Acquire);
+                        ControlledPollAction::Continue
+                    }
+                    _ => ControlledPollAction::Continue,
+                }
+            },
+            usize::MAX,
+        );
+
+        assert_eq!(read, 3);
+        assert_eq!(
+            position_seen_before_third_fragment,
+            initial_position + (frame_len as i64) * 2
+        );
+        assert_eq!(image.position(), initial_position + (frame_len as i64) * 3);
     }
 }

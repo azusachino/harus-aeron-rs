@@ -21,6 +21,7 @@ pub mod driver_proxy;
 pub mod error;
 pub mod error_log;
 pub mod exceptions;
+pub mod exclusive_publication;
 pub mod fragment_assembler;
 pub mod image;
 pub mod log_buffers;

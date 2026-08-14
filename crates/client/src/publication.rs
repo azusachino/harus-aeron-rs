@@ -3,7 +3,7 @@
 use crate::error::{AeronError, Result};
 use crate::log_buffers::LogBuffers;
 use crate::logbuffer::{
-    FRAME_ALIGNMENT, HEADER_LENGTH, HeaderWriter, LOG_DEFAULT_FRAME_HEADER_OFFSET,
+    BufferClaim, FRAME_ALIGNMENT, HEADER_LENGTH, HeaderWriter, LOG_DEFAULT_FRAME_HEADER_OFFSET,
     TERM_TAIL_COUNTERS_OFFSET, active_term_count, align, compute_fragmented_frame_length,
     compute_max_message_length, compute_position, index_by_term_count, is_connected,
     mtu_length as meta_mtu_length, position_bits_to_shift, raw_tail_volatile_active,
@@ -231,6 +231,105 @@ impl ConcurrentPublication {
         };
 
         Ok(new_position)
+    }
+
+    /// Non-blocking claim of buffer space for a message without copy semantics.
+    ///
+    /// On success, the returned `BufferClaim` wraps the reserved region — write payload bytes
+    /// via [`BufferClaim::put_bytes`] or [`BufferClaim::buffer`]/[`BufferClaim::offset`] directly,
+    /// then call [`BufferClaim::commit`] to make it visible to subscribers, or
+    /// [`BufferClaim::abort`] to release the space as padding instead.
+    ///
+    /// Returns the new stream position and the claim, otherwise a negative error value of
+    /// [`NOT_CONNECTED`], [`BACK_PRESSURED`], [`ADMIN_ACTION`], [`CLOSED`], or
+    /// [`MAX_POSITION_EXCEEDED`] and no claim.
+    ///
+    /// Unlike [`ConcurrentPublication::offer`], a claim must fit within one MTU: fragmentation
+    /// would leave the caller writing into more than one reserved region.
+    pub fn try_claim(&self, length: usize) -> Result<(i64, Option<BufferClaim>)> {
+        if self.is_closed {
+            return Ok((CLOSED, None));
+        }
+
+        if length > self.max_payload_length {
+            return Err(AeronError::IllegalArgument(format!(
+                "claim exceeds max_payload_length of {}, length={}",
+                self.max_payload_length, length
+            )));
+        }
+
+        let limit = self.publication_limit.load(Ordering::Acquire);
+        let term_count = active_term_count(&self.log_metadata_buffer);
+        let index = index_by_term_count(term_count as i64) as usize;
+        let term_buffer = self.term_buffers[index].clone();
+        let tail_counter_offset = TERM_TAIL_COUNTERS_OFFSET + index * std::mem::size_of::<i64>();
+
+        let raw_tail = self
+            .log_metadata_buffer
+            .get_i64_volatile(tail_counter_offset);
+        let term_offset = unpack_term_offset(raw_tail, self.term_buffer_length);
+        let term_id = unpack_term_id(raw_tail);
+
+        if term_count != term_id - self.initial_term_id {
+            return Ok((ADMIN_ACTION, None));
+        }
+
+        let position = compute_position(
+            term_id,
+            term_offset as i32,
+            self.position_bits_to_shift as i32,
+            self.initial_term_id,
+        );
+
+        if position >= limit {
+            return Ok((self.back_pressure_status(position, length as i32), None));
+        }
+
+        let (new_position, claim) = self.claim_capacity(&term_buffer, tail_counter_offset, length);
+        Ok((new_position, claim))
+    }
+
+    fn claim_capacity(
+        &self,
+        term_buffer: &AtomicBuffer<'static>,
+        tail_counter_offset: usize,
+        length: usize,
+    ) -> (i64, Option<BufferClaim>) {
+        let frame_length = length as i32 + HEADER_LENGTH;
+        let aligned_length = align(frame_length, FRAME_ALIGNMENT);
+        let term_length = term_buffer.capacity();
+
+        let raw_tail = self
+            .log_metadata_buffer
+            .get_and_add_i64(tail_counter_offset, aligned_length as i64);
+        let term_id = unpack_term_id(raw_tail);
+        let term_offset = unpack_term_offset(raw_tail, term_length);
+
+        let resulting_offset = term_offset + aligned_length as usize;
+        let position = compute_position(
+            term_id,
+            resulting_offset as i32,
+            self.position_bits_to_shift as i32,
+            self.initial_term_id,
+        );
+
+        if resulting_offset > term_length {
+            let position =
+                self.handle_end_of_log(term_buffer, term_length, term_id, term_offset, position);
+            return (position, None);
+        }
+
+        self.header_writer
+            .write(term_buffer, term_offset, frame_length, term_id);
+
+        (
+            position,
+            Some(BufferClaim::wrap(
+                term_buffer.clone(),
+                term_offset,
+                frame_length,
+            )),
+        )
     }
 
     fn back_pressure_status(&self, current_position: i64, message_length: i32) -> i64 {
@@ -510,6 +609,187 @@ mod tests {
         assert_eq!(terms[0].get_i32(72), 64);
         assert_eq!(terms[0].get_u8(HEADER_LENGTH as usize), 0);
         assert_eq!(terms[0].get_u8(64 + HEADER_LENGTH as usize), 1);
+    }
+
+    #[test]
+    fn should_claim_reserve_space_with_a_negative_pre_commit_frame_length() {
+        // Before commit(), the frame length word must still hold the header-writer's negative
+        // reservation marker (upstream ConcurrentPublicationTest.TryClaim.onSuccess), proving
+        // try_claim reserves the frame the same way offer() does, just without writing payload.
+        let log_buffers = create_test_log_buffers(4096);
+        crate::logbuffer::set_is_connected(&log_buffers.meta_data_buffer(), true);
+        let publication_limit = Arc::new(AtomicI64::new((TERM_MIN_LENGTH * 2) as i64));
+        let publication = ConcurrentPublication::new(
+            "aeron:ipc".to_string(),
+            1,
+            42,
+            1,
+            2000,
+            2000,
+            publication_limit,
+            log_buffers.clone(),
+        );
+
+        let (position, claim) = publication.try_claim(64).unwrap();
+        let claim = claim.expect("claim should succeed");
+        assert_eq!(claim.length(), 64);
+        assert_eq!(claim.offset(), HEADER_LENGTH as usize);
+        assert_eq!(position, align(HEADER_LENGTH + 64, FRAME_ALIGNMENT) as i64);
+
+        let terms = log_buffers.duplicate_term_buffers();
+        assert_eq!(terms[0].get_i32(0), -(HEADER_LENGTH + 64));
+        assert_eq!(claim.reserved_value(), 0);
+    }
+
+    #[test]
+    fn should_claim_write_and_commit_a_message_visible_to_an_image() {
+        let log_buffers = create_test_log_buffers(4096);
+        crate::logbuffer::set_is_connected(&log_buffers.meta_data_buffer(), true);
+        let publication_limit = Arc::new(AtomicI64::new((TERM_MIN_LENGTH * 2) as i64));
+        let publication = ConcurrentPublication::new(
+            "aeron:ipc".to_string(),
+            1,
+            42,
+            1,
+            2000,
+            2000,
+            publication_limit,
+            log_buffers.clone(),
+        );
+
+        let mut payload = *b"claimed, not copied";
+        let payload_len = payload.len();
+        let payload_buf = AtomicBuffer::new(&mut payload);
+        let (position, claim) = publication.try_claim(payload_len).unwrap();
+        let claim = claim.expect("claim should succeed");
+        claim
+            .put_bytes(&payload_buf, 0, payload_len)
+            .set_reserved_value(99);
+        claim.commit();
+
+        assert_eq!(publication.position(), position);
+
+        let subscriber_position = Arc::new(AtomicI64::new(0));
+        let mut image = Image::new(
+            1,
+            publication.session_id(),
+            publication.initial_term_id(),
+            0,
+            subscriber_position,
+            log_buffers,
+            "ipc".to_string(),
+            2001,
+        );
+
+        let mut received = Vec::new();
+        let fragments = image.poll(
+            |buf, offset, len, _hdr| {
+                let mut bytes = vec![0u8; len];
+                buf.get_bytes(offset, &mut bytes);
+                received.push(bytes);
+            },
+            usize::MAX,
+        );
+
+        assert_eq!(fragments, 1);
+        assert_eq!(received[0], payload.to_vec());
+    }
+
+    #[test]
+    fn should_abort_a_claim_so_it_is_skipped_as_padding() {
+        let log_buffers = create_test_log_buffers(4096);
+        crate::logbuffer::set_is_connected(&log_buffers.meta_data_buffer(), true);
+        let publication_limit = Arc::new(AtomicI64::new((TERM_MIN_LENGTH * 2) as i64));
+        let publication = ConcurrentPublication::new(
+            "aeron:ipc".to_string(),
+            1,
+            42,
+            1,
+            2000,
+            2000,
+            publication_limit,
+            log_buffers.clone(),
+        );
+
+        let (_position, claim) = publication.try_claim(64).unwrap();
+        claim.expect("claim should succeed").abort();
+
+        let terms = log_buffers.duplicate_term_buffers();
+        assert!(
+            crate::logbuffer::is_padding_frame(&terms[0], 0),
+            "aborted claim must read back as a padding frame"
+        );
+        assert_eq!(terms[0].get_i32(0), HEADER_LENGTH + 64);
+    }
+
+    #[test]
+    fn should_reject_claim_exceeding_max_payload_length() {
+        let log_buffers = create_test_log_buffers(4096);
+        let publication_limit = Arc::new(AtomicI64::new((TERM_MIN_LENGTH * 4) as i64));
+
+        let publication = ConcurrentPublication::new(
+            "aeron:ipc".to_string(),
+            1,
+            42,
+            1,
+            2000,
+            2000,
+            publication_limit,
+            log_buffers,
+        );
+
+        let too_big = publication.max_payload_length() + 1;
+        match publication.try_claim(too_big) {
+            Err(AeronError::IllegalArgument(_)) => {}
+            other => panic!(
+                "expected IllegalArgument, got a claim result instead: {}",
+                other.is_ok()
+            ),
+        }
+    }
+
+    #[test]
+    fn should_report_back_pressured_on_claim_when_limit_reached() {
+        let log_buffers = create_test_log_buffers(4096);
+        crate::logbuffer::set_is_connected(&log_buffers.meta_data_buffer(), true);
+        let publication_limit = Arc::new(AtomicI64::new(0));
+
+        let publication = ConcurrentPublication::new(
+            "aeron:ipc".to_string(),
+            1,
+            42,
+            1,
+            2000,
+            2000,
+            publication_limit,
+            log_buffers,
+        );
+
+        let (position, claim) = publication.try_claim(16).unwrap();
+        assert_eq!(position, BACK_PRESSURED);
+        assert!(claim.is_none());
+    }
+
+    #[test]
+    fn should_close_a_claim_attempt() {
+        let log_buffers = create_test_log_buffers(4096);
+        let publication_limit = Arc::new(AtomicI64::new((TERM_MIN_LENGTH * 2) as i64));
+
+        let mut publication = ConcurrentPublication::new(
+            "aeron:ipc".to_string(),
+            1,
+            42,
+            1,
+            2000,
+            2000,
+            publication_limit,
+            log_buffers,
+        );
+        publication.close();
+
+        let (position, claim) = publication.try_claim(16).unwrap();
+        assert_eq!(position, CLOSED);
+        assert!(claim.is_none());
     }
 
     #[test]
