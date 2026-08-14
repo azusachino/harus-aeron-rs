@@ -1,7 +1,7 @@
 //! Subscription: Aeron subscriber API for receiving reconstructed Image streams over a channel/streamId.
 
 use crate::image::Image;
-use crate::logbuffer::Header;
+use crate::logbuffer::{ControlledPollAction, Header};
 use agrona::AtomicBuffer;
 use std::sync::Arc;
 
@@ -172,6 +172,36 @@ impl Subscription {
         fragments_read
     }
 
+    /// Round-robin [`Image::controlled_poll`] across every image, same fragment-budget sharing
+    /// as [`Subscription::poll`]. A handler's [`ControlledPollAction::Abort`]/`Break` only ends
+    /// that image's own scan for this call; the round-robin moves on to the next image as usual.
+    pub fn controlled_poll<F>(&mut self, mut fragment_handler: F, fragment_limit: usize) -> usize
+    where
+        F: FnMut(&AtomicBuffer, usize, usize, &Header) -> ControlledPollAction,
+    {
+        if self.is_closed || self.images.is_empty() {
+            return 0;
+        }
+
+        let num_images = self.images.len();
+        let starting_index = self.round_robin_index % num_images;
+        let mut fragments_read = 0;
+
+        for i in 0..num_images {
+            let index = (starting_index + i) % num_images;
+            let limit = fragment_limit.saturating_sub(fragments_read);
+            if limit == 0 {
+                break;
+            }
+
+            let read = self.images[index].controlled_poll(&mut fragment_handler, limit);
+            fragments_read += read;
+        }
+
+        self.round_robin_index = (starting_index + 1) % num_images;
+        fragments_read
+    }
+
     /// Poll one image without consuming fragments from any sibling image.
     pub fn poll_image<F>(
         &mut self,
@@ -207,6 +237,10 @@ mod tests {
         subscription.close();
         assert!(subscription.is_closed());
         assert_eq!(subscription.poll(|_, _, _, _| {}, 10), 0);
+        assert_eq!(
+            subscription.controlled_poll(|_, _, _, _| ControlledPollAction::Continue, 10),
+            0
+        );
     }
 
     #[test]

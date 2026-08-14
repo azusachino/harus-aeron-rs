@@ -105,13 +105,16 @@ position through.
 
 Explicit boundaries found during this pass (not silently dropped — see the
 `harus-aeron-rs:pitfall:*` entries in the project's Asobi graph for full detail):
-- `crates/client` had no `try_claim`/`BufferClaim` zero-copy claim API at the time of this
-  audit — added 2026-08-14: `ConcurrentPublication::try_claim` reserves frame space the same
-  way `offer()` does and returns a `BufferClaim` the caller fills and commits (or aborts)
-  directly, mirroring upstream `ConcurrentPublication.tryClaim`/`BufferClaim`. Still no
-  `ExclusivePublication` type or controlled-poll API (`ControlledFragmentHandler` on
-  `Subscription`/`Image`), so the remaining vendor methods in those two areas cannot get a
-  system test until the client exposes them.
+- `crates/client` had no `try_claim`/`BufferClaim` zero-copy claim API or controlled-poll API
+  at the time of this audit — both added 2026-08-14. `ConcurrentPublication::try_claim`
+  reserves frame space the same way `offer()` does and returns a `BufferClaim` the caller
+  fills and commits (or aborts) directly, mirroring upstream
+  `ConcurrentPublication.tryClaim`/`BufferClaim`. `TermReader::controlled_read` plus
+  `Image::controlled_poll`/`Subscription::controlled_poll` give handlers per-fragment
+  abort/break/commit control over the scan, mirroring upstream
+  `ControlledFragmentHandler`/`Image.controlledPoll`/`Subscription.controlledPoll`. Still no
+  `ExclusivePublication` type, so the remaining vendor methods there cannot get a system test
+  until the client exposes it.
 - `multicast_flow_control.rs` (891 lines, min/max/tagged strategies) was unit-tested in
   isolation but never called from `network_publication.rs`/`sender.rs`/`conductor.rs` at
   the time of this audit — fixed same-day (`feat: wire multicast flow-control strategy

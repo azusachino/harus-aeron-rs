@@ -851,6 +851,89 @@ impl TermReader {
 
         Self::pack(offset as i32, fragments_read as i32)
     }
+
+    /// Reads data from a term, giving the handler control over commit/abort/break of the scan.
+    ///
+    /// Returns packed `(offset, fragments_read)`, same convention as [`TermReader::read`]. Kept
+    /// as a separate loop rather than sharing one with `read`, mirroring how upstream keeps
+    /// `Image.poll`/`Image.controlledPoll` as two distinct methods rather than one shared loop —
+    /// the two have materially different position-commit semantics. `on_commit(offset)` is
+    /// invoked with the absolute term offset whenever the handler returns
+    /// [`ControlledPollAction::Commit`], so the caller (which owns the subscriber-position
+    /// handle) can apply an intermediate flow-control commit.
+    pub fn controlled_read<'a, F, C>(
+        term_buffer: &AtomicBuffer<'a>,
+        term_offset: usize,
+        mut handler: F,
+        fragments_limit: usize,
+        header: &mut Header<'a>,
+        mut on_commit: C,
+    ) -> i64
+    where
+        F: FnMut(&AtomicBuffer<'a>, usize, i32, &Header<'a>) -> ControlledPollAction,
+        C: FnMut(usize),
+    {
+        let mut fragments_read = 0;
+        let mut offset = term_offset;
+        let capacity = term_buffer.capacity();
+        header.set_buffer(term_buffer.clone());
+
+        while fragments_read < fragments_limit && offset < capacity {
+            let frame_length = frame_length_volatile(term_buffer, offset);
+            if frame_length <= 0 {
+                break;
+            }
+
+            let frame_offset = offset;
+            let aligned_length = align(frame_length, FRAME_ALIGNMENT) as usize;
+            offset += aligned_length;
+
+            if is_padding_frame(term_buffer, frame_offset) {
+                continue;
+            }
+
+            fragments_read += 1;
+            header.set_offset(frame_offset);
+
+            let action = handler(
+                term_buffer,
+                frame_offset + HEADER_LENGTH as usize,
+                frame_length - HEADER_LENGTH,
+                header,
+            );
+
+            match action {
+                ControlledPollAction::Abort => {
+                    fragments_read -= 1;
+                    offset -= aligned_length;
+                    break;
+                }
+                ControlledPollAction::Break => break,
+                ControlledPollAction::Commit => on_commit(offset),
+                ControlledPollAction::Continue => {}
+            }
+        }
+
+        Self::pack(offset as i32, fragments_read as i32)
+    }
+}
+
+/// Action returned from a controlled-fragment handler to direct [`TermReader::controlled_read`].
+///
+/// Mirrors upstream `io.aeron.logbuffer.ControlledFragmentHandler.Action`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlledPollAction {
+    /// Abort the current polling operation and do not advance the position for this fragment.
+    Abort,
+    /// Break from the current polling operation and commit the position as of the end of the
+    /// current fragment being handled.
+    Break,
+    /// Continue processing but commit the position as of the end of the current fragment, so
+    /// that flow control is applied to this point.
+    Commit,
+    /// Continue processing until the fragment limit or no fragments remain, committing position
+    /// at the end of the poll as [`TermReader::read`] does.
+    Continue,
 }
 
 /// Offset at which default frame headers begin in the metadata buffer.
