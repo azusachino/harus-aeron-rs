@@ -105,16 +105,20 @@ position through.
 
 Explicit boundaries found during this pass (not silently dropped — see the
 `harus-aeron-rs:pitfall:*` entries in the project's Asobi graph for full detail):
-- `crates/client` had no `try_claim`/`BufferClaim` zero-copy claim API or controlled-poll API
-  at the time of this audit — both added 2026-08-14. `ConcurrentPublication::try_claim`
-  reserves frame space the same way `offer()` does and returns a `BufferClaim` the caller
-  fills and commits (or aborts) directly, mirroring upstream
+- `crates/client` had no `try_claim`/`BufferClaim` zero-copy claim API, controlled-poll API, or
+  `ExclusivePublication` type at the time of this audit — all three added 2026-08-14.
+  `ConcurrentPublication::try_claim` reserves frame space the same way `offer()` does and
+  returns a `BufferClaim` the caller fills and commits (or aborts) directly, mirroring upstream
   `ConcurrentPublication.tryClaim`/`BufferClaim`. `TermReader::controlled_read` plus
   `Image::controlled_poll`/`Subscription::controlled_poll` give handlers per-fragment
   abort/break/commit control over the scan, mirroring upstream
-  `ControlledFragmentHandler`/`Image.controlledPoll`/`Subscription.controlledPoll`. Still no
-  `ExclusivePublication` type, so the remaining vendor methods there cannot get a system test
-  until the client exposes it.
+  `ControlledFragmentHandler`/`Image.controlledPoll`/`Subscription.controlledPoll`.
+  `crates/client/src/exclusive_publication.rs` ports the single-writer `offer`/`try_claim`
+  path — local `term_id`/`term_offset`/`active_partition_index`/`term_begin_position` fields
+  replace `ConcurrentPublication`'s CAS-based tail reservation, since a lone writer never needs
+  to arbitrate with a concurrent one. Bounded relative to upstream: no two-buffer `offer`,
+  `appendPadding`, or revoke support, and no end-to-end multi-driver/concurrent-publication
+  system-test coverage — see the `ExclusivePublicationTest.java` ledger row.
 - `multicast_flow_control.rs` (891 lines, min/max/tagged strategies) was unit-tested in
   isolation but never called from `network_publication.rs`/`sender.rs`/`conductor.rs` at
   the time of this audit — fixed same-day (`feat: wire multicast flow-control strategy
