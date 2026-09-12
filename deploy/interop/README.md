@@ -12,6 +12,7 @@ The Rust driver is serviced continuously during the first set of probes; the Jav
 held separately for the reverse-direction probe.
 
 Probe sources:
+
 - `CncLayoutProbe.java` — CnC metadata and Agrona ring-layout reader
 - `JavaPubSubProbe.java` — Java IPC client round-trip through Rust MediaDriver
 - `JavaUdpPubSubProbe.java` — Java UDP client round-trip or ordered soak through Rust MediaDriver

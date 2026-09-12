@@ -1,7 +1,7 @@
 # harus-aeron-rs
 
 Aeron reimplemented in Rust — wire-compatible with the real Aeron UDP protocol
-(https://github.com/aeron-io/aeron). Sibling project to
+(<https://github.com/aeron-io/aeron>). Sibling project to
 [`harus-aeron-zig`](https://github.com/azusachino/harus-aeron-zig); see
 [`docs/plan.md`](docs/plan.md) for why both exist.
 

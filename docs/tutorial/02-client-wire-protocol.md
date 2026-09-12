@@ -18,6 +18,7 @@ see it.
 ## 1. Wire Protocol Frame Layouts (`protocol.rs`)
 
 All messages sent over UDP or shared memory IPC are framed with standard Aeron headers:
+
 - **`HeaderFlyweight`**: Common 32-byte header base containing:
   - `frame_length` (32-bit integer, low 32 bits of first 64-bit word)
   - `version` (8-bit unsigned integer)
@@ -53,12 +54,15 @@ term rotation. Everything downstream — `compute_position`, gap scanning, term 
 arithmetic over those four numbers.
 
 Aeron streams use a 3-partition rotated log buffer layout. At any moment:
+
 - Partition $i \bmod 3$ is active for append/write.
 - Partition $(i + 1) \bmod 3$ is active for read/consume.
 - Partition $(i + 2) \bmod 3$ is clean/ready for future term rotation.
 
 ### Metadata Descriptor Layout
+
 The metadata buffer contains control counters for active term count and tails:
+
 - `PARTITION_COUNT` = 3
 - `LOG_META_DATA_LENGTH` = 4096 bytes
 - `LOG_ACTIVE_TERM_COUNT_OFFSET` (offset 24): Atomic active term count.
@@ -71,9 +75,11 @@ Rotation is performed atomically using Compare-And-Swap (`rotate_log`) without b
 ## 3. Log Buffer Helpers & Term Operations
 
 ### Header Mapper (`Header<'a>`)
+
 During reading, a `Header` struct acts as a lightweight flyweight view over frames in the term buffer, computing global stream positions via `compute_position(term_id, term_offset, position_bits_to_shift, initial_term_id)`.
 
 ### Term Utility Suite
+
 1. **`TermScanner`**: Scans available data fragments up to `max_length` or MTU boundaries, handling padding frames (`HDR_TYPE_PAD`).
 2. **`TermGapScanner`**: Scans for gaps in lossy receiver streams and triggers `on_gap(term_id, gap_offset, gap_length)` callbacks.
 3. **`TermReader`**: Reads available data fragments from a term, advancing `AtomicCounter` subscriber positions with release semantics.
@@ -86,10 +92,12 @@ During reading, a `Header` struct acts as a lightweight flyweight view over fram
 ## Hands-On Exercise
 
 Implement the stubs in `tutorial/client/src/`:
+
 1. `protocol.rs`
 2. `logbuffer.rs`
 
 Check your implementation by comparing with the reference code in `crates/client/src/` and running:
+
 ```bash
 make check
 ```

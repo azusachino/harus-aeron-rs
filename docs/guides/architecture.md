@@ -4,7 +4,7 @@
 
 ## Component Architecture & Dependencies
 
-```
+```text
 [ crates/agrona ]  <--- Lock-free primitives, AtomicBuffer, RingBuffers, Counters
        ^
        |

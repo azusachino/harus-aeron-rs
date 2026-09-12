@@ -24,6 +24,7 @@ Counts below are upstream `1.50.x` Java test *files* (one file is usually many
 | **Total** | **268** | |
 
 Re-run the survey before trusting these numbers as current:
+
 ```bash
 find vendor/aeron/aeron-{client,driver,archive,cluster,system-tests}/src/test -name '*.java' | wc -l
 ```
@@ -46,6 +47,7 @@ Each milestone is a version bump, gated on the stated exit criteria. Track these
 GitHub milestones with one issue per exit-criteria bullet (see "Workflow" below).
 
 ### v0.0.1 — Foundations (current)
+
 Cargo workspace mirroring upstream's module graph, Nix/Make tooling, `vendor/aeron` +
 `vendor/tokio` pinned as submodules, `rust-toolchain.toml` pinned (including the
 `rust-src` component for stdlib API/source checks — no need to vendor rust-lang/rust
@@ -54,26 +56,31 @@ which generated `test/upstream_map.jsonl` — the 268-entry parity tracker this 
 is gated on), this roadmap. No subsystem implemented.
 
 ### v0.0.2 — agrona core
+
 Ring buffer (SPSC/MPSC), broadcast transmitter/receiver, atomic buffer wrapper, idle
 strategies (busy-spin/back-off/yielding), counters manager. No direct upstream test
 count (agrona ships as its own repo/artifact) — gate is unit-test coverage sufficient
 for `aeron-client` to build on top of it in the next milestone.
 
 ### v0.0.3 — aeron-client: wire protocol + log buffer
+
 Port `client/protocol` (2 files) + `client/logbuffer` (11 files) test equivalents.
 **Exit: 13/13 green.**
 
 ### v0.0.4 — aeron-client: Publication/Subscription/ClientConductor
+
 Port `client/command` (2) + `client/exceptions` (1) + `client/security` (1) + client
 root (16). **Exit: 33/33 client parity.**
 
 ### v0.0.5 — aeron-driver: Conductor/Sender/Receiver + media
+
 Port the driver runtime boundary: CnC command processing, IPC and UDP data paths,
 flow control, loss recovery, and managed lifecycle. **Current: 41/41 driver test
 files resolved.** This is driver-module parity only; it does not imply Archive, Cluster,
 or full system-test parity.
 
 ### v0.0.6 — driver/client system tests
+
 Real pub/sub round-trip, reconnect, multi-stream, flow control — the scenarios upstream
 puts in `aeron-system-tests` rather than the per-module unit tests. Port
 `system-tests/driver` (13) + `system-tests/security` (2) + `system-tests/test` (1) +
@@ -105,6 +112,7 @@ position through.
 
 Explicit boundaries found during this pass (not silently dropped — see the
 `harus-aeron-rs:pitfall:*` entries in the project's Asobi graph for full detail):
+
 - `crates/client` had no `try_claim`/`BufferClaim` zero-copy claim API, controlled-poll API, or
   `ExclusivePublication` type at the time of this audit — all three added 2026-08-14.
   `ConcurrentPublication::try_claim` reserves frame space the same way `offer()` does and
@@ -142,6 +150,7 @@ depth (37), counters (17), session-specific pub/sub (11), name re-resolution (11
 depth unconfirmed), timestamping (9, depth unconfirmed), misc/internal (10).
 
 ### v0.0.7 — aeron-archive
+
 Port `aeron-archive` module (30) + `system-tests/archive` (20). **Exit: 50/50.**
 
 **Managed-service status (2026-08-10):** catalog descriptor persistence, Archive
@@ -261,6 +270,7 @@ Authentication, replication, detached segment operations, marks/counters, and th
 complete upstream test families remain open implementation boundaries.
 
 ### v0.0.8 — aeron-cluster
+
 Port `aeron-cluster` module (38) + `system-tests/cluster` (23). **Exit: 61/61.** The
 milestone includes a bounded in-memory comparison and a real Tokio UDP process
 comparison: 100 orders at one-second intervals, leader killed at 10 seconds, and all
@@ -269,6 +279,7 @@ protocol and no Archive replication, so this is transport-level comparison evide
 not Aeron wire-level parity; the limitation is recorded in the milestone docs.
 
 ### v0.0.9 — Hardening
+
 Soak tests, fuzz targets for codecs/ring buffer/log buffer, full `make check` green,
 close any parity gaps found during v0.0.2–v0.0.8, document intentional Java-specific
 test skips. The current hardening audit resolves all 268 ledger rows as either a bounded
@@ -285,6 +296,7 @@ or full upstream system-test parity claims; the boundaries remain documented in 
 driver and cluster parity notes.
 
 ### v0.1.0 — Release
+
 268-test-file parity (minus documented Java-specific exceptions), `make interop-smoke` +
 `make interop-soak` green against real Java Aeron `1.50.x`, `CHANGELOG.md` cut, tag.
 

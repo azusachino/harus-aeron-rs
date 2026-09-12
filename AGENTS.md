@@ -1,7 +1,7 @@
 # harus-aeron-rs
 
 Aeron protocol reimplementation in Rust. Wire-compatible with the real Aeron UDP protocol
-(https://github.com/aeron-io/aeron). Targets: Media Driver first, then Archive, then Cluster.
+(<https://github.com/aeron-io/aeron>). Targets: Media Driver first, then Archive, then Cluster.
 Sibling project: `harus-aeron-zig` (same protocol, different language) — see
 [`docs/plan.md`](docs/plan.md) for why both exist.
 
@@ -26,7 +26,7 @@ Sibling project: `harus-aeron-zig` (same protocol, different language) — see
     log buffer (`src/logbuffer.rs`) + Publication/Subscription API. Depends only on
     `agrona`, matching upstream. Every other crate depends on this one for wire types.
   - `crates/driver` (`aeron-driver`) — MediaDriver: Conductor, Sender, Receiver agents
-    + UDP transport (`src/media.rs`). Depends on `aeron-client` + `agrona`. Also hosts
+    - UDP transport (`src/media.rs`). Depends on `aeron-client` + `agrona`. Also hosts
     the driver process binary at `src/bin/aeron-driver.rs`.
   - `crates/archive` (`aeron-archive`) — future phase, depends on `aeron-client`.
   - `crates/cluster` (`aeron-cluster`) — future phase, depends on `aeron-client` +
@@ -87,6 +87,7 @@ This repo is also a structured course, mirroring `harus-aeron-zig`. Two parallel
 - **`tutorial/`** — learner stubs mirroring `crates/`, bodies are `todo!(...)`
 
 **Key conventions for agents writing code:**
+
 - After implementing a chapter in `crates/`, write the matching stub in `tutorial/`
   and the chapter doc in `docs/tutorial/`.
 - Full design reference (zig repo): `docs/specs/2026-03-17-tutorial-course-design.md`

@@ -123,5 +123,5 @@ v0.0.9 boundary matrix.
   Counting only methods with a direct Rust equivalent: **basic roundtrip (~28 of 54), single-gap
   NAK/retransmit (~5 of 7), basic spy (~2 of 9) ≈ 35 methods genuinely covered.**
 - GAP (in-scope, no test yet): B(37) + C(43) + D(15) + G(11) + H(6) + I(51) + J(17) + K(11) + O(10)
-  + A-depth(~26) + E-depth(~2) + F-depth(~7) ≈ **236 methods**
+  - A-depth(~26) + E-depth(~2) + F-depth(~7) ≈ **236 methods**
 - OUT-OF-SCOPE (explicit boundary, feature not implemented): C2(3) + L(17) + N(19) = **39 methods**
