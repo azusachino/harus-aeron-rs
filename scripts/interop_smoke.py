@@ -71,19 +71,17 @@ def main() -> int:
     print("[3/6] Compiling Java compatibility probes...")
     with tempfile.TemporaryDirectory(prefix="aeron-interop-") as temp_dir:
         classes = Path(temp_dir)
-        _run(
-            [
-                "javac",
-                "-cp",
-                str(aeron_all_jar),
-                "-d",
-                str(classes),
-                str(JAVA_SOURCE),
-                str(JAVA_PUBSUB_SOURCE),
-                str(JAVA_UDP_SOURCE),
-                str(JAVA_DRIVER_HOST_SOURCE),
-            ]
-        )
+        _run([
+            "javac",
+            "-cp",
+            str(aeron_all_jar),
+            "-d",
+            str(classes),
+            str(JAVA_SOURCE),
+            str(JAVA_PUBSUB_SOURCE),
+            str(JAVA_UDP_SOURCE),
+            str(JAVA_DRIVER_HOST_SOURCE),
+        ])
 
         print("[4/6] Mapping Rust cnc.dat with Aeron Java readers...")
         driver = subprocess.Popen(
