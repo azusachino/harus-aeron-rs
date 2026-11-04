@@ -1,13 +1,23 @@
 ---
-import { getCollection, render } from 'astro:content';
-import Layout from '../layouts/Document.astro';
+import { getCollection, render } from "astro:content";
+import Layout from "../layouts/Document.astro";
+
 export async function getStaticPaths() {
- const docs = await getCollection('docs');
- return docs.filter(d => d.id !== 'index').map(document => ({ params: { path: document.id.replace(/\/index$/, '') }, props: { document } }));
+  const documents = await getCollection("docs");
+  return documents
+    .filter((document) => document.id !== "index")
+    .map((document) => ({
+      params: { path: document.id.replace(/\/index$/, "") },
+      props: { document },
+    }));
 }
+
 const { document } = Astro.props;
 const { Content, headings } = await render(document);
+const title = document.data.title ?? headings.find((heading) => heading.depth === 1)?.text ?? document.id.split("/").at(-1)?.replaceAll("-", " ") ?? document.id;
+const path = `/${document.id.replace(/\/index$/, "")}`;
 ---
-<Layout title={document.data.title ?? headings.find(h => h.depth === 1)?.text ?? document.id.split('/').at(-1)?.replaceAll('-', ' ') ?? document.id} path={'/' + document.id.replace(/\/index$/, '')} headings={headings}>
- <Content />
+
+<Layout title={title} path={path} headings={headings}>
+  <Content />
 </Layout>

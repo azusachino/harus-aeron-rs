@@ -1,0 +1,3 @@
+# Bun owns the locked Astro dependencies and the docs build/test runtime.
+[tools]
+bun = "1.4.2"

@@ -1,11 +1,138 @@
 ---
-import type { MarkdownHeading } from 'astro';
-import { getCollection, render } from 'astro:content';
-import '../styles/site.css';
-interface Props { title: string; path: string; headings: MarkdownHeading[]; }
+import type { MarkdownHeading } from "astro";
+import { getCollection, render } from "astro:content";
+import "../styles/site.css";
+
+interface Props {
+  title: string;
+  path: string;
+  headings: MarkdownHeading[];
+}
+
+interface NavigationItem {
+  title: string;
+  id?: string;
+  link?: string;
+}
+
+interface NavigationGroup {
+  title: string;
+  link?: string;
+  items?: NavigationItem[];
+}
+
 const { title, path, headings } = Astro.props;
-const docs = await Promise.all((await getCollection('docs')).map(async document => {const { headings } = await render(document); return {id:document.id,title:document.data.title??headings.find(h=>h.depth===1)?.text??document.id.split('/').at(-1)?.replaceAll('-',' ')??document.id}}));
-const tutorials = docs.filter(x => x.id.startsWith('tutorial/')).sort((a,b)=>a.id.localeCompare(b.id));
-const nav: {title:string;link?:string;items?:{title:string;id?:string;link?:string}[]}[] = [{ title:'Home', link:'/' }, { title:'Tutorial', items:tutorials }, { title:'Architecture', items:[{title:'Overview',link:'/guides/architecture'}, {title:'Aeron 1.54.0 Baseline Assessment',link:'/aeron-1.54.0-baseline-assessment'}] }, { title:'Verification', items: docs.filter(x=>['interop-soak','driver-parity-boundaries','cluster-failover-comparison','cluster-parity-boundaries','system-test-parity-boundaries','fuzzing'].includes(x.id)) }, {title:'Roadmap',link:'/plan'}, {title:'Specifications',items:docs.filter(x=>x.id.startsWith('specs/'))}];
+const documents = await Promise.all(
+  (await getCollection("docs")).map(async (document) => {
+    const { headings: documentHeadings } = await render(document);
+    const filename = document.id.split("/").at(-1);
+
+    return {
+      id: document.id,
+      title: document.data.title ?? documentHeadings.find((heading) => heading.depth === 1)?.text ?? filename?.replaceAll("-", " ") ?? document.id,
+    };
+  }),
+);
+const tutorials = documents.filter((document) => document.id.startsWith("tutorial/")).sort((a, b) => a.id.localeCompare(b.id));
+const nav: NavigationGroup[] = [
+  { title: "Home", link: "/" },
+  { title: "Tutorial", items: tutorials },
+  {
+    title: "Architecture",
+    items: [
+      { title: "Overview", link: "/guides/architecture" },
+      {
+        title: "Aeron 1.54.0 Baseline Assessment",
+        link: "/aeron-1.54.0-baseline-assessment",
+      },
+    ],
+  },
+  {
+    title: "Verification",
+    items: documents.filter((document) => ["interop-soak", "driver-parity-boundaries", "cluster-failover-comparison", "cluster-parity-boundaries", "system-test-parity-boundaries", "fuzzing"].includes(document.id)),
+  },
+  {
+    title: "Roadmap",
+    link: "/plan",
+    items: documents.filter((document) => document.id.startsWith("plans/")),
+  },
+  {
+    title: "Specifications",
+    items: documents.filter((document) => document.id.startsWith("specs/")),
+  },
+];
 ---
-<!doctype html><html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Aeron protocol reimplementation and Rust systems programming tutorial"><title>{title} · Aeron in Rust</title><script is:inline>const r=document.documentElement;let m=localStorage.getItem('aeron-theme')||'auto';const apply=()=>{r.dataset.mode=m;r.dataset.theme=m==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):m};apply();matchMedia('(prefers-color-scheme: dark)').addEventListener('change',apply);window.addEventListener('DOMContentLoaded',()=>document.querySelector('#theme')?.addEventListener('click',()=>{m=m==='auto'?'dark':m==='dark'?'light':'auto';localStorage.setItem('aeron-theme',m);apply();document.querySelector('#theme').textContent='Theme: '+m}));</script></head><body><header><a class="brand" href="/">◉ Aeron in Rust</a><nav aria-label="Primary navigation"><a href="/tutorial/README">Tutorial</a><a href="/guides/architecture">Architecture</a><a href="/plan">Roadmap</a></nav><button id="theme" type="button">Theme: auto</button><label class="search">Search documents <input type="search" id="filter" placeholder="Search docs" autocomplete="off"></label><div id="search-results" role="listbox" aria-label="Search results" hidden></div></header><div class="shell"><aside><nav aria-label="Documentation navigation">{nav.map(group=><section><strong>{group.title}</strong>{group.link&&<a href={group.link}>{group.title}</a>}{group.items?.map(item=><a href={item.link??`/${item.id}`}>{item.title}</a>)}</section>)}</nav></aside><main><small class="breadcrumb">docs/{path.slice(1)}.md</small><article><slot /></article></main><aside class="outline"><strong>On this page</strong>{headings.filter(h=>h.depth<=3).map(h=><a href={'#'+h.slug}>{h.text}</a>)}</aside></div><script>const diagrams=document.querySelectorAll<HTMLElement>('pre[data-language="mermaid"]');if(diagrams.length)import('mermaid').then(({default:mermaid})=>{mermaid.initialize({startOnLoad:false,theme:'neutral'});diagrams.forEach(async code=>{const node=code.parentElement!;const result=await mermaid.render('diagram-'+Math.random().toString(36).slice(2),code.textContent!);node.outerHTML=result.svg})}); document.querySelectorAll<HTMLAnchorElement>('article a[href$=".md"]').forEach(a=>{const u=new URL(a.href,location.href);if(u.origin!==location.origin)return;u.pathname=u.pathname.replace(/\.md$/,'').replace(/\/README$/,'/');a.href=u.pathname+u.search+u.hash});const filter=document.querySelector<HTMLInputElement>('#filter')!;const results=document.querySelector<HTMLDivElement>('#search-results')!;let searchIndex:{id:string;body:string}[]=[];fetch('/search-index.json').then(r=>r.json()).then(index=>searchIndex=index);filter.addEventListener('input',()=>{const query=filter.value.trim().toLowerCase();results.replaceChildren();if(query.length<2){results.hidden=true;return}for(const doc of searchIndex.filter(d=>d.body.toLowerCase().includes(query)).slice(0,8)){const link=document.createElement('a');const heading=doc.body.match(/^#\s+(.+)$/m)?.[1]??doc.id;link.textContent=heading;link.href=doc.id==='index'?'/':`/${doc.id.replace(/\/index$/,'')}`;link.setAttribute('role','option');results.append(link)}results.hidden=results.childElementCount===0});document.querySelectorAll<HTMLElement>('pre:not([data-language="mermaid"])').forEach(pre=>{const b=document.createElement('button');b.textContent='Copy';b.onclick=()=>navigator.clipboard.writeText(pre.innerText);pre.append(b)});</script></body></html>
+
+<!doctype html>
+<html lang="en" data-theme="light" data-mode="system">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Aeron protocol reimplementation and Rust systems programming tutorial" />
+    <title>{title} · Aeron in Rust</title>
+    <script is:inline>
+      const root = document.documentElement;
+      const systemTheme = matchMedia("(prefers-color-scheme: dark)");
+
+      function applySavedTheme() {
+        const savedTheme = localStorage.getItem("aeron-theme");
+        const mode = savedTheme === "dark" || savedTheme === "light" ? savedTheme : "system";
+        root.dataset.mode = mode;
+        root.dataset.theme = mode === "system" ? (systemTheme.matches ? "dark" : "light") : mode;
+      }
+
+      applySavedTheme();
+      systemTheme.addEventListener("change", applySavedTheme);
+    </script>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/">
+        ◉ Aeron in Rust
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="/tutorial/README">Tutorial</a>
+        <a href="/guides/architecture">Architecture</a>
+        <a href="/plan">Roadmap</a>
+      </nav>
+      <button id="theme" type="button">
+        Theme: System
+      </button>
+      <label class="search">
+        Search documents
+        <input type="search" id="filter" placeholder="Search docs" autocomplete="off" />
+      </label>
+      <div id="search-results" role="listbox" aria-label="Search results" hidden></div>
+    </header>
+    <div class="shell">
+      <aside>
+        <nav aria-label="Documentation navigation">
+          {nav.map((group) => (
+            <section>
+              <strong>{group.title}</strong>
+              {group.link && <a href={group.link}>{group.title}</a>}
+              {group.items?.map((item) => (
+                <a href={item.link ?? `/${item.id}`}>{item.title}</a>
+              ))}
+            </section>
+          ))}
+        </nav>
+      </aside>
+      <main>
+        <small class="breadcrumb">docs/{path.slice(1)}.md</small>
+        <article>
+          <slot />
+        </article>
+      </main>
+      <aside class="outline">
+        <strong>On this page</strong>
+        {headings
+          .filter((heading) => heading.depth <= 3)
+          .map((heading) => (
+            <a href={`#${heading.slug}`}>{heading.text}</a>
+          ))}
+      </aside>
+    </div>
+    <script src="../scripts/site.ts"></script>
+  </body>
+</html>

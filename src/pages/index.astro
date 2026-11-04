@@ -1,7 +1,11 @@
 ---
-import Layout from '../layouts/Document.astro';
-import { getEntry, render } from 'astro:content';
-const doc = await getEntry('docs','index');
-const { Content, headings } = await render(doc!);
+import { getEntry, render } from "astro:content";
+import Layout from "../layouts/Document.astro";
+
+const document = await getEntry("docs", "index");
+const { Content, headings } = await render(document!);
 ---
-<Layout title="Aeron in Rust" path="/" headings={headings}><Content /></Layout>
+
+<Layout title="Aeron in Rust" path="/" headings={headings}>
+  <Content />
+</Layout>

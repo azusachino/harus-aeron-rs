@@ -10,7 +10,7 @@ Sibling project: `harus-aeron-zig` (same protocol, different language) — see
 - **Language**: Rust (stable, edition 2024)
 - **Async runtime**: tokio, used for UDP transport in the driver's duty-cycle agents
 - **Build**: Cargo workspace via Makefile
-- **Dev tooling**: Nix devShell (`nix develop`); `scripts/` are `uv`-run Python (PEP 723
+- **Dev tooling**: Nix devShell (`nix develop`) for Rust, mise-pinned Bun for Astro; `scripts/` use `uv`-run Python (PEP 723
   inline deps, `#!/usr/bin/env -S uv run --script`) for orchestration/reporting that
   doesn't belong in Cargo — no reimplementing what `cargo`/`clippy` already do. The
   Makefile stays a thin dispatcher: prefer delegating logic into a `uv`-run script
@@ -50,10 +50,11 @@ make check            # fmt-check + lint + build + test
 make clean            # cargo clean
 make run              # run media driver
 make tutorial-check   # build tutorial/ learner-stub workspace
-bun install           # install the Astro documentation toolchain
-make docs-serve       # preview the Astro documentation site
-make docs-build       # type-check and build documentation
-make docs-e2e         # headless browser acceptance checks
+make astro-setup      # install pinned Bun and locked Astro dependencies
+make astro-dev         # preview the Astro documentation site
+make astro-check       # type-check documentation
+make astro-build       # type-check and build documentation
+make astro-e2e         # headless browser acceptance checks
 ```
 
 ## Coding Conventions

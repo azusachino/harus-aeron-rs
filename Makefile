@@ -8,7 +8,6 @@ TOKIO_UPSTREAM_REPO ?= https://github.com/tokio-rs/tokio.git
 TOKIO_UPSTREAM_REF ?= tokio-1.53.1
 TOKIO_UPSTREAM_DIR ?= vendor/tokio
 INTEROP_SOAK_MESSAGES ?= 1000
-DOCS_PORT ?= 8000
 
 .DEFAULT_GOAL := help
 
@@ -16,7 +15,7 @@ DOCS_PORT ?= 8000
        tutorial-check bench fuzz fuzz-check stress miri \
        setup-upstream-aeron setup-upstream-tokio \
        interop interop-smoke interop-soak interop-rust-smoke interop-rust-soak cluster-failover-repro status test-parity \
-       docs docs-serve docs-build docs-e2e
+       astro-setup astro-dev astro-check astro-build astro-e2e
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -24,12 +23,12 @@ help:  ## Show this help
 
 fmt:  ## Format Rust, config files, and scripts/
 	$(NIX_RUN) cargo fmt --all
-	$(NIX_RUN) prettier --write "**/*.{json,yaml,yml}"
+	mise exec -- bun run prettier --plugin prettier-plugin-astro --write "**/*.{json,yaml,yml,ts,css,mjs,astro}"
 	uv run --group dev ruff format scripts/
 
 fmt-check:  ## Check formatting without writing
 	$(NIX_RUN) cargo fmt --all -- --check
-	$(NIX_RUN) prettier --check "**/*.{json,yaml,yml}"
+	mise exec -- bun run prettier --plugin prettier-plugin-astro --check "**/*.{json,yaml,yml,ts,css,mjs,astro}"
 	uv run --group dev ruff format --check scripts/
 	uv run --group dev ruff check scripts/
 
@@ -66,16 +65,21 @@ run:  ## Run the media driver
 tutorial-check:  ## Build the tutorial learner-stub workspace
 	$(NIX_RUN) cargo build --manifest-path tutorial/Cargo.toml --workspace
 
-docs: docs-serve  ## Preview the Astro documentation site locally
+astro-setup:  ## Install the pinned Bun and locked Astro dependencies
+	mise install
+	mise exec -- bun install --frozen-lockfile
 
-docs-serve:  ## Preview the Astro documentation site locally
-	bun run docs:dev -- --port $(DOCS_PORT)
+astro-dev:  ## Preview the Astro documentation site locally
+	mise exec -- bun run astro:dev
 
-docs-build:  ## Type-check and build the Astro documentation site
-	bun run docs:build
+astro-check: astro-setup  ## Type-check the Astro site and verify Markdown link rewriting
+	mise exec -- bun run astro:check
 
-docs-e2e: docs-build  ## Verify documentation journeys in headless Chromium
-	bunx playwright test
+astro-build: astro-setup  ## Type-check and build the Astro documentation site
+	mise exec -- bun run astro:build
+
+astro-e2e: astro-build  ## Verify documentation journeys in headless Chromium
+	mise exec -- bun run astro:e2e
 
 bench:  ## Run benchmarks (once crates/*/benches exist)
 	$(NIX_RUN) cargo bench --workspace

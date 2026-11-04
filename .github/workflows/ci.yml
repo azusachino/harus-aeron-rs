@@ -27,18 +27,15 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install prettier
-        run: npm install -g prettier
-
-      - uses: oven-sh/setup-bun@v2
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
 
       - name: Install documentation dependencies
-        run: bun install --frozen-lockfile
+        run: make astro-setup
 
       - run: make check
 
       - name: Build Astro documentation site
-        run: make docs-build
+        run: make astro-build
 
       - name: Build tutorial learner-stub workspace
         run: make tutorial-check

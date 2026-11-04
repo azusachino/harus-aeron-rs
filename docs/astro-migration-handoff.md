@@ -1,30 +1,32 @@
-# MkDocs to Astro migration handoff
+# Astro documentation migration handoff
 
 ## Checkpoint
 
-- Started from `main` at `87950250bd7215659f8641c1374a4e67a0151576`.
 - Working branch: `feature/astro-documentation`.
-- Outcome: replace MkDocs Material docs with Astro, preserve Markdown docs and tutorial routes, retain the workstation light/dark/system palette and docs navigation/search behavior, and omit character artwork.
-- The prior uncommitted Architecture navigation item for `docs/aeron-1.54.0-baseline-assessment.md` is represented in the Astro navigation. That Markdown file remains untracked and owner-owned; it is intentionally excluded from migration commits.
+- Source checkout began at `87950250bd7215659f8641c1374a4e67a0151576`.
+- Replace MkDocs with Astro while retaining authored Markdown, tutorial order, navigation, search, themes, and inline links.
+- The owner-authorized Aeron 1.54.0 assessment is included at `docs/aeron-1.54.0-baseline-assessment.md`; its prose is retained except for the retired build command, followed by a migration verification note.
 
 ## Implementation
 
-- Astro 7.3.5 with TypeScript 7.0.2 builds authored files in `docs/` to `dist/`; `make docs-serve`, `make docs-build`, and `make docs-e2e` are the docs entry points.
-- The local UI includes section navigation, heading outline, code copy controls, Mermaid rendering, full-text search over a generated local index, and a persisted light/dark/system theme selector.
-- `.md` links in existing content map to Astro routes. `/tutorial/` redirects to `/tutorial/README` as before.
-- Existing source uses standard Markdown fences and one Mermaid fence. No MkDocs admonition or tab syntax was found in `docs/`; all Markdown files remain unchanged as source content.
-- Search/UI uses locally bundled assets only. No visible images are rendered.
+- Astro 7.3.5 and TypeScript 7.0.2 build the Markdown collection to `dist/`. Bun 1.4.2 is pinned in `.mise.toml`; Bun lockfile pins JS dependencies.
+- The Make targets are `astro-setup`, `astro-check`, `astro-dev`, `astro-build`, and `astro-e2e`. The package scripts use the matching `astro:*` names.
+- `make fmt` / `make fmt-check` run pinned Prettier on JSON, YAML, TypeScript, CSS, MJS, and Astro sources. Astro formatting uses `prettier-plugin-astro` 1.1.2.
+- Relative Markdown links are rewritten at build time; query strings and fragments are preserved and external links remain unchanged. The Tutorial alias redirects to its overview page.
+- Markdown under `docs/plans/` is automatically loaded as pages and search content, then listed under the Roadmap sidebar group. The current owner-authored catch-up plan was built at `/plans/2026-11-04-aeron-1.54-catch-up/` and clicked in Playwright; its source remains parent-owned and unstaged.
+- The docs UI provides navigation, outline, full-text search, Mermaid diagrams, code copy controls, and persisted system/light/dark theme selection. No character artwork is included.
 
 ## Verification
 
-- `make check` — passed; Rust format, lint, workspace tests, Python tests, and tutorial workspace build passed. Existing tutorial stub dead-code warnings remain.
-- `make docs-build` — passed with `astro sync`, TypeScript checking, and Astro build; 24 pages plus the search index generated. Vite reports large Mermaid/Cynefin chunks (>500 kB), although Mermaid is dynamically loaded only on pages containing Mermaid diagrams.
-- `make fmt-check` — passed; Rust, JSON/YAML, ruff format, and ruff lint checks passed.
-- `make docs-e2e` — passed in headless Chromium. Checks home, tutorial chapter/index, assessment, full-text search, manual theme persistence, system dark mode, Mermaid rendering, a 390px viewport, no visible images, failed asset responses, and page errors.
-- Screenshots: workstation `.tmp/harus-aeron-rs-astro/home.png` and `assessment.png`.
+- `make check` — passed: Rust format, lint, workspace build/tests, Python tests, and tutorial workspace build. Existing tutorial-stub dead-code warnings remain.
+- `make astro-check` — passed: Astro sync, TypeScript check, and the Markdown link transform test.
+- `make astro-build` — passed: generated 25 static pages plus the search index, including the parent-owned catch-up plan.
+- `make fmt-check` — passed: Rust, Prettier including Astro/TypeScript/CSS, and Ruff checks.
+- `make astro-e2e` — passed: 3 headless Chromium tests cover home-to-overview-to-chapter clicks, a chapter cross-link, assessment and catch-up plan navigation, search, saved theme labels/cycling/system preference changes, clipboard contents, Mermaid rendering, a 390px viewport, failed asset responses, page errors, and no visible images.
+- Playwright screenshots are written to workstation `.tmp/harus-aeron-rs-astro/`; no manual screenshot review is claimed here.
+- Vite reports large Mermaid/Cynefin chunks (>500 kB), although Mermaid is dynamically loaded only on pages containing diagrams.
 
-## Ownership, branch and next step
+## Branch and ownership
 
-- Branch `feature/astro-documentation` contains migration commit `9eea92d`, verification handoff commit `f077e77`, and workstation-aligned Astro toolchain commit `b36667b`.
-- `docs/aeron-1.54.0-baseline-assessment.md` remains untracked and is not part of this migration commit. Keep it with its owner; it is required by the visible Architecture navigation entry.
-- No remote actions were taken. Next step: review the branch and coordinate the separate assessment file with its owner before merging.
+- Prior migration commits: `9eea92d`, `f077e77`, `b36667b`, and `cdeb705`; the final acceptance commit will be recorded after this checkpoint is committed.
+- No remote actions were taken. The assessment is included by owner authorization. The parent owns the separate `docs/plans/2026-11-04-aeron-1.54-catch-up.md` path; avoid modifying or staging it.

@@ -30,6 +30,9 @@ skips; this is a complete audit, not a claim of full Java method parity. See
 # Enter dev shell (provides rustc, cargo, clippy, rustfmt, rust-analyzer)
 nix develop
 
+# Install pinned Bun and locked documentation dependencies
+make astro-setup
+
 # Build
 make build
 
@@ -39,18 +42,18 @@ make test
 # Check everything (fmt + lint + build + test)
 make check
 
-# Install the documentation toolchain once, then build and preview the site
-bun install
-make docs-serve
-make docs-build
-make docs-e2e
+# Check and preview the Astro documentation site
+make astro-check
+make astro-dev
+make astro-build
+make astro-e2e
 ```
 
 ## Stack
 
 - **Language**: Rust (stable, edition 2024)
 - **Async runtime**: tokio
-- **Dev tooling**: Nix devShell (`nix develop`)
+- **Dev tooling**: Nix devShell for Rust and mise-pinned Bun for documentation
 - **Task runner**: `make`
 - **Interop pin**: Aeron `1.50.x`
 - **Reference**: [aeron-io/aeron](https://github.com/aeron-io/aeron)

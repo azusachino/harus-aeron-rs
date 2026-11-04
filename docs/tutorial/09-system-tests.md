@@ -36,5 +36,5 @@ Run all tests and workspace checks with:
 
 ```bash
 make check
-make docs-build
+make astro-build
 ```

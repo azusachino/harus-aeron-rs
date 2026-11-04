@@ -15,7 +15,7 @@ shared-memory IPC through the Media Driver, Archive, and bounded Cluster foundat
 ## Work loop
 
 ```bash
-make docs-serve       # preview this site locally
+make astro-dev        # preview this site locally
 make tutorial-check   # compile the learner workspace
 make check            # verify the Rust reference implementation
 ```
