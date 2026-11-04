@@ -1,6 +1,6 @@
 # Interop soaks
 
-The Java-backed soak is the v0.1.0 release gate. It uses the vendored Aeron `1.50.x`
+The Java-backed soak is the v0.1.0 release gate. It uses the vendored Aeron `1.54.0`
 `aeron-all` JAR, a real Java Aeron client, and the Rust MediaDriver, then checks ordered
 sequence-tagged UDP messages end to end.
 

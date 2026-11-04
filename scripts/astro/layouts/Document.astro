@@ -1,0 +1,170 @@
+---
+import type { MarkdownHeading } from "astro";
+import { getCollection, render } from "astro:content";
+import "../styles/site.css";
+
+interface Props {
+  title: string;
+  path: string;
+  headings: MarkdownHeading[];
+}
+
+interface NavigationItem {
+  title: string;
+  id?: string;
+  link?: string;
+}
+
+interface NavigationGroup {
+  title: string;
+  link?: string;
+  items?: NavigationItem[];
+}
+
+const { title, path, headings } = Astro.props;
+const documents = await Promise.all(
+  (await getCollection("docs")).map(async (document) => {
+    const { headings: documentHeadings } = await render(document);
+    const filename = document.id.split("/").at(-1);
+
+    return {
+      id: document.id,
+      title:
+        document.data.title ??
+        documentHeadings.find((heading) => heading.depth === 1)?.text ??
+        filename?.replaceAll("-", " ") ??
+        document.id,
+    };
+  }),
+);
+const tutorials = documents
+  .filter((document) => document.id.startsWith("tutorial/"))
+  .sort((a, b) => a.id.localeCompare(b.id));
+const nav: NavigationGroup[] = [
+  { title: "Home", link: "/" },
+  { title: "Tutorial", items: tutorials },
+  {
+    title: "Architecture",
+    items: [
+      { title: "Overview", link: "/guides/architecture" },
+      {
+        title: "Aeron 1.54.0 Baseline Assessment",
+        link: "/aeron-1.54.0-baseline-assessment",
+      },
+    ],
+  },
+  {
+    title: "Verification",
+    items: documents.filter((document) =>
+      [
+        "interop-soak",
+        "driver-parity-boundaries",
+        "cluster-failover-comparison",
+        "cluster-parity-boundaries",
+        "system-test-parity-boundaries",
+        "fuzzing",
+      ].includes(document.id),
+    ),
+  },
+  {
+    title: "Roadmap",
+    link: "/plan",
+    items: documents.filter((document) => document.id.startsWith("plans/")),
+  },
+  {
+    title: "Specifications",
+    items: documents.filter((document) => document.id.startsWith("specs/")),
+  },
+];
+---
+
+<!doctype html>
+<html lang="en" data-theme="light" data-mode="system">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Aeron protocol reimplementation and Rust systems programming tutorial"
+    />
+    <title>{title} · Aeron in Rust</title>
+    <script is:inline>
+      const root = document.documentElement;
+      const systemTheme = matchMedia("(prefers-color-scheme: dark)");
+
+      function applySavedTheme() {
+        const savedTheme = localStorage.getItem("aeron-theme");
+        const mode =
+          savedTheme === "dark" || savedTheme === "light"
+            ? savedTheme
+            : "system";
+        root.dataset.mode = mode;
+        root.dataset.theme =
+          mode === "system" ? (systemTheme.matches ? "dark" : "light") : mode;
+      }
+
+      applySavedTheme();
+      systemTheme.addEventListener("change", applySavedTheme);
+    </script>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/">
+        ◉ Aeron in Rust
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="/tutorial/README">Tutorial</a>
+        <a href="/guides/architecture">Architecture</a>
+        <a href="/plan">Roadmap</a>
+      </nav>
+      <button id="theme" type="button">
+        Theme: System
+      </button>
+      <label class="search">
+        Search documents
+        <input
+          type="search"
+          id="filter"
+          placeholder="Search docs"
+          autocomplete="off"
+        />
+      </label>
+      <div
+        id="search-results"
+        role="listbox"
+        aria-label="Search results"
+        hidden
+      ></div>
+    </header>
+    <div class="shell">
+      <aside>
+        <nav aria-label="Documentation navigation">
+          {nav.map((group) => (
+            <section>
+              <strong>{group.title}</strong>
+              {group.link && <a href={group.link}>{group.title}</a>}
+              {group.items?.map((item) => (
+                <a href={item.link ?? `/${item.id}`}>{item.title}</a>
+              ))}
+            </section>
+          ))}
+        </nav>
+      </aside>
+      <main>
+        <small class="breadcrumb">docs/{path.slice(1)}.md</small>
+        <article>
+          <slot />
+        </article>
+      </main>
+      <aside class="outline">
+        <strong>On this page</strong>
+        {headings
+          .filter((heading) => heading.depth <= 3)
+          .map((heading) => (
+            <a href={`#${heading.slug}`}>{heading.text}</a>
+          ))}
+      </aside>
+    </div>
+    <script src="../scripts/site.ts"></script>
+  </body>
+</html>

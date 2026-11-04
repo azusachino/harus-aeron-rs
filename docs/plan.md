@@ -5,6 +5,15 @@ an external dependency; `io.aeron.protocol`/`io.aeron.logbuffer`/`io.aeron.drive
 as packages inside `aeron-client`/`aeron-driver`, not separate modules) rather than the
 zig repo's single-build-unit file layout — see `vendor/aeron/build.gradle`.
 
+## Current reference
+
+The selected upstream reference is now Aeron `1.54.0`, commit
+`454da1e4e6c7edf3dd6d34878512d3243384992a`. The counts and prior parity evidence
+below describe the historical 1.50.x audit. They have not been reclassified as 1.54
+coverage. [The catch-up plan](plans/2026-11-04-aeron-1.54-catch-up.md) and
+[issue #44](https://github.com/azusachino/harus-aeron-rs/issues/44) own the remaining
+inventory and behavioral reconciliation.
+
 ## Release gate for 0.1.0
 
 `0.1.0` is the first release. The gate is near-100% parity with upstream Aeron's own
@@ -48,7 +57,7 @@ GitHub milestones with one issue per exit-criteria bullet (see "Workflow" below)
 
 ### v0.0.1 — Foundations (current)
 
-Cargo workspace mirroring upstream's module graph, Nix/Make tooling, `vendor/aeron` +
+Cargo workspace mirroring upstream's module graph, mise/Make tooling, `vendor/aeron` +
 `vendor/tokio` pinned as submodules, `rust-toolchain.toml` pinned (including the
 `rust-src` component for stdlib API/source checks — no need to vendor rust-lang/rust
 itself), `uv`-managed `scripts/` (see `scripts/upstream_tests.py`,

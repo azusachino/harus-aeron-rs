@@ -9,13 +9,13 @@ shared-memory IPC through the Media Driver, Archive, and bounded Cluster foundat
 | --- | --- |
 | [Tutorial overview](tutorial/README.md) | Course map and learner-stub workflow |
 | [System architecture](guides/architecture.md) | Reference view of the implemented crates |
-| [Java interop soak](interop-soak.md) | Current Aeron `1.50.x` interoperability gate |
+| [Java interop soak](interop-soak.md) | Current Aeron `1.54.0` interoperability gate |
 | [Roadmap](plan.md) | Milestones, parity accounting, and explicit ceilings |
 
 ## Work loop
 
 ```bash
-make docs-serve       # preview this site locally
+make astro-dev        # preview this site locally
 make tutorial-check   # compile the learner workspace
 make check            # verify the Rust reference implementation
 ```

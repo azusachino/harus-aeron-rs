@@ -5,9 +5,6 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  IN_NIX_SHELL: "1" # skip the Makefile's `nix develop --command` wrapper; tools installed directly below
-
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -17,23 +14,20 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Install Rust toolchain (rust-toolchain.toml)
-        run: rustup show
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5
+
+      - name: Show selected Rust toolchain
+        run: mise exec -- rustup show
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Install prettier
-        run: npm install -g prettier
+      - name: Install locked dependencies
+        run: make setup
 
       - run: make check
 
-      - name: Build MkDocs site
-        run: make docs-build
+      - name: Build Astro documentation site
+        run: make astro-build
 
       - name: Build tutorial learner-stub workspace
         run: make tutorial-check
@@ -48,4 +42,4 @@ jobs:
         run: make interop-smoke
 
       - name: Agrona loom interleaving checks
-        run: RUSTFLAGS="--cfg loom" cargo test -p agrona --lib
+        run: mise exec -- env RUSTFLAGS="--cfg loom" cargo test -p agrona --lib

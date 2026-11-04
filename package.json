@@ -1,0 +1,22 @@
+{
+  "name": "harus-aeron-rs-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "astro:dev": "bun run --bun astro dev --host 127.0.0.1 --port 8000",
+    "astro:check": "bun run --bun astro sync && bun run --bun tsc -p tsconfig.json && bun test scripts/astro/markdown/resolve-doc-links.test.ts",
+    "astro:build": "bun run astro:check && bun run --bun astro build",
+    "astro:preview": "bun run --bun astro preview",
+    "astro:e2e": "bun run --bun playwright test"
+  },
+  "devDependencies": {
+    "@astrojs/markdown-remark": "7.3.1",
+    "@playwright/test": "1.60.0",
+    "@types/bun": "1.4.3",
+    "astro": "7.3.5",
+    "mermaid": "11.17.2",
+    "prettier": "3.9.8",
+    "prettier-plugin-astro": "1.1.2",
+    "typescript": "7.0.2"
+  }
+}
