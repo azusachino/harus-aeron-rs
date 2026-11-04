@@ -28,5 +28,6 @@
 
 ## Branch and ownership
 
-- Prior migration commits: `9eea92d`, `f077e77`, `b36667b`, and `cdeb705`; the final acceptance commit will be recorded after this checkpoint is committed.
+- Final acceptance commit: `47e6680` (`docs: complete Astro migration acceptance`) on `feature/astro-documentation`. Earlier history includes `9eea92d`, `f077e77`, `b36667b`, and `cdeb705`.
+- The parent-owned `docs/plans/2026-11-04-aeron-1.54-catch-up.md` was build and browser-test input; it remains untracked and was excluded from this commit.
 - No remote actions were taken. The assessment is included by owner authorization. The parent owns the separate `docs/plans/2026-11-04-aeron-1.54-catch-up.md` path; avoid modifying or staging it.
