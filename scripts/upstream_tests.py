@@ -22,12 +22,7 @@ MODULES = {
 }
 STATUSES = ("todo", "in-progress", "done", "skip")
 DEFAULT_REVISION = "454da1e4e6c7edf3dd6d34878512d3243384992a"
-
-
-def upstream_tests() -> dict[str, list[Path]]:
-    return {
-        module: sorted((UPSTREAM / module / "src" / "test").rglob("*.java")) for module in MODULES
-    }
+OLD_REVISION = "8e0cdb2f92800a047c0066028444b790a80fe593"
 
 
 def load_map() -> dict[str, dict]:
@@ -55,12 +50,12 @@ def git_blobs(revision: str) -> dict[str, str]:
         capture_output=True,
         text=True,
     )
-    prefix = tuple(f"{module}/src/test/" for module in MODULES)
+    prefixes = tuple(f"{module}/src/test/" for module in MODULES)
     blobs = {}
     for line in result.stdout.splitlines():
         metadata, path = line.split("\t", 1)
-        if path.endswith(".java") and path.startswith(prefix):
-            blobs["vendor/aeron/" + path] = metadata.split()[2]
+        if path.endswith(".java") and path.startswith(prefixes):
+            blobs[f"vendor/aeron/{path}"] = metadata.split()[2]
     return blobs
 
 
@@ -70,25 +65,32 @@ def inventory(revision: str) -> dict[str, str]:
 
 def cmd_init(revision: str = DEFAULT_REVISION) -> int:
     old = load_map()
-    target_blobs = inventory(revision)
-    old_revision = next(
-        (e.get("source_revision") for e in old.values() if e.get("source_revision")),
-        "8e0cdb2f92800a047c0066028444b790a80fe593",
-    )
-    old_blobs = git_blobs(old_revision) if old_revision else {}
+    try:
+        target_blobs = inventory(revision)
+        old_revision = next(
+            (e["source_revision"] for e in old.values() if e.get("source_revision")), OLD_REVISION
+        )
+        old_blobs = git_blobs(old_revision)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"cannot read required upstream revision: {exc}", file=sys.stderr)
+        return 1
     entries = {}
     added = changed = retained = 0
     for key, blob in target_blobs.items():
         if key in old:
             entry = old[key]
-            if old_blobs and old_blobs.get(key) != blob:
+            entry.pop("inventory_state", None)
+            prior_blob = old_blobs.get(key)
+            if prior_blob != blob:
                 changed += 1
-                entry["audit_disposition"] = (
-                    entry.get("audit_disposition") or "pending-source-review"
-                )
-                entry["previous_blob"] = old_blobs.get(key)
+                entry["audit_disposition"] = "pending-source-review"
+                entry["previous_blob"] = prior_blob
+                entry.pop("audit_evidence", None)
             else:
                 retained += 1
+                entry.pop("previous_blob", None)
+                if not entry.get("audit_disposition"):
+                    entry["audit_disposition"] = "unchanged-source"
         else:
             added += 1
             module = key.split("/")[2]
@@ -123,39 +125,68 @@ def cmd_report(revision: str = DEFAULT_REVISION) -> int:
         print(f"{MAP.relative_to(ROOT)} is empty or missing — run init", file=sys.stderr)
         return 1
     invalid = [
-        (key, e.get("status")) for key, e in entries.items() if e.get("status") not in STATUSES
+        (key, entry.get("status"))
+        for key, entry in entries.items()
+        if entry.get("status") not in STATUSES
     ]
     if invalid:
         print(f"unknown parity status: {invalid}", file=sys.stderr)
         return 1
-    current = inventory(revision)
-    mapped_current = {
-        k: e for k, e in entries.items() if k in current and e.get("source_revision") == revision
+    try:
+        current = inventory(revision)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"cannot read upstream revision {revision}: {exc}", file=sys.stderr)
+        return 1
+    mapped = {
+        key: entry
+        for key, entry in entries.items()
+        if key in current and entry.get("source_revision") == revision
     }
-    if set(mapped_current) != set(current):
+    if set(mapped) != set(current):
         print(
-            f"inventory mismatch: upstream={len(current)} "
-            f"ledger-current={len(mapped_current)}; run init",
+            f"inventory mismatch: upstream={len(current)} ledger-current={len(mapped)}; run init",
             file=sys.stderr,
         )
         return 1
-    print(f"Aeron test-file dispositions at {revision}: {len(current)} current paths")
-    counts = Counter(e["status"] for e in mapped_current.values())
-    audit_pending = sum(
-        e.get("audit_disposition") == "pending-source-review" for e in mapped_current.values()
+    stale = [
+        (key, e.get("source_blob"), current[key])
+        for key, e in mapped.items()
+        if e.get("source_blob") != current[key]
+    ]
+    if stale:
+        print("stale source_blob metadata; run init:", file=sys.stderr)
+        for key, stored, actual in stale:
+            print(f"  {key}: ledger={stored!r} upstream={actual!r}", file=sys.stderr)
+        return 1
+    counts = Counter(e["status"] for e in mapped.values())
+    reviewed_done = sum(
+        e["status"] == "done"
+        and e.get("audit_disposition")
+        not in ("pending-source-review", "behavior-unverified", "unsupported-runtime-behavior")
+        for e in mapped.values()
     )
-    done = counts["done"]
+    historical_done = counts["done"] - reviewed_done
+    unverified = sum(
+        e.get("audit_disposition")
+        in ("pending-source-review", "behavior-unverified", "unsupported-runtime-behavior")
+        for e in mapped.values()
+    )
     total = len(current)
+    print(f"Aeron test-file dispositions at {revision}: {total} current paths")
     print("status: " + ", ".join(f"{s}={counts[s]}" for s in STATUSES))
-    print(f"implemented/bounded equivalents: {done}/{total} ({done / total * 100:.1f}%)")
-    print(f"unreviewed changed/new sources: {audit_pending}")
+    pct = reviewed_done / total * 100 if total else 0.0
+    print(f"reviewed current-source equivalents: {reviewed_done}/{total} ({pct:.1f}%)")
+    print(f"historical done mappings without current-source evidence: {historical_done}")
+    print(f"unverified changed/new sources: {unverified}")
     absent = [
-        k for k, e in entries.items() if e.get("inventory_state") == "absent-at-current-reference"
+        key
+        for key, entry in entries.items()
+        if entry.get("inventory_state") == "absent-at-current-reference"
     ]
     if absent:
         print("historical paths absent at current reference:")
-        for path in absent:
-            print(f"  {path}")
+        for key in absent:
+            print(f"  {key}")
     return 0
 
 

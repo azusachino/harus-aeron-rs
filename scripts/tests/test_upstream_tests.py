@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,83 +24,170 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(ut, "ROOT", tmp_path)
     monkeypatch.setattr(ut, "UPSTREAM", upstream)
     monkeypatch.setattr(ut, "MAP", tmp_path / "test/upstream_map.jsonl")
-    monkeypatch.setattr(ut, "inventory", lambda revision: {})
-    return tmp_path, upstream
+    return tmp_path
 
 
-def file(workspace, path, data="class Test {}"):
-    root, _ = workspace
-    target = root / "vendor/aeron" / path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(data)
-    return target
-
-
-def test_init_reconciles_added_changed_removed_and_moved(workspace, monkeypatch, capsys):
-    root, _ = workspace
-    old = "old"
-    new = "new"
-    a = "vendor/aeron/aeron-client/src/test/A.java"
-    b = "vendor/aeron/aeron-client/src/test/B.java"
-    gone = "vendor/aeron/aeron-driver/src/test/Gone.java"
-    moved_from = "vendor/aeron/aeron-system-tests/src/test/Resolver.java"
-    moved_to = "vendor/aeron/aeron-driver/src/test/Resolver.java"
-    (root / "vendor/aeron/aeron-client/src/test").mkdir(parents=True, exist_ok=True)
-    (root / "vendor/aeron/aeron-driver/src/test").mkdir(parents=True, exist_ok=True)
-    old_blobs = {a: "same", b: "before", gone: "gone", moved_from: "resolver"}
-    new_blobs = {
-        a: "same",
-        b: "after",
-        moved_to: "resolver",
-        "vendor/aeron/aeron-archive/src/test/New.java": "new",
+def test_init_reconciles_add_change_remove_reintroduction_and_is_idempotent(
+    workspace, monkeypatch, capsys
+):
+    old, new, reintroduced = "old", "new", "reintroduced"
+    same = "vendor/aeron/aeron-client/src/test/Same.java"
+    changed = "vendor/aeron/aeron-client/src/test/Changed.java"
+    removed = "vendor/aeron/aeron-driver/src/test/Removed.java"
+    moved_old = "vendor/aeron/aeron-system-tests/src/test/Resolver.java"
+    moved_new = "vendor/aeron/aeron-driver/src/test/Resolver.java"
+    old_tree = {same: "s", changed: "before", removed: "r", moved_old: "m"}
+    new_tree = {
+        same: "s",
+        changed: "after",
+        moved_new: "m",
+        "vendor/aeron/aeron-archive/src/test/Added.java": "a",
     }
-    monkeypatch.setattr(
-        ut, "git_blobs", lambda revision: old_blobs if revision == old else new_blobs
-    )
-    monkeypatch.setattr(
-        ut, "inventory", lambda revision: old_blobs if revision == old else new_blobs
-    )
+    monkeypatch.setattr(ut, "inventory", lambda rev: old_tree if rev == old else new_tree)
+    monkeypatch.setattr(ut, "git_blobs", lambda rev: old_tree if rev == old else new_tree)
     prior = {
-        k: {
-            "upstream": k,
+        key: {
+            "upstream": key,
             "layer": "client",
             "status": "done",
             "rust_equivalent": "evidence",
             "source_revision": old,
+            "audit_disposition": "reviewed",
         }
-        for k in old_blobs
+        for key in old_tree
     }
     ut.write_map(prior)
-    ut.cmd_init(new)
+
+    assert ut.cmd_init(new) == 0
     entries = ut.load_map()
     assert len(entries) == 6
-    assert entries[a]["status"] == "done"
-    assert entries[b]["previous_blob"] == "before"
-    assert entries[b]["audit_disposition"] == "pending-source-review"
-    assert entries[moved_from]["inventory_state"] == "absent-at-current-reference"
-    assert moved_to in entries
-    assert "2 added, 1 changed" in capsys.readouterr().out
+    assert entries[same]["audit_disposition"] == "reviewed"
+    assert entries[changed]["audit_disposition"] == "pending-source-review"
+    assert entries[changed]["previous_blob"] == "before"
+    assert entries[removed]["inventory_state"] == "absent-at-current-reference"
+    assert moved_old in entries and moved_new in entries
+    assert entries[moved_new]["audit_disposition"] == "pending-source-review"
+
+    # Same revision and identical blobs do not reset review or report new changes.
+    assert ut.cmd_init(new) == 0
+    assert ut.load_map()[changed]["audit_disposition"] == "pending-source-review"
+    assert "0 added, 0 changed" in capsys.readouterr().out
+
+    # A row that reappears is active again and its historical absent marker clears.
+    tree = {**new_tree, removed: "r"}
+    monkeypatch.setattr(ut, "inventory", lambda rev: tree)
+    monkeypatch.setattr(ut, "git_blobs", lambda rev: tree)
+    assert ut.cmd_init(reintroduced) == 0
+    assert "inventory_state" not in ut.load_map()[removed]
 
 
-def test_report_does_not_count_skip_as_implemented(workspace, monkeypatch, capsys):
-    root, _ = workspace
-    key = "vendor/aeron/aeron-client/src/test/A.java"
-    entries = {
-        key: {"upstream": key, "layer": "client", "status": "skip", "source_revision": "rev"}
-    }
-    ut.write_map(entries)
-    monkeypatch.setattr(ut, "inventory", lambda revision: {key: "blob"})
-    assert ut.cmd_report("rev") == 0
-    output = capsys.readouterr().out
-    assert "0/1" in output
-    assert "skip=1" in output
-
-
-def test_report_rejects_inventory_mismatch(workspace, monkeypatch, capsys):
+def test_report_validates_blob_and_separates_historical_done(workspace, monkeypatch, capsys):
     key = "vendor/aeron/aeron-client/src/test/A.java"
     ut.write_map({
-        key: {"upstream": key, "layer": "client", "status": "todo", "source_revision": "rev"}
+        key: {
+            "upstream": key,
+            "layer": "client",
+            "status": "done",
+            "source_revision": "rev",
+            "source_blob": "actual",
+            "audit_disposition": "behavior-unverified",
+        }
     })
-    monkeypatch.setattr(ut, "inventory", lambda revision: {key: "blob", key + "2": "blob2"})
+    monkeypatch.setattr(ut, "inventory", lambda revision: {key: "actual"})
+    assert ut.cmd_report("rev") == 0
+    output = capsys.readouterr().out
+    assert "reviewed current-source equivalents: 0/1" in output
+    assert "historical done mappings without current-source evidence: 1" in output
+
+    entries = ut.load_map()
+    entries[key]["source_blob"] = "forged"
+    ut.write_map(entries)
+    assert ut.cmd_report("rev") == 1
+    assert "stale source_blob metadata" in capsys.readouterr().err
+
+
+def test_report_counts_skip_as_not_implemented(workspace, monkeypatch, capsys):
+    key = "vendor/aeron/aeron-client/src/test/A.java"
+    ut.write_map({
+        key: {
+            "upstream": key,
+            "layer": "client",
+            "status": "skip",
+            "source_revision": "rev",
+            "source_blob": "b",
+        }
+    })
+    monkeypatch.setattr(ut, "inventory", lambda revision: {key: "b"})
+    assert ut.cmd_report("rev") == 0
+    assert "reviewed current-source equivalents: 0/1" in capsys.readouterr().out
+
+
+def test_report_rejects_unknown_status(workspace, monkeypatch, capsys):
+    key = "vendor/aeron/aeron-client/src/test/A.java"
+    ut.write_map({
+        key: {
+            "upstream": key,
+            "layer": "client",
+            "status": "implemented",
+            "source_revision": "rev",
+            "source_blob": "b",
+        }
+    })
+    monkeypatch.setattr(ut, "inventory", lambda revision: {key: "b"})
+    assert ut.cmd_report("rev") == 1
+    assert "unknown parity status" in capsys.readouterr().err
+
+
+def test_report_rejects_missing_upstream_revision_and_inventory_mismatch(
+    workspace, monkeypatch, capsys
+):
+    key = "vendor/aeron/aeron-client/src/test/A.java"
+    ut.write_map({
+        key: {
+            "upstream": key,
+            "layer": "client",
+            "status": "todo",
+            "source_revision": "rev",
+            "source_blob": "b",
+        }
+    })
+    monkeypatch.setattr(ut, "inventory", lambda revision: {key: "b", key + "2": "b2"})
     assert ut.cmd_report("rev") == 1
     assert "inventory mismatch" in capsys.readouterr().err
+    monkeypatch.setattr(
+        ut,
+        "inventory",
+        lambda revision: (_ for _ in ()).throw(subprocess.CalledProcessError(128, "git")),
+    )
+    assert ut.cmd_report("missing") == 1
+    assert "cannot read upstream revision missing" in capsys.readouterr().err
+
+
+def test_init_fails_clearly_for_missing_revision(workspace, monkeypatch, capsys):
+    monkeypatch.setattr(
+        ut,
+        "inventory",
+        lambda revision: (_ for _ in ()).throw(subprocess.CalledProcessError(128, "git")),
+    )
+    assert ut.cmd_init("missing") == 1
+    assert "cannot read required upstream revision" in capsys.readouterr().err
+
+
+def test_default_report_and_empty_map_error(workspace, monkeypatch, capsys):
+    key = "vendor/aeron/aeron-client/src/test/A.java"
+    monkeypatch.setattr(ut, "inventory", lambda revision: {key: "b"})
+    ut.write_map({
+        key: {
+            "upstream": key,
+            "layer": "client",
+            "status": "todo",
+            "source_revision": ut.DEFAULT_REVISION,
+            "source_blob": "b",
+        }
+    })
+    monkeypatch.setattr(sys, "argv", ["upstream_tests.py"])
+    assert ut.main() == 0
+    assert ut.DEFAULT_REVISION in capsys.readouterr().out
+    ut.write_map({})
+    assert ut.cmd_report() == 1
+    assert "run init" in capsys.readouterr().err
