@@ -4,15 +4,14 @@
   "type": "module",
   "scripts": {
     "docs:dev": "astro dev --host 127.0.0.1 --port 8000",
-    "typecheck": "astro check",
-    "docs:build": "astro check && astro build",
+    "typecheck": "astro sync && tsc -p tsconfig.json",
+    "docs:build": "astro sync && tsc -p tsconfig.json && astro build",
     "build": "astro build",
     "preview": "astro preview"
   },
   "devDependencies": {
-    "@astrojs/check": "0.9.4",
-    "astro": "5.7.13",
-    "typescript": "5.8.3",
+    "astro": "7.3.5",
+    "typescript": "7.0.2",
     "@playwright/test": "1.60.0",
     "mermaid": "11.17.2"
   }
