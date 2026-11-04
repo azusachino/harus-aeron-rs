@@ -43,9 +43,10 @@ bounded timeout and is released or killed during cleanup.
 
 ## Aeron 1.54.0 checkpoint
 
-Verified during PR #45 validation on macOS arm64 with Corretto 17.0.21, after a
+Verified during PR #45 validation on macOS arm64 with Corretto 25.0.5, after a
 fresh `gradlew clean :aeron-all:shadowJar` under that JDK. Earlier validation also
-passed with Temurin 21.0.13; the project now selects Corretto's 17.0 minor line. The selected source is
+passed with Corretto 17.0.21 and Temurin 21.0.13; the project now selects Corretto's
+25.0 minor line. The selected source is
 `454da1e4e6c7edf3dd6d34878512d3243384992a`, tag `1.54.0`, and the harness uses
 `aeron-all-1.54.0.jar` built from that checkout.
 
