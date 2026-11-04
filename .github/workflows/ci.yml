@@ -30,9 +30,14 @@ jobs:
       - name: Install prettier
         run: npm install -g prettier
 
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install documentation dependencies
+        run: bun install --frozen-lockfile
+
       - run: make check
 
-      - name: Build MkDocs site
+      - name: Build Astro documentation site
         run: make docs-build
 
       - name: Build tutorial learner-stub workspace

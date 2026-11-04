@@ -16,6 +16,12 @@ target
 # uv / Python (scripts/ orchestration tooling)
 .venv
 site/
+dist/
+.astro/
+node_modules/
+test-results/
+playwright-report/
+.tmp/
 __pycache__/
 .pytest_cache/
 .ruff_cache/

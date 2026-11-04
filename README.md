@@ -39,9 +39,11 @@ make test
 # Check everything (fmt + lint + build + test)
 make check
 
-# Preview and strictly build the MkDocs Material site
+# Install the documentation toolchain once, then build and preview the site
+bun install
 make docs-serve
 make docs-build
+make docs-e2e
 ```
 
 ## Stack

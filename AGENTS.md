@@ -50,8 +50,10 @@ make check            # fmt-check + lint + build + test
 make clean            # cargo clean
 make run              # run media driver
 make tutorial-check   # build tutorial/ learner-stub workspace
-make docs-serve       # preview the MkDocs Material tutorial site
-make docs-build       # strict documentation build
+bun install           # install the Astro documentation toolchain
+make docs-serve       # preview the Astro documentation site
+make docs-build       # type-check and build documentation
+make docs-e2e         # headless browser acceptance checks
 ```
 
 ## Coding Conventions

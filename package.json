@@ -1,0 +1,19 @@
+{
+  "name": "harus-aeron-rs-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:dev": "astro dev --host 127.0.0.1 --port 8000",
+    "typecheck": "astro check",
+    "docs:build": "astro check && astro build",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.4",
+    "astro": "5.7.13",
+    "typescript": "5.8.3",
+    "@playwright/test": "1.60.0",
+    "mermaid": "11.17.2"
+  }
+}

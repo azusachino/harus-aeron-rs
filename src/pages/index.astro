@@ -1,0 +1,7 @@
+---
+import Layout from '../layouts/Document.astro';
+import { getEntry, render } from 'astro:content';
+const doc = await getEntry('docs','index');
+const { Content, headings } = await render(doc!);
+---
+<Layout title="Aeron in Rust" path="/" headings={headings}><Content /></Layout>

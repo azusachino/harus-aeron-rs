@@ -16,7 +16,7 @@ DOCS_PORT ?= 8000
        tutorial-check bench fuzz fuzz-check stress miri \
        setup-upstream-aeron setup-upstream-tokio \
        interop interop-smoke interop-soak interop-rust-smoke interop-rust-soak cluster-failover-repro status test-parity \
-       docs docs-serve docs-build
+       docs docs-serve docs-build docs-e2e
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -66,13 +66,16 @@ run:  ## Run the media driver
 tutorial-check:  ## Build the tutorial learner-stub workspace
 	$(NIX_RUN) cargo build --manifest-path tutorial/Cargo.toml --workspace
 
-docs: docs-serve  ## Preview the MkDocs tutorial site locally
+docs: docs-serve  ## Preview the Astro documentation site locally
 
-docs-serve:  ## Preview the MkDocs tutorial site locally
-	NO_MKDOCS_2_WARNING=1 DISABLE_MKDOCS_2_WARNING=true uv run mkdocs serve --dev-addr 127.0.0.1:$(DOCS_PORT)
+docs-serve:  ## Preview the Astro documentation site locally
+	bun run docs:dev -- --port $(DOCS_PORT)
 
-docs-build:  ## Build the MkDocs tutorial site strictly
-	NO_MKDOCS_2_WARNING=1 DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict
+docs-build:  ## Type-check and build the Astro documentation site
+	bun run docs:build
+
+docs-e2e: docs-build  ## Verify documentation journeys in headless Chromium
+	bunx playwright test
 
 bench:  ## Run benchmarks (once crates/*/benches exist)
 	$(NIX_RUN) cargo bench --workspace
