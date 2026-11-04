@@ -21,28 +21,47 @@ JAVA_SOURCE = ROOT / "deploy" / "interop" / "CncLayoutProbe.java"
 JAVA_PUBSUB_SOURCE = ROOT / "deploy" / "interop" / "JavaPubSubProbe.java"
 JAVA_UDP_SOURCE = ROOT / "deploy" / "interop" / "JavaUdpPubSubProbe.java"
 JAVA_DRIVER_HOST_SOURCE = ROOT / "deploy" / "interop" / "JavaDriverHost.java"
+JAVA_ARTIFACT_SOURCE = ROOT / "deploy" / "interop" / "AeronArtifactProbe.java"
 # The source of truth for layout and protocol behavior is vendor/aeron source. The
 # assembled JAR is used here only as the Java runtime classpath for the interop probes.
 JAVA_BUILD = ROOT / "vendor" / "aeron" / "aeron-all" / "build" / "libs"
 
 
-def _run(command: list[str], *, cwd: Path | None = None) -> None:
+def _run(command: list[str], *, cwd: Path | None = None) -> str:
     result = subprocess.run(command, cwd=cwd, check=False, text=True, capture_output=True)
     if result.returncode:
         raise RuntimeError(
             f"command failed ({result.returncode}): {' '.join(command)}\n"
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
+    return result.stdout
 
 
 def _aeron_all_jar() -> Path:
-    jars = sorted(JAVA_BUILD.glob("aeron-all-*.jar"))
-    if not jars:
-        _run(["./gradlew", ":aeron-all:shadowJar", "--no-daemon"], cwd=ROOT / "vendor" / "aeron")
-        jars = sorted(JAVA_BUILD.glob("aeron-all-*.jar"))
-    if not jars:
-        raise RuntimeError("vendored Aeron aeron-all jar was not produced")
-    return jars[-1]
+    upstream = ROOT / "vendor" / "aeron"
+    recorded_sha = _run(["git", "rev-parse", ":vendor/aeron"], cwd=ROOT).strip()
+    checkout_sha = _run(["git", "rev-parse", "HEAD"], cwd=upstream).strip()
+    if checkout_sha != recorded_sha:
+        raise RuntimeError(
+            f"Aeron checkout {checkout_sha} differs from recorded gitlink {recorded_sha}; "
+            "run make setup-upstream-aeron"
+        )
+    version = (upstream / "version.txt").read_text().strip()
+    # Let Gradle check source/output freshness even when a same-version JAR exists.
+    _run(["./gradlew", ":aeron-all:shadowJar", "--no-daemon"], cwd=upstream)
+    jar = JAVA_BUILD / f"aeron-all-{version}.jar"
+    if not jar.is_file():
+        raise RuntimeError(f"vendored Aeron artifact was not produced: {jar}")
+    identity = _run([
+        "java",
+        "-cp",
+        str(jar),
+        str(JAVA_ARTIFACT_SOURCE),
+        version,
+        recorded_sha,
+    ])
+    print(identity.strip())
+    return jar
 
 
 def _interop_message_count() -> int:
