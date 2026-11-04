@@ -13,6 +13,8 @@ test("rewrites relative Markdown links while keeping query and fragment suffixes
 
   transform(tree, { history: ["/project/docs/tutorial/03-client-pub-sub.md"] });
 
-  expect(tree.children[0]?.url).toBe("/tutorial/04-client-conductor?mode=full#driver-events");
+  expect(tree.children[0]?.url).toBe(
+    "/tutorial/04-client-conductor?mode=full#driver-events",
+  );
   expect(tree.children[1]?.url).toBe("https://example.com/guide.md#external");
 });

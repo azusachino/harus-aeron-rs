@@ -26,17 +26,23 @@ export function resolveDocLinks(docsDirectory: string) {
   };
 }
 
-function toAstroRoute(url: string, sourcePath: string, docsDirectory: string): string {
+function toAstroRoute(
+  url: string,
+  sourcePath: string,
+  docsDirectory: string,
+): string {
   if (/^(?:[a-z][a-z\d+.-]*:|\/\/|\/)/i.test(url)) return url;
 
   const suffixPosition = url.search(/[?#]/);
-  const markdownPath = suffixPosition === -1 ? url : url.slice(0, suffixPosition);
+  const markdownPath =
+    suffixPosition === -1 ? url : url.slice(0, suffixPosition);
   const suffix = suffixPosition === -1 ? "" : url.slice(suffixPosition);
   if (!markdownPath.endsWith(".md")) return url;
 
   const resolvedPath = path.resolve(path.dirname(sourcePath), markdownPath);
   const relativePath = path.relative(docsDirectory, resolvedPath);
-  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return url;
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath))
+    return url;
 
   let route = relativePath.replace(/\\/g, "/").replace(/\.md$/, "");
   if (route === "index") route = "";

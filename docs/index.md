@@ -9,7 +9,7 @@ shared-memory IPC through the Media Driver, Archive, and bounded Cluster foundat
 | --- | --- |
 | [Tutorial overview](tutorial/README.md) | Course map and learner-stub workflow |
 | [System architecture](guides/architecture.md) | Reference view of the implemented crates |
-| [Java interop soak](interop-soak.md) | Current Aeron `1.50.x` interoperability gate |
+| [Java interop soak](interop-soak.md) | Current Aeron `1.54.0` interoperability gate |
 | [Roadmap](plan.md) | Milestones, parity accounting, and explicit ceilings |
 
 ## Work loop

@@ -14,7 +14,11 @@ export async function getStaticPaths() {
 
 const { document } = Astro.props;
 const { Content, headings } = await render(document);
-const title = document.data.title ?? headings.find((heading) => heading.depth === 1)?.text ?? document.id.split("/").at(-1)?.replaceAll("-", " ") ?? document.id;
+const title =
+  document.data.title ??
+  headings.find((heading) => heading.depth === 1)?.text ??
+  document.id.split("/").at(-1)?.replaceAll("-", " ") ??
+  document.id;
 const path = `/${document.id.replace(/\/index$/, "")}`;
 ---
 

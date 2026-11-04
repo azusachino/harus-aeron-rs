@@ -13,11 +13,14 @@ const searchResults = document.querySelector<HTMLDivElement>("#search-results");
 
 function getThemeMode(): ThemeMode {
   const savedTheme = localStorage.getItem("aeron-theme");
-  return savedTheme === "dark" || savedTheme === "light" ? savedTheme : "system";
+  return savedTheme === "dark" || savedTheme === "light"
+    ? savedTheme
+    : "system";
 }
 
 function applyTheme(mode = getThemeMode()): void {
-  const theme = mode === "system" ? (systemTheme.matches ? "dark" : "light") : mode;
+  const theme =
+    mode === "system" ? (systemTheme.matches ? "dark" : "light") : mode;
   root.dataset.mode = mode;
   root.dataset.theme = theme;
 
@@ -60,10 +63,13 @@ async function setupSearch(): Promise<void> {
       return;
     }
 
-    for (const entry of documents.filter((candidate) => candidate.body.toLowerCase().includes(query)).slice(0, 8)) {
+    for (const entry of documents
+      .filter((candidate) => candidate.body.toLowerCase().includes(query))
+      .slice(0, 8)) {
       const link = document.createElement("a");
       const heading = entry.body.match(/^#\s+(.+)$/m)?.[1] ?? entry.id;
-      const route = entry.id === "index" ? "/" : `/${entry.id.replace(/\/index$/, "")}`;
+      const route =
+        entry.id === "index" ? "/" : `/${entry.id.replace(/\/index$/, "")}`;
 
       link.textContent = heading;
       link.href = route;
@@ -76,27 +82,36 @@ async function setupSearch(): Promise<void> {
 }
 
 function setupCodeCopy(): void {
-  document.querySelectorAll<HTMLElement>('pre:not([data-language="mermaid"])').forEach((pre) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "Copy";
-    button.setAttribute("aria-label", "Copy code");
-    button.addEventListener("click", () => {
-      const code = pre.querySelector("code");
-      void navigator.clipboard.writeText(code?.textContent ?? pre.textContent ?? "");
+  document
+    .querySelectorAll<HTMLElement>('pre:not([data-language="mermaid"])')
+    .forEach((pre) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Copy";
+      button.setAttribute("aria-label", "Copy code");
+      button.addEventListener("click", () => {
+        const code = pre.querySelector("code");
+        void navigator.clipboard.writeText(
+          code?.textContent ?? pre.textContent ?? "",
+        );
+      });
+      pre.append(button);
     });
-    pre.append(button);
-  });
 }
 
 function setupMermaidDiagrams(): void {
-  const diagrams = document.querySelectorAll<HTMLElement>('pre[data-language="mermaid"]');
+  const diagrams = document.querySelectorAll<HTMLElement>(
+    'pre[data-language="mermaid"]',
+  );
   if (diagrams.length === 0) return;
 
   void import("mermaid").then(({ default: mermaid }) => {
     mermaid.initialize({ startOnLoad: false, theme: "neutral" });
     diagrams.forEach(async (diagram) => {
-      const { svg } = await mermaid.render(`diagram-${Math.random().toString(36).slice(2)}`, diagram.textContent ?? "");
+      const { svg } = await mermaid.render(
+        `diagram-${Math.random().toString(36).slice(2)}`,
+        diagram.textContent ?? "",
+      );
       diagram.outerHTML = svg;
     });
   });

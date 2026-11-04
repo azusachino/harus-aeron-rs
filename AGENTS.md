@@ -10,7 +10,9 @@ Sibling project: `harus-aeron-zig` (same protocol, different language) — see
 - **Language**: Rust (stable, edition 2024)
 - **Async runtime**: tokio, used for UDP transport in the driver's duty-cycle agents
 - **Build**: Cargo workspace via Makefile
-- **Dev tooling**: Nix devShell (`nix develop`) for Rust, mise-pinned Bun for Astro; `scripts/` use `uv`-run Python (PEP 723
+- **Dev tooling**: mise manages Rust stable, Bun, uv, and the interop JDK from
+  `.mise.toml`; non-Rust tools use major.minor selectors. uv owns Python through
+  `.python-version`, and Bun owns locked Astro dependencies. `scripts/` use `uv`-run Python (PEP 723
   inline deps, `#!/usr/bin/env -S uv run --script`) for orchestration/reporting that
   doesn't belong in Cargo — no reimplementing what `cargo`/`clippy` already do. The
   Makefile stays a thin dispatcher: prefer delegating logic into a `uv`-run script
@@ -34,11 +36,12 @@ Sibling project: `harus-aeron-zig` (same protocol, different language) — see
 
 ## Build, Run & Test
 
-Enter dev shell: `nix develop`
-Run any tool without entering: `nix develop --command <cmd>`
+Install tools and locked dependencies: `make setup` (requires mise).
+Run an ad hoc tool through the project environment: `mise exec -- <cmd>`.
 All daily operations go through `make <target>`:
 
 ```bash
+make setup            # install mise tools and locked Bun/uv dependencies
 make build            # cargo build --workspace
 make build-driver     # build driver binary only
 make test             # run all tests
@@ -110,8 +113,8 @@ This repo is also a structured course, mirroring `harus-aeron-zig`. Two parallel
   comment for the `#[cfg(loom)]` convention. Exhaustive interleaving checks matter here
   specifically because `harus-aeron-zig`'s headline unresolved bug was a concurrency
   race (see `docs/plan.md`); don't skip this for ring buffer/broadcast code.
-- `cargo +nightly miri test -p agrona` (`make miri`) once `crates/agrona` has real
-  `unsafe` — requires a nightly toolchain + `miri` component, separate from the pinned
-  stable `rust-toolchain.toml`.
+- `make miri` runs `mise exec -- cargo +nightly miri test -p agrona` once
+  `crates/agrona` has real `unsafe`. It requires a separate nightly toolchain and
+  `miri` component; the normal project toolchain remains stable.
 - `criterion` (`make bench`) for anything perf-sensitive; add `[[bench]]` targets as
   real implementations land (see the commented-out stanza in `crates/agrona/Cargo.toml`).

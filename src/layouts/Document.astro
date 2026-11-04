@@ -29,11 +29,17 @@ const documents = await Promise.all(
 
     return {
       id: document.id,
-      title: document.data.title ?? documentHeadings.find((heading) => heading.depth === 1)?.text ?? filename?.replaceAll("-", " ") ?? document.id,
+      title:
+        document.data.title ??
+        documentHeadings.find((heading) => heading.depth === 1)?.text ??
+        filename?.replaceAll("-", " ") ??
+        document.id,
     };
   }),
 );
-const tutorials = documents.filter((document) => document.id.startsWith("tutorial/")).sort((a, b) => a.id.localeCompare(b.id));
+const tutorials = documents
+  .filter((document) => document.id.startsWith("tutorial/"))
+  .sort((a, b) => a.id.localeCompare(b.id));
 const nav: NavigationGroup[] = [
   { title: "Home", link: "/" },
   { title: "Tutorial", items: tutorials },
@@ -49,7 +55,16 @@ const nav: NavigationGroup[] = [
   },
   {
     title: "Verification",
-    items: documents.filter((document) => ["interop-soak", "driver-parity-boundaries", "cluster-failover-comparison", "cluster-parity-boundaries", "system-test-parity-boundaries", "fuzzing"].includes(document.id)),
+    items: documents.filter((document) =>
+      [
+        "interop-soak",
+        "driver-parity-boundaries",
+        "cluster-failover-comparison",
+        "cluster-parity-boundaries",
+        "system-test-parity-boundaries",
+        "fuzzing",
+      ].includes(document.id),
+    ),
   },
   {
     title: "Roadmap",
@@ -68,7 +83,10 @@ const nav: NavigationGroup[] = [
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Aeron protocol reimplementation and Rust systems programming tutorial" />
+    <meta
+      name="description"
+      content="Aeron protocol reimplementation and Rust systems programming tutorial"
+    />
     <title>{title} · Aeron in Rust</title>
     <script is:inline>
       const root = document.documentElement;
@@ -76,9 +94,13 @@ const nav: NavigationGroup[] = [
 
       function applySavedTheme() {
         const savedTheme = localStorage.getItem("aeron-theme");
-        const mode = savedTheme === "dark" || savedTheme === "light" ? savedTheme : "system";
+        const mode =
+          savedTheme === "dark" || savedTheme === "light"
+            ? savedTheme
+            : "system";
         root.dataset.mode = mode;
-        root.dataset.theme = mode === "system" ? (systemTheme.matches ? "dark" : "light") : mode;
+        root.dataset.theme =
+          mode === "system" ? (systemTheme.matches ? "dark" : "light") : mode;
       }
 
       applySavedTheme();
@@ -100,9 +122,19 @@ const nav: NavigationGroup[] = [
       </button>
       <label class="search">
         Search documents
-        <input type="search" id="filter" placeholder="Search docs" autocomplete="off" />
+        <input
+          type="search"
+          id="filter"
+          placeholder="Search docs"
+          autocomplete="off"
+        />
       </label>
-      <div id="search-results" role="listbox" aria-label="Search results" hidden></div>
+      <div
+        id="search-results"
+        role="listbox"
+        aria-label="Search results"
+        hidden
+      ></div>
     </header>
     <div class="shell">
       <aside>

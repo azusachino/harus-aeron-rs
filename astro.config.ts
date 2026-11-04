@@ -12,7 +12,9 @@ export default defineConfig({
     "/tutorial/": "/tutorial/README",
   },
   markdown: {
-    processor: unified({ remarkPlugins: [() => resolveDocLinks(docsDirectory)] }),
+    processor: unified({
+      remarkPlugins: [() => resolveDocLinks(docsDirectory)],
+    }),
     shikiConfig: { theme: "github-light" },
   },
 });

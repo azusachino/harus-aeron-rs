@@ -1,11 +1,11 @@
 [submodule "vendor/aeron"]
 	path = vendor/aeron
-	url = https://github.com/aeron-io/aeron.git
-	branch = release/1.50.x
+	url = git@github.com:aeron-io/aeron.git
+	branch = release/1.54.x
 [submodule "vendor/tokio"]
 	path = vendor/tokio
-	url = https://github.com/tokio-rs/tokio.git
+	url = git@github.com:tokio-rs/tokio.git
 	branch = tokio-1.53.1
 [submodule "vendor/loom"]
 	path = vendor/loom
-	url = https://github.com/tokio-rs/loom.git
+	url = git@github.com:tokio-rs/loom.git
