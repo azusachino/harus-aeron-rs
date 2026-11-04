@@ -9,7 +9,7 @@
 
 ## Implementation
 
-- Astro builds the authored files in `docs/` to `dist/`; `make docs-serve`, `make docs-build`, and `make docs-e2e` are the docs entry points.
+- Astro 7.3.5 with TypeScript 7.0.2 builds authored files in `docs/` to `dist/`; `make docs-serve`, `make docs-build`, and `make docs-e2e` are the docs entry points.
 - The local UI includes section navigation, heading outline, code copy controls, Mermaid rendering, full-text search over a generated local index, and a persisted light/dark/system theme selector.
 - `.md` links in existing content map to Astro routes. `/tutorial/` redirects to `/tutorial/README` as before.
 - Existing source uses standard Markdown fences and one Mermaid fence. No MkDocs admonition or tab syntax was found in `docs/`; all Markdown files remain unchanged as source content.
@@ -18,13 +18,13 @@
 ## Verification
 
 - `make check` — passed; Rust format, lint, workspace tests, Python tests, and tutorial workspace build passed. Existing tutorial stub dead-code warnings remain.
-- `make docs-build` — passed; Astro check reported 0 errors/warnings/hints and generated 24 pages plus the search index. Vite reports large Mermaid/Cynefin chunks (>500 kB), although Mermaid is dynamically loaded only on pages containing Mermaid diagrams.
+- `make docs-build` — passed with `astro sync`, TypeScript checking, and Astro build; 24 pages plus the search index generated. Vite reports large Mermaid/Cynefin chunks (>500 kB), although Mermaid is dynamically loaded only on pages containing Mermaid diagrams.
 - `make fmt-check` — passed; Rust, JSON/YAML, ruff format, and ruff lint checks passed.
 - `make docs-e2e` — passed in headless Chromium. Checks home, tutorial chapter/index, assessment, full-text search, manual theme persistence, system dark mode, Mermaid rendering, a 390px viewport, no visible images, failed asset responses, and page errors.
 - Screenshots: workstation `.tmp/harus-aeron-rs-astro/home.png` and `assessment.png`.
 
 ## Ownership, branch and next step
 
-- Migration implementation commit: `9eea92d` (`docs: migrate documentation site to Astro`) on `feature/astro-documentation`.
+- Branch `feature/astro-documentation` contains migration commit `9eea92d`, verification handoff commit `f077e77`, and workstation-aligned Astro toolchain commit `b36667b`.
 - `docs/aeron-1.54.0-baseline-assessment.md` remains untracked and is not part of this migration commit. Keep it with its owner; it is required by the visible Architecture navigation entry.
 - No remote actions were taken. Next step: review the branch and coordinate the separate assessment file with its owner before merging.
