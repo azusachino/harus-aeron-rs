@@ -178,7 +178,7 @@ impl<'a> DriverProxy<'a> {
     /// Add a client-owned counter and return its registration correlation id.
     pub fn add_counter(&self, type_id: i32, key: &[u8], label: &str) -> Result<i64> {
         let correlation_id = self.next_correlation_id();
-        let length = crate::command::KEY_BUFFER_OFFSET + key.len() + 4 + label.len();
+        let length = CounterMessageFlyweight::compute_length(key.len(), label.len());
         let mut buf = vec![0u8; length];
         let atomic_buf = AtomicBuffer::new(&mut buf);
         let flyweight = CounterMessageFlyweight::new(atomic_buf.clone(), 0);

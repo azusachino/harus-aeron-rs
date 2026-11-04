@@ -2896,9 +2896,10 @@ fn decode_command(
                 return malformed();
             }
             let key_length = key_length_raw as usize;
-            let label_length_offset = aeron_client::command::KEY_BUFFER_OFFSET
-                .checked_add(key_length)
-                .and_then(|value| value.checked_add(0));
+            let label_length_offset = key_length
+                .checked_add(3)
+                .map(|value| value & !3)
+                .and_then(|value| aeron_client::command::KEY_BUFFER_OFFSET.checked_add(value));
             let Some(label_length_offset) = label_length_offset else {
                 return malformed();
             };
@@ -3202,6 +3203,27 @@ mod tests {
                 correlation_id: 91,
                 message_type: aeron_client::driver_proxy::ADD_PUBLICATION,
             })
+        ));
+    }
+
+    #[test]
+    fn decodes_java_counter_with_unaligned_key_length() {
+        // Aeron 1.54.0 CounterVector.java output, including one padding byte.
+        let mut bytes = [
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13,
+            0x12, 0x11, 0x24, 0x23, 0x22, 0x21, 0x03, 0, 0, 0, 0x31, 0x32, 0x33, 0, 0x03, 0, 0, 0,
+            0x61, 0x62, 0x63,
+        ];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        assert!(matches!(
+            decode_command(aeron_client::driver_proxy::ADD_COUNTER, &buffer, 0, 35),
+            Some(Command::AddCounter { client_id: 0x0102030405060708,
+                correlation_id: 0x1112131415161718, type_id: 0x21222324,
+                key, label }) if key == b"123" && label == "abc"
+        ));
+        assert!(matches!(
+            decode_command(aeron_client::driver_proxy::ADD_COUNTER, &buffer, 0, 34),
+            Some(Command::Unknown { .. })
         ));
     }
 

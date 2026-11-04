@@ -17,6 +17,9 @@ the correlation id in this little table *is* the pairing.
 
 `ChannelUri` parses `aeron:ipc` and `aeron:udp?...` strings. `ChannelUriStringBuilder` provides typed setters for endpoints, aliases, reliability, term configuration, and session identifiers. A URI must round-trip through parse and formatting without changing its meaning.
 
+Counter commands place the label length after the key rounded up to a four-byte boundary.
+The key length excludes that padding; a three-byte key therefore leaves one padding byte.
+
 ## 2. Driver commands
 
 `DriverProxy` serializes command flyweights into the Agrona many-to-one ring buffer. Publication and subscription registration commands carry a client id, correlation id, stream id, and channel. Removal commands carry the registration id. The correlation id is the bridge between an asynchronous driver response and the client-side resource.
