@@ -18,13 +18,13 @@
 ## Verification
 
 - `make check` — passed; Rust format, lint, workspace tests, Python tests, and tutorial workspace build passed. Existing tutorial stub dead-code warnings remain.
-- `make docs-build` — passed; Astro check reported 0 errors/warnings/hints and generated 23 pages plus the search index. Vite reports large Mermaid/Cynefin chunks (>500 kB), although Mermaid is dynamically loaded only on pages containing Mermaid diagrams.
+- `make docs-build` — passed; Astro check reported 0 errors/warnings/hints and generated 24 pages plus the search index. Vite reports large Mermaid/Cynefin chunks (>500 kB), although Mermaid is dynamically loaded only on pages containing Mermaid diagrams.
 - `make fmt-check` — passed; Rust, JSON/YAML, ruff format, and ruff lint checks passed.
 - `make docs-e2e` — passed in headless Chromium. Checks home, tutorial chapter/index, assessment, full-text search, manual theme persistence, system dark mode, Mermaid rendering, a 390px viewport, no visible images, failed asset responses, and page errors.
 - Screenshots: workstation `.tmp/harus-aeron-rs-astro/home.png` and `assessment.png`.
 
 ## Ownership, branch and next step
 
-- Migration-owned source is committed on `feature/astro-documentation`; the commit is recorded in the Git log after creation.
+- Migration implementation commit: `9eea92d` (`docs: migrate documentation site to Astro`) on `feature/astro-documentation`.
 - `docs/aeron-1.54.0-baseline-assessment.md` remains untracked and is not part of this migration commit. Keep it with its owner; it is required by the visible Architecture navigation entry.
 - No remote actions were taken. Next step: review the branch and coordinate the separate assessment file with its owner before merging.
