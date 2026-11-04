@@ -51,6 +51,9 @@ make astro-build
 make astro-e2e
 ```
 
+The Astro site implementation lives in `scripts/astro/`; authored documentation
+and tutorial chapters remain in `docs/`.
+
 ## Stack
 
 - **Language**: Rust (stable, edition 2024)

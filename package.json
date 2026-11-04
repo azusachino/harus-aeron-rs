@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "astro:dev": "bun run --bun astro dev --host 127.0.0.1 --port 8000",
-    "astro:check": "bun run --bun astro sync && bun run --bun tsc -p tsconfig.json && bun test src/markdown/resolve-doc-links.test.ts",
+    "astro:check": "bun run --bun astro sync && bun run --bun tsc -p tsconfig.json && bun test scripts/astro/markdown/resolve-doc-links.test.ts",
     "astro:build": "bun run astro:check && bun run --bun astro build",
     "astro:preview": "bun run --bun astro preview",
     "astro:e2e": "bun run --bun playwright test"

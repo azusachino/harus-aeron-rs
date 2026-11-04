@@ -82,6 +82,7 @@ make astro-e2e         # headless browser acceptance checks
 - `crates/driver/src/lib.rs` — DriverConductor equivalent (command/control core)
 - `docs/plan.md` — phased implementation roadmap
 - `docs/guides/architecture.md` — system architecture
+- `scripts/astro/` — Astro documentation site source; authored Markdown stays in `docs/`
 - `scripts/upstream_tests.py` — test-parity tracker/reporter (`make test-parity`);
   `test/upstream_map.jsonl` is the per-upstream-test-file status ledger it reads/writes
 

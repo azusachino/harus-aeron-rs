@@ -10,6 +10,7 @@
 ## Implementation
 
 - Astro 7.3.5 and TypeScript 7.0.2 build the Markdown collection to `dist/`. `.mise.toml` selects Bun's 1.4 minor line; the Bun lockfile pins JS dependencies.
+- The Astro implementation lives under `scripts/astro/`, selected by `srcDir` in the root TypeScript config. Authored Markdown remains in `docs/`; the repository has no root site `src/` directory.
 - The Make targets are `astro-setup`, `astro-check`, `astro-dev`, `astro-build`, and `astro-e2e`. The package scripts use the matching `astro:*` names.
 - `make fmt` / `make fmt-check` run pinned Prettier on JSON, YAML, TypeScript, CSS, MJS, and Astro sources. Astro formatting uses `prettier-plugin-astro` 1.1.2.
 - Relative Markdown links are rewritten at build time; query strings and fragments are preserved and external links remain unchanged. The Tutorial alias redirects to its overview page.
