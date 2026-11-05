@@ -406,12 +406,41 @@ impl PublicationImage {
             || now_ns.saturating_sub(self.last_packet_ns) <= liveness_timeout_ns
     }
 
+    pub(crate) fn term_length(&self) -> usize {
+        self.term_length
+    }
+
+    pub(crate) fn accepts_packet(&self, term_id: i32, term_offset: usize, length: usize) -> bool {
+        let term_count = term_id.wrapping_sub(self.initial_term_id) as i64;
+        let position = compute_position(
+            term_id,
+            term_offset as i32,
+            self.position_bits_to_shift as i32,
+            self.initial_term_id,
+        );
+        (0..3).contains(&term_count)
+            && position >= self.last_status_position
+            && position.saturating_add(length as i64) <= self.last_overrun_threshold
+    }
+
     /// Rebuild one wire data frame into the image log at the position it carries.
     pub fn on_data_frame(
         &mut self,
         term_id: i32,
         term_offset: usize,
         frame: &AtomicBuffer,
+        length: usize,
+        now_ns: i64,
+    ) {
+        self.on_data_frame_with_logical_length(term_id, term_offset, frame, length, length, now_ns);
+    }
+
+    pub(crate) fn on_data_frame_with_logical_length(
+        &mut self,
+        term_id: i32,
+        term_offset: usize,
+        frame: &AtomicBuffer,
+        wire_length: usize,
         length: usize,
         now_ns: i64,
     ) {
@@ -437,7 +466,7 @@ impl PublicationImage {
             if term_offset.saturating_add(length) > self.term_length {
                 return;
             }
-            TermRebuilder::insert(term_buffer, term_offset, frame, length);
+            TermRebuilder::insert(term_buffer, term_offset, frame, wire_length);
             self.hwm_position = self
                 .hwm_position
                 .max(packet_position.saturating_add(length as i64));
@@ -460,6 +489,16 @@ impl PublicationImage {
 
     /// Record a heartbeat's position without writing over an existing frame in the image log.
     pub fn on_heartbeat(&mut self, term_id: i32, term_offset: usize, now_ns: i64) {
+        self.on_heartbeat_with_flags(term_id, term_offset, 0, now_ns);
+    }
+
+    pub(crate) fn on_heartbeat_with_flags(
+        &mut self,
+        term_id: i32,
+        term_offset: usize,
+        flags: u8,
+        now_ns: i64,
+    ) {
         let term_count = term_id.wrapping_sub(self.initial_term_id) as i64;
         if !(0..3).contains(&term_count) || term_offset > self.term_length {
             return;
@@ -474,6 +513,10 @@ impl PublicationImage {
             return;
         }
         self.hwm_position = self.hwm_position.max(position);
+        if flags & EOS_FLAG != 0 {
+            self.end_of_stream = true;
+            set_end_of_stream_position(&self.log_buffers.meta_data_buffer(), position);
+        }
         self.last_packet_ns = now_ns;
         if self.state == PublicationImageState::Init {
             self.set_state(PublicationImageState::Active, now_ns);
@@ -695,6 +738,12 @@ mod tests {
 
         image.on_heartbeat(1, 0, 30);
         assert_eq!(term_buffer.get_i32(0), 40);
+        image.on_heartbeat_with_flags(1, 64, EOS_FLAG, 40);
+        assert!(image.is_end_of_stream());
+        assert_eq!(
+            end_of_stream_position(&image.log_buffers.meta_data_buffer()),
+            64
+        );
 
         drop(image);
         let _ = std::fs::remove_file(path);

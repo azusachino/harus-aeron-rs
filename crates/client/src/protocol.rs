@@ -597,6 +597,22 @@ impl<'a> StatusMessageFlyweight<'a> {
         }
         self
     }
+
+    /// Check if the SM frame is valid given the `term_length`.
+    ///
+    /// Mirrors `StatusMessageFlyweight.isValid` in upstream Aeron:
+    /// - consumption term offset must be non-negative, strictly less than `term_length`,
+    ///   and frame-aligned (multiple of 32).
+    /// - receiver window length must be non-negative and not exceed half of `term_length`.
+    pub fn is_valid(&self, term_length: i32) -> bool {
+        let term_offset = self.consumption_term_offset();
+        let receiver_window_length = self.receiver_window_length();
+        term_offset >= 0
+            && term_offset < term_length
+            && term_offset % crate::logbuffer::FRAME_ALIGNMENT == 0
+            && receiver_window_length >= 0
+            && receiver_window_length <= (term_length >> 1)
+    }
 }
 
 /// NAK frame: session@8, stream@12, termId@16, termOffset@20, length@24. Header length 28.
@@ -943,5 +959,57 @@ mod tests {
         let sr = SetupFlyweight::new(AtomicBuffer::new(&mut setup_bytes));
         assert_eq!(sr.header().header_type(), HDR_TYPE_SETUP);
         assert_eq!((sr.term_length(), sr.mtu_length()), (1 << 16, 1408));
+    }
+
+    #[test]
+    fn should_reject_status_message_when_offset_is_out_of_bounds() {
+        let mut bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        let term_length = 2 * 1024 * 1024;
+        for offset in [-128, -1, 1024 * 1024 * 1024, term_length] {
+            sm.set_consumption_term_offset(offset);
+            assert!(!sm.is_valid(term_length));
+        }
+    }
+
+    #[test]
+    fn should_reject_status_message_when_offset_is_not_aligned() {
+        let mut bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        let term_length = 2 * 1024 * 1024;
+        for offset in [1, 31, 33, 63] {
+            sm.set_consumption_term_offset(offset);
+            assert!(!sm.is_valid(term_length));
+        }
+    }
+
+    #[test]
+    fn should_reject_status_message_when_receiver_window_is_out_of_bounds() {
+        let mut bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        let term_length = 2 * 1024 * 1024;
+        sm.set_consumption_term_offset(0);
+        for window in [i32::MIN, -4, -1, (term_length / 2) + 1, term_length] {
+            sm.set_receiver_window_length(window);
+            assert!(!sm.is_valid(term_length));
+        }
+    }
+
+    #[test]
+    fn should_recognize_valid_status_message_frame() {
+        let mut bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        let term_length = 65536;
+        for (offset, window) in [
+            (0, 0),
+            (0, 1024),
+            (32768, 32768),
+            (65504, 32768),
+            (65504, 10),
+        ] {
+            sm.set_consumption_term_offset(offset);
+            sm.set_receiver_window_length(window);
+            assert!(sm.is_valid(term_length));
+        }
     }
 }

@@ -7,9 +7,9 @@ use std::net::SocketAddr;
 
 use aeron_client::logbuffer::{FRAME_ALIGNMENT, align};
 use aeron_client::protocol::{
-    CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_RTTM,
-    HDR_TYPE_SETUP, HeaderFlyweight, RTTM_HEADER_LENGTH, RTTM_REPLY_FLAG, RttMeasurementFlyweight,
-    SETUP_HEADER_LENGTH, SetupFlyweight,
+    CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_PAD,
+    HDR_TYPE_RTTM, HDR_TYPE_SETUP, HeaderFlyweight, RTTM_HEADER_LENGTH, RTTM_REPLY_FLAG,
+    RttMeasurementFlyweight, SETUP_HEADER_LENGTH, SetupFlyweight,
 };
 use agrona::AtomicBuffer;
 
@@ -143,6 +143,16 @@ impl Receiver {
                     break;
                 };
                 let frame = buffer[..len].to_vec();
+                let (session, stream) = frame_identity(&frame);
+                let term_length = self
+                    .expected_positions
+                    .get(&(endpoint_index, session, stream, src))
+                    .map(|state| state.term_length)
+                    .filter(|length| *length > 0)
+                    .unwrap_or(aeron_client::logbuffer::TERM_MAX_LENGTH);
+                if !crate::packet_validation::valid_receive_packet(&frame, term_length) {
+                    continue;
+                }
                 let receiver_status = self.handle_frame(endpoint_index, &frame, src, now_ns)?;
                 let (session_id, stream_id) = frame_identity(&frame);
                 self.received_frames.push(ReceivedFrame {
@@ -249,7 +259,7 @@ impl Receiver {
                         receiver_window_length: expected.receiver_window_length,
                     }))
             }
-            HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
+            HDR_TYPE_DATA | HDR_TYPE_PAD if bytes.len() >= DATA_HEADER_LENGTH => {
                 let status = self.handle_data_frames(endpoint_index, bytes, source, now_ns)?;
                 Ok(status)
             }
@@ -305,9 +315,7 @@ impl Receiver {
                 break;
             }
             let aligned_length = align(frame_length, FRAME_ALIGNMENT) as usize;
-            if aligned_length > frame.len() {
-                break;
-            }
+            let wire_length = aligned_length.min(frame.len());
             let frame_length_usize = frame_length as usize;
             self.receive_channel_endpoints[endpoint_index].on_data_packet(
                 data.session_id(),
@@ -347,7 +355,7 @@ impl Receiver {
                     expected.last_status_ns = now_ns;
                 }
             }
-            packet_offset += aligned_length;
+            packet_offset += wire_length;
         }
         Ok(status_key.and_then(|(session_id, stream_id)| {
             self.expected_positions
@@ -487,7 +495,7 @@ fn frame_identity(bytes: &[u8]) -> (i32, i32) {
             let setup = SetupFlyweight::new(AtomicBuffer::new(&mut owned));
             (setup.session_id(), setup.stream_id())
         }
-        HDR_TYPE_DATA if bytes.len() >= DATA_HEADER_LENGTH => {
+        HDR_TYPE_DATA | HDR_TYPE_PAD if bytes.len() >= DATA_HEADER_LENGTH => {
             let data = DataHeaderFlyweight::new(AtomicBuffer::new(&mut owned));
             (data.session_id(), data.stream_id())
         }
