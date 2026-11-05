@@ -1,0 +1,17 @@
+# Aeron 1.54.0 test inventory reconciliation
+
+The parity reporter reads the exact target tree `454da1e4e6c7edf3dd6d34878512d3243384992a` and verifies that the current ledger keys match its Java test paths. A source path is counted once per `.java` file under the five modules' `src/test/` trees. This is file inventory, not method coverage.
+
+At this revision there are 335 current paths: 68 added, 95 retained paths with changed Git blobs, and 172 unchanged retained paths. One historical path is absent: `aeron-system-tests/src/test/java/io/aeron/driver/DriverNameResolverTest.java`. The test was split across `aeron-driver/src/test/java/io/aeron/driver/DriverNameResolverTest.java` and `aeron-system-tests/src/test/java/io/aeron/driver/DriverNameResolverSystemTest.java`; the old row stays in JSONL as historical evidence and is excluded from the current denominator. Git blob identity detects content changes, not behavioral changes.
+
+## Audit disposition
+
+The 95 changed retained files were compared directly between the old and target Git trees. These changes are substantive, not formatting-only: the ledger records `behavior-unverified`, both blob IDs, and a source-derived list of added/removed test method signatures where present. For example, `ImageTest` replaces removed position/controlledPeek cases with raw/block-poll overflow cases; `PublicationImageTest` adds complete-packet frame validation and timestamp cases; Archive adds max-recording/replay admission and source-image ownership checks. Rust equivalence for those changed scenarios remains unverified.
+
+The 68 added rows received per-file dispositions and source-linked evidence. 32 are Java logging/tracing/renderer/callback or diagnostic surfaces without a corresponding Rust event-log API; these are scoped Java diagnostics boundaries and are not counted as parity. 24 exercise runtime behavior currently unsupported by Rust, including affinity/thread placement, persistent subscriptions, NameResolver gossip, NativeResourceAgent, and Cluster runtime services. The remaining 12 are behavior-unverified protocol, endpoint, Archive, or other cases whose corresponding Rust behavior must be checked. The ledger keeps added todo status and source revision/blob alongside each disposition.
+
+At this audit checkpoint the report identifies 110 reviewed current-source equivalents out of 335 (32.8%), 65 historical `done` mappings whose retained file changed and therefore lack current-source equivalence evidence, and 131 unverified or unsupported changed/new sources. The 32 Java diagnostics entries have a separate justified scope disposition; they do not count as parity. The old 175 `done` total must therefore not be presented as current-reference parity.
+
+`uv run scripts/upstream_tests.py report` validates path, revision, and blob identity. It separates current-source-reviewed equivalents from historical done mappings and never counts skips as implemented parity. Changed/new entries with behavior still unverified or unsupported remain outside current-source equivalent counts.
+
+The resolver relocation is not evidence that the Java behavior disappeared. The old system-test row remains marked absent, and the two current paths are separate inventory entries pending review. BufferClaim and controlled polling now exist in Rust; system-test rows that say those APIs are absent are stale and must be read as missing end-to-end depth instead.
