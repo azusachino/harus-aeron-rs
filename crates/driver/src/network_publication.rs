@@ -148,11 +148,16 @@ impl NetworkPublication {
             registration_id,
         )?;
         let connection_timeout_ns = flow_control.receiver_timeout_ns();
+        let destinations = if destination.port() == 0 {
+            Vec::new()
+        } else {
+            vec![destination]
+        };
         Ok(Self {
             registration_id,
             log_buffers,
             endpoint,
-            destinations: vec![destination],
+            destinations,
             session_id,
             stream_id,
             initial_term_id,
@@ -687,6 +692,40 @@ mod tests {
         assert!(publication.remove_destination(second));
         assert!(!publication.remove_destination(second));
         assert_eq!(publication.destinations(), &[first]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn should_initialize_empty_destinations_when_port_is_zero() {
+        let channel = UdpChannel::parse("aeron:udp?control-mode=manual").unwrap();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind_addr, None, 0, 0).unwrap();
+        let endpoint = SendChannelEndpoint::new(channel, transport);
+        let path =
+            std::env::temp_dir().join(format!("aeron-empty-dest-test-{}", std::process::id()));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, 4096).unwrap();
+        let zero_dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let first = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 40123);
+
+        let mut publication = NetworkPublication::new(
+            1,
+            buffers,
+            endpoint,
+            zero_dest,
+            7,
+            11,
+            3,
+            1408,
+            Arc::new(AtomicI64::new(0)),
+            16,
+        )
+        .unwrap();
+
+        assert!(publication.destinations().is_empty());
+        assert!(publication.add_destination(first));
+        assert_eq!(publication.destinations(), &[first]);
+        assert!(publication.remove_destination(first));
+        assert!(publication.destinations().is_empty());
         let _ = std::fs::remove_file(path);
     }
 

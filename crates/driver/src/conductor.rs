@@ -605,6 +605,10 @@ impl DriverConductor {
             .map_or(channel, String::as_str)
     }
 
+    pub fn receive_destination_aliases(&self) -> &HashMap<String, String> {
+        &self.receive_destination_aliases
+    }
+
     /// One conductor duty cycle: drain and dispatch client commands, then sweep liveness.
     pub fn do_work(&mut self, now_ns: i64) -> Result<usize> {
         // Aeron clients use this trailer timestamp to distinguish a live driver from a stale
