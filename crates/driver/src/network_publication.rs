@@ -192,6 +192,23 @@ impl NetworkPublication {
         self.clean_position
     }
 
+    /// Check if the Status Message position is valid given the current sender position.
+    ///
+    /// Mirrors `NetworkPublication.isValidStatusMessage` in upstream Aeron 1.54:
+    /// an SM is valid if its consumption position is between half a term behind
+    /// and 1.5 terms ahead of the current `sender_position`.
+    pub fn is_valid_status_message(&self, term_id: i32, term_offset: i32) -> bool {
+        let sm_pos = aeron_client::logbuffer::compute_position(
+            term_id,
+            term_offset,
+            self.position_bits_to_shift as i32,
+            self.initial_term_id,
+        );
+        let snd_pos = self.sender_position;
+        let half_term = (self.term_length >> 1) as i64;
+        sm_pos >= (snd_pos - half_term) && sm_pos <= (snd_pos + self.term_length as i64 + half_term)
+    }
+
     pub fn add_destination(&mut self, destination: SocketAddr) -> bool {
         if self.destinations.contains(&destination) {
             false
@@ -235,6 +252,9 @@ impl NetworkPublication {
                 if status.flags & aeron_client::protocol::SEND_SETUP_FLAG != 0 {
                     self.setup_sent = false;
                     work += 1;
+                    continue;
+                }
+                if !self.is_valid_status_message(status.term_id, status.term_offset) {
                     continue;
                 }
                 // The channel endpoint already decoded the wire frame into plain fields; rebuild
@@ -686,6 +706,170 @@ mod tests {
             publication_limit.load(Ordering::Acquire),
             TERM_MIN_LENGTH as i64 + 128
         );
+
+        drop(publication);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn should_validate_status_message_bounds_relative_to_sender_position() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-network-publication-sm-bounds-test-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind, None, 0, 0).unwrap();
+        let endpoint = SendChannelEndpoint::new(channel, transport);
+        let mut publication = NetworkPublication::new(
+            1,
+            buffers,
+            endpoint,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9),
+            7,
+            9,
+            10, // initial_term_id = 10
+            1408,
+            Arc::new(AtomicI64::new(0)),
+            16,
+        )
+        .unwrap();
+
+        // Sender position at start of term 11 (65536 bytes transmitted)
+        publication.sender_position = 65536;
+        let half_term = TERM_MIN_LENGTH / 2; // 32768
+
+        // Lower bound: sender_position - half_term = 32768 (term 10, offset 32768)
+        assert!(publication.is_valid_status_message(10, half_term));
+        // Just below lower bound: 32768 - 32 = 32736 (rejected: > 0.5 term behind)
+        assert!(!publication.is_valid_status_message(10, half_term - 32));
+        // Way below lower bound: term 10, offset 0 (rejected: 1.0 term behind)
+        assert!(!publication.is_valid_status_message(10, 0));
+
+        // Upper bound: sender_position + term_length + half_term = 65536 + 65536 + 32768 = 163840
+        // which corresponds to term 12, offset 32768
+        assert!(publication.is_valid_status_message(12, half_term));
+        // Just above upper bound: 163840 + 32 (rejected: > 1.5 terms ahead)
+        assert!(!publication.is_valid_status_message(12, half_term + 32));
+        // Way above upper bound: term 13, offset 0 (rejected: 2.0 terms ahead)
+        assert!(!publication.is_valid_status_message(13, 0));
+
+        drop(publication);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn should_handle_term_id_wrap_in_status_message_validation() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-network-publication-wrap-test-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind, None, 0, 0).unwrap();
+        let endpoint = SendChannelEndpoint::new(channel, transport);
+        let mut publication = NetworkPublication::new(
+            1,
+            buffers,
+            endpoint,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9),
+            7,
+            9,
+            i32::MAX, // initial_term_id at i32::MAX
+            1408,
+            Arc::new(AtomicI64::new(0)),
+            16,
+        )
+        .unwrap();
+
+        publication.sender_position = 0;
+        let half_term = TERM_MIN_LENGTH / 2;
+
+        // Current term is i32::MAX. In-bounds:
+        assert!(publication.is_valid_status_message(i32::MAX, 0));
+        assert!(publication.is_valid_status_message(i32::MAX, half_term));
+
+        // Next term wraps to i32::MIN:
+        // Position is 1 term ahead (65536), which is <= 1.5 terms ahead (98304)
+        assert!(publication.is_valid_status_message(i32::MIN, 0));
+        assert!(publication.is_valid_status_message(i32::MIN, half_term));
+        // Just beyond 1.5 terms ahead:
+        assert!(!publication.is_valid_status_message(i32::MIN, half_term + 32));
+
+        // Term before i32::MAX is i32::MAX - 1 (position -65536, < -32768):
+        assert!(!publication.is_valid_status_message(i32::MAX - 1, 0));
+
+        drop(publication);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn should_reject_out_of_bounds_status_message_in_poll_control_and_protect_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "aeron-network-publication-control-test-{}",
+            std::process::id()
+        ));
+        let buffers = LogBuffers::map_new(&path, TERM_MIN_LENGTH, DEFAULT_FILE_PAGE_SIZE).unwrap();
+        let channel = UdpChannel::parse("aeron:udp?endpoint=localhost:0").unwrap();
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let transport = UdpChannelTransport::bind(channel.clone(), bind, None, 0, 0).unwrap();
+        let endpoint = SendChannelEndpoint::new(channel, transport);
+        let publication_limit = Arc::new(AtomicI64::new(0));
+        let mut publication = NetworkPublication::new(
+            1,
+            buffers,
+            endpoint,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9),
+            7, // session_id = 7
+            9, // stream_id = 9
+            1, // initial_term_id = 1
+            1408,
+            publication_limit.clone(),
+            16,
+        )
+        .unwrap();
+
+        publication.sender_position = 0;
+
+        // 1. Inject an out-of-bounds SM (5 terms ahead):
+        publication.endpoint.on_status_message(7, 9, 6, 0, 4096);
+        publication.poll_control(0).unwrap();
+        // Limit must NOT move:
+        assert_eq!(publication.receiver_limit(), 0);
+        assert_eq!(publication_limit.load(Ordering::Acquire), 0);
+
+        // 2. Inject an in-bounds valid SM (term 1, offset 0, window 4096):
+        publication.endpoint.on_status_message(7, 9, 1, 0, 4096);
+        publication.poll_control(0).unwrap();
+        // Limit should advance:
+        assert_eq!(publication.receiver_limit(), 4096);
+        assert_eq!(publication_limit.load(Ordering::Acquire), 4096);
+
+        // 3. Inject a stale but in-bounds legal SM (term 1, offset 0, window 2048):
+        publication.endpoint.on_status_message(7, 9, 1, 0, 2048);
+        publication.poll_control(0).unwrap();
+        // Limit must NOT retreat:
+        assert_eq!(publication.receiver_limit(), 4096);
+
+        // 4. Inject an out-of-bounds SM with SEND_SETUP_FLAG:
+        publication.setup_sent = true;
+        publication.endpoint.on_status_message_full(
+            7,
+            9,
+            99, // out of bounds
+            0,
+            4096,
+            0,
+            aeron_client::protocol::SEND_SETUP_FLAG,
+            None,
+        );
+        publication.poll_control(0).unwrap();
+        // setup_sent must be reset to trigger sending setup frame:
+        assert!(!publication.setup_sent);
+        // Limit must not be affected by out-of-bounds setup request:
+        assert_eq!(publication.receiver_limit(), 4096);
 
         drop(publication);
         let _ = std::fs::remove_file(path);

@@ -98,6 +98,9 @@ impl SendChannelEndpoint {
                             == aeron_client::protocol::STATUS_MESSAGE_HEADER_LENGTH + 8 =>
                 {
                     let sm = StatusMessageFlyweight::new(frame);
+                    if !sm.is_valid(aeron_client::logbuffer::TERM_MAX_LENGTH) {
+                        continue;
+                    }
                     self.on_status_message_full(
                         sm.session_id(),
                         sm.stream_id(),
@@ -239,6 +242,14 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert_eq!(messages.len(), 1);
+
+        // An SM with an unaligned offset or out-of-bounds window is rejected before queueing
+        let mut unaligned_bytes = bytes;
+        let unaligned_sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut unaligned_bytes));
+        unaligned_sm.set_consumption_term_offset(3);
+        peer.send_to(&unaligned_bytes, address).unwrap();
+        endpoint.poll_control().unwrap();
+        assert!(endpoint.take_status_messages().is_empty());
     }
 
     #[test]

@@ -1631,3 +1631,101 @@ fn min_flow_control_gates_the_sender_on_the_slowest_receiver() {
         "fc=min must cap the sender at the slowest receiver's window, not the fastest"
     );
 }
+
+#[test]
+fn status_message_position_bounds_protect_sender_limit_under_live_traffic() {
+    const STREAM_ID: i32 = 9003;
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let channel = format!(
+        "aeron:udp?endpoint=127.0.0.1:{}",
+        receiver.local_addr().unwrap().port()
+    );
+
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    driver
+        .do_work()
+        .expect("register publication and send setup");
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+    let _ = publisher.publication(pub_reg).expect("publication ready");
+
+    // Capture the initial SETUP frame from the sender
+    let mut buf = [0u8; 2048];
+    let (n, source) = receiver.recv_from(&mut buf).expect("receive setup");
+    let (session_id, initial_term_id) = {
+        let setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+        (setup.session_id(), setup.initial_term_id())
+    };
+
+    let send_sm = |term_id: i32, term_offset: i32, window: i32, flags: u8| {
+        let mut bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+        let sm = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
+        sm.header()
+            .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+            .set_version(aeron_client::protocol::CURRENT_VERSION)
+            .set_flags(flags)
+            .set_header_type(aeron_client::protocol::HDR_TYPE_SM);
+        sm.set_session_id(session_id)
+            .set_stream_id(STREAM_ID)
+            .set_consumption_term_id(term_id)
+            .set_consumption_term_offset(term_offset)
+            .set_receiver_window_length(window)
+            .set_receiver_id(1);
+        receiver.send_to(&bytes, source).unwrap();
+    };
+
+    // 1. Send out-of-bounds SM: 5 terms ahead
+    send_sm(initial_term_id + 5, 0, 4096, 0);
+    for _ in 0..10 {
+        driver.do_work().expect("drain control frames");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        driver.sender().network_publications()[0].receiver_limit(),
+        0,
+        "out-of-bounds SM must be rejected and cannot move receiver limit"
+    );
+
+    // 2. Send legitimate in-bounds SM: initial term, offset 0, window 4096
+    send_sm(initial_term_id, 0, 4096, 0);
+    for _ in 0..10 {
+        driver.do_work().expect("process valid SM");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        driver.sender().network_publications()[0].receiver_limit(),
+        4096,
+        "valid in-bounds SM advances receiver limit"
+    );
+
+    // 3. Send out-of-bounds SM with SEND_SETUP_FLAG (eliciting setup):
+    send_sm(
+        initial_term_id + 99,
+        0,
+        4096,
+        aeron_client::protocol::SEND_SETUP_FLAG,
+    );
+    for _ in 0..10 {
+        driver.do_work().expect("process setup-eliciting SM");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // Receiver limit should remain 4096 (unaffected by out-of-bounds setup request)
+    assert_eq!(
+        driver.sender().network_publications()[0].receiver_limit(),
+        4096
+    );
+    // Driver should re-transmit SETUP frame
+    let (setup_len, _) = receiver
+        .recv_from(&mut buf)
+        .expect("receive re-sent setup frame");
+    let re_setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..setup_len]));
+    assert_eq!(re_setup.session_id(), session_id);
+    assert_eq!(re_setup.initial_term_id(), initial_term_id);
+}

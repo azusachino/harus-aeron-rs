@@ -22,7 +22,10 @@ frame, including later frames. The conductor repeats the check against the image
 before rebuilding. A final PAD may advertise more logical bytes than the UDP packet carries;
 a zero-length DATA heartbeat carries only its header. Malformed packets do not partially insert
 an earlier valid frame. Sender-side SM and NAK fields are checked against the publication term
-before flow control or retransmission; sender-relative SM bounds remain a separate task.
+on the endpoint, and incoming Status Messages are strictly validated against sender-relative
+position bounds (half a term behind to 1.5 terms ahead of `sender_position`) before updating
+flow control limits. Messages with `SEND_SETUP_FLAG` elicit setup frames without sender-relative
+position rejection.
 
 ## UDP Channel Transport & Pollers
 
