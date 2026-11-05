@@ -11,10 +11,12 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use agrona::AtomicBuffer;
 
 use aeron_client::log_buffers::LogBuffers;
-use aeron_client::logbuffer::{TermScanner, index_by_position, position_bits_to_shift};
+use aeron_client::logbuffer::{
+    TermScanner, index_by_position, position_bits_to_shift, set_is_connected,
+};
 use aeron_client::protocol::{
-    CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP,
-    HDR_TYPE_SM, SETUP_HEADER_LENGTH, STATUS_MESSAGE_HEADER_LENGTH, SetupFlyweight,
+    CURRENT_VERSION, DATA_HEADER_LENGTH, DataHeaderFlyweight, END_OF_STREAM_FLAG, HDR_TYPE_DATA,
+    HDR_TYPE_SETUP, HDR_TYPE_SM, SETUP_HEADER_LENGTH, STATUS_MESSAGE_HEADER_LENGTH, SetupFlyweight,
     StatusMessageFlyweight,
 };
 
@@ -23,6 +25,7 @@ use crate::flow_control::calculate_retransmission_length;
 use crate::loss_detector::StaticDelayGenerator;
 use crate::media::send_channel_endpoint::SendChannelEndpoint;
 use crate::multicast_flow_control::NetworkFlowControl;
+use crate::receiver_liveness_tracker::ReceiverLivenessTracker;
 use crate::retransmit_handler::{RetransmitFlowControl, RetransmitHandler};
 
 /// Interval between SETUP re-sends and idle heartbeats (100 ms), matching upstream defaults.
@@ -89,6 +92,9 @@ pub struct NetworkPublication {
     retransmit_handler: RetransmitHandler,
     /// The channel's selected `fc=` strategy (max/min/tagged), live per-receiver state included.
     flow_control: NetworkFlowControl,
+    liveness_tracker: ReceiverLivenessTracker,
+    connection_timeout_ns: i64,
+    is_connected: bool,
 }
 
 impl NetworkPublication {
@@ -141,6 +147,7 @@ impl NetworkPublication {
             stream_id,
             registration_id,
         )?;
+        let connection_timeout_ns = flow_control.receiver_timeout_ns();
         Ok(Self {
             registration_id,
             log_buffers,
@@ -169,6 +176,9 @@ impl NetworkPublication {
                 Arc::new(AtomicI64::new(0)),
             ),
             flow_control,
+            liveness_tracker: ReceiverLivenessTracker::new(),
+            connection_timeout_ns,
+            is_connected: false,
         })
     }
 
@@ -190,6 +200,22 @@ impl NetworkPublication {
 
     pub fn clean_position(&self) -> i64 {
         self.clean_position
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.is_connected
+    }
+
+    fn has_subscribers(&self) -> bool {
+        self.liveness_tracker.has_receivers() && self.flow_control.has_required_receivers()
+    }
+
+    fn update_connected_state(&mut self) {
+        let new_connected_state = self.has_subscribers();
+        if self.is_connected != new_connected_state {
+            set_is_connected(&self.log_buffers.meta_data_buffer(), new_connected_state);
+            self.is_connected = new_connected_state;
+        }
     }
 
     /// Check if the Status Message position is valid given the current sender position.
@@ -282,6 +308,13 @@ impl NetworkPublication {
                     sm.set_group_tag(Some(group_tag));
                 }
 
+                if status.flags & END_OF_STREAM_FLAG != 0 {
+                    self.liveness_tracker.on_remote_close(status.receiver_id);
+                } else {
+                    self.liveness_tracker
+                        .on_status_message(status.receiver_id, now_ns);
+                }
+
                 // SETUP is periodically re-sent and can elicit an older offset-0 SM after a
                 // newer data-progress SM. A reliable publication must not move its send limit
                 // backwards because of that stale control frame -- every strategy's
@@ -295,6 +328,7 @@ impl NetworkPublication {
                 );
                 self.status_received = true;
                 self.update_publication_limit();
+                self.update_connected_state();
                 work += 1;
             }
         }
@@ -390,6 +424,9 @@ impl NetworkPublication {
         if self.receiver_limit != previous_limit {
             self.update_publication_limit();
         }
+        self.liveness_tracker
+            .on_idle(now_ns, self.connection_timeout_ns);
+        self.update_connected_state();
         Ok(work)
     }
 
