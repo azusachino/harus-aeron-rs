@@ -84,3 +84,29 @@ pub fn set_frame_length_ordered(term_buffer: &AtomicBuffer, term_offset: usize, 
         frame_length,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_compute_fragmented_frame_length() {
+        let test_cases = [
+            (0, 1376, 0),
+            (10, 1024, 64),
+            (2048, 2048, 2080),
+            (4096, 1024, 4224),
+            (7997, 992, 8288),
+        ];
+
+        for (length, max_payload_size, expected_frame_length) in test_cases {
+            assert_eq!(
+                compute_fragmented_frame_length(length, max_payload_size),
+                expected_frame_length,
+                "failed for length={}, max_payload_size={}",
+                length,
+                max_payload_size
+            );
+        }
+    }
+}

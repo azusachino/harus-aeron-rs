@@ -10,9 +10,6 @@ pub mod term_reader;
 pub mod term_rebuilder;
 pub mod unblocker;
 
-#[cfg(test)]
-mod tests;
-
 pub use buffer_claim::*;
 pub use descriptor::*;
 pub use frame_descriptor::*;

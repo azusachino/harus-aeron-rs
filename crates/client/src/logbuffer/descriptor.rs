@@ -340,3 +340,99 @@ pub fn raw_tail_volatile_active(log_metadata_buffer: &AtomicBuffer) -> i64 {
     let active_index = index_by_term_count(active_term_count(log_metadata_buffer) as i64) as usize;
     raw_tail_volatile(log_metadata_buffer, active_index)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agrona::AtomicBuffer;
+
+    #[test]
+    fn rotate_log_should_cas_active_term_count_even_when_term_id_does_not_match() {
+        let mut bytes = vec![0u8; LOG_META_DATA_LENGTH];
+        let metadata_buffer = AtomicBuffer::new(&mut bytes);
+
+        let term_id = 5;
+        let term_count = 1;
+        set_raw_tail(&metadata_buffer, 2, pack_tail(term_id, 1024));
+        set_raw_tail(&metadata_buffer, 0, pack_tail(term_id + 1, 2048));
+        set_raw_tail(&metadata_buffer, 1, pack_tail(term_id + 2, 4096));
+        set_active_term_count(&metadata_buffer, term_count);
+
+        assert!(rotate_log(&metadata_buffer, term_count, term_id));
+
+        assert_eq!(raw_tail(&metadata_buffer, 2), pack_tail(term_id, 1024));
+        assert_eq!(raw_tail(&metadata_buffer, 0), pack_tail(term_id + 1, 2048));
+        assert_eq!(raw_tail(&metadata_buffer, 1), pack_tail(term_id + 2, 4096));
+        assert_eq!(active_term_count(&metadata_buffer), term_count + 1);
+    }
+
+    #[test]
+    fn rotate_log_should_cas_active_term_count_after_setting_tail_for_the_next_term() {
+        let mut bytes = vec![0u8; LOG_META_DATA_LENGTH];
+        let metadata_buffer = AtomicBuffer::new(&mut bytes);
+
+        let term_id = 51;
+        let term_count = 19;
+        set_raw_tail(&metadata_buffer, 1, pack_tail(term_id, 1024));
+        set_raw_tail(
+            &metadata_buffer,
+            2,
+            pack_tail(term_id + 1 - PARTITION_COUNT, 2048),
+        );
+        set_raw_tail(
+            &metadata_buffer,
+            0,
+            pack_tail(term_id + 2 - PARTITION_COUNT, 4096),
+        );
+        set_active_term_count(&metadata_buffer, term_count);
+
+        assert!(rotate_log(&metadata_buffer, term_count, term_id));
+
+        assert_eq!(raw_tail(&metadata_buffer, 1), pack_tail(term_id, 1024));
+        assert_eq!(raw_tail(&metadata_buffer, 2), pack_tail(term_id + 1, 0));
+        assert_eq!(
+            raw_tail(&metadata_buffer, 0),
+            pack_tail(term_id + 2 - PARTITION_COUNT, 4096)
+        );
+        assert_eq!(active_term_count(&metadata_buffer), term_count + 1);
+    }
+
+    #[test]
+    fn rotate_log_is_a_no_op_if_neither_tail_nor_active_term_count_can_be_changed() {
+        let mut bytes = vec![0u8; LOG_META_DATA_LENGTH];
+        let metadata_buffer = AtomicBuffer::new(&mut bytes);
+
+        let term_id = 23;
+        let term_count = 42;
+        set_raw_tail(&metadata_buffer, 0, pack_tail(term_id, 1024));
+        set_raw_tail(&metadata_buffer, 1, pack_tail(term_id + 18, 2048));
+        set_raw_tail(&metadata_buffer, 2, pack_tail(term_id - 19, 4096));
+        set_active_term_count(&metadata_buffer, term_count);
+
+        assert!(!rotate_log(&metadata_buffer, 3, term_id));
+
+        assert_eq!(raw_tail(&metadata_buffer, 0), pack_tail(term_id, 1024));
+        assert_eq!(raw_tail(&metadata_buffer, 1), pack_tail(term_id + 18, 2048));
+        assert_eq!(raw_tail(&metadata_buffer, 2), pack_tail(term_id - 19, 4096));
+        assert_eq!(active_term_count(&metadata_buffer), term_count);
+    }
+
+    #[test]
+    fn position_bits_to_shift_accepts_valid_power_of_two_term_lengths() {
+        assert_eq!(position_bits_to_shift(64 * 1024), 16);
+        assert_eq!(position_bits_to_shift(1024 * 1024), 20);
+        assert_eq!(position_bits_to_shift(1024 * 1024 * 1024), 30);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid term buffer length")]
+    fn position_bits_to_shift_rejects_non_power_of_two() {
+        position_bits_to_shift(100);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid term buffer length")]
+    fn position_bits_to_shift_rejects_out_of_range_power_of_two() {
+        position_bits_to_shift(32 * 1024);
+    }
+}

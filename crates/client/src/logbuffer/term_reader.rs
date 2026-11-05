@@ -314,3 +314,478 @@ pub enum ControlledPollAction {
     /// at the end of the poll as [`TermReader::read`] does.
     Continue,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logbuffer::descriptor::*;
+    use crate::protocol;
+    use agrona::AtomicBuffer;
+
+    #[test]
+    fn should_pack_padding_and_offset_into_resulting_status() {
+        let padding = 77;
+        let available = 65000;
+
+        let scan_outcome = TermScanner::pack(padding, available);
+
+        assert_eq!(TermScanner::padding(scan_outcome), padding);
+        assert_eq!(TermScanner::available(scan_outcome), available);
+    }
+
+    #[test]
+    fn should_return_zero_on_empty_log() {
+        let mut bytes = vec![0u8; LOG_META_DATA_LENGTH];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+
+        let scan_outcome = TermScanner::scan_for_availability(&term_buffer, 0, 1024);
+        assert_eq!(TermScanner::available(scan_outcome), 0);
+        assert_eq!(TermScanner::padding(scan_outcome), 0);
+    }
+
+    #[test]
+    fn should_scan_single_message() {
+        let msg_length = 1;
+        let frame_length = HEADER_LENGTH + msg_length;
+        let aligned_frame_length = align(frame_length, FRAME_ALIGNMENT);
+        let frame_offset = 0;
+
+        let mut bytes = vec![0u8; 1024];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(frame_offset, frame_length);
+        term_buffer.put_i16(
+            frame_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_DATA as i16,
+        );
+
+        let scan_outcome = TermScanner::scan_for_availability(&term_buffer, frame_offset, 1024);
+        assert_eq!(TermScanner::available(scan_outcome), aligned_frame_length);
+        assert_eq!(TermScanner::padding(scan_outcome), 0);
+    }
+
+    #[test]
+    fn should_fail_to_scan_message_larger_than_max_length() {
+        let msg_length = 1;
+        let frame_length = HEADER_LENGTH + msg_length;
+        let aligned_frame_length = align(frame_length, FRAME_ALIGNMENT);
+        let max_length = (aligned_frame_length - 1) as usize;
+        let frame_offset = 0;
+
+        let mut bytes = vec![0u8; 1024];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(frame_offset, frame_length);
+        term_buffer.put_i16(
+            frame_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_DATA as i16,
+        );
+
+        let scan_outcome =
+            TermScanner::scan_for_availability(&term_buffer, frame_offset, max_length);
+        assert_eq!(TermScanner::available(scan_outcome), -aligned_frame_length);
+        assert_eq!(TermScanner::padding(scan_outcome), -1);
+    }
+
+    #[test]
+    fn should_scan_two_messages_that_fit_in_single_mtu() {
+        let msg_length = 100;
+        let frame_length = HEADER_LENGTH + msg_length;
+        let aligned_frame_length = align(frame_length, FRAME_ALIGNMENT);
+        let frame_offset = 0;
+
+        let mut bytes = vec![0u8; 1024];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(frame_offset, frame_length);
+        term_buffer.put_i16(
+            frame_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_DATA as i16,
+        );
+
+        let second_offset = frame_offset + aligned_frame_length as usize;
+        term_buffer.put_i32_volatile(second_offset, aligned_frame_length);
+        term_buffer.put_i16(
+            second_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_DATA as i16,
+        );
+
+        let scan_outcome = TermScanner::scan_for_availability(&term_buffer, frame_offset, 1024);
+        assert_eq!(
+            TermScanner::available(scan_outcome),
+            aligned_frame_length * 2
+        );
+        assert_eq!(TermScanner::padding(scan_outcome), 0);
+    }
+
+    #[test]
+    fn should_scan_last_message_in_buffer_plus_padding() {
+        let aligned_frame_length = align(HEADER_LENGTH * 2, FRAME_ALIGNMENT);
+        let padding_frame_length = align(HEADER_LENGTH * 3, FRAME_ALIGNMENT);
+        let term_capacity = 4096;
+        let frame_offset = term_capacity - (aligned_frame_length + padding_frame_length) as usize;
+
+        let mut bytes = vec![0u8; term_capacity];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(frame_offset, aligned_frame_length);
+        term_buffer.put_i16(
+            frame_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_DATA as i16,
+        );
+
+        let padding_offset = frame_offset + aligned_frame_length as usize;
+        term_buffer.put_i32_volatile(padding_offset, padding_frame_length);
+        term_buffer.put_i16(
+            padding_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_PAD as i16,
+        );
+
+        let scan_outcome = TermScanner::scan_for_availability(&term_buffer, frame_offset, 1024);
+        assert_eq!(
+            TermScanner::available(scan_outcome),
+            aligned_frame_length + HEADER_LENGTH
+        );
+        assert_eq!(
+            TermScanner::padding(scan_outcome),
+            padding_frame_length - HEADER_LENGTH
+        );
+    }
+
+    #[test]
+    fn should_report_gap_at_beginning_of_buffer() {
+        let frame_offset = align(HEADER_LENGTH * 3, FRAME_ALIGNMENT) as usize;
+        let high_water_mark = frame_offset + align(HEADER_LENGTH, FRAME_ALIGNMENT) as usize;
+
+        let mut bytes = vec![0u8; 4096];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(frame_offset, HEADER_LENGTH);
+
+        let mut gaps = Vec::new();
+        let result = TermGapScanner::scan_for_gap(
+            &term_buffer,
+            1,
+            0,
+            high_water_mark,
+            |term_id, offset, length| {
+                gaps.push((term_id, offset, length));
+            },
+        );
+
+        assert_eq!(result, 0);
+        assert_eq!(gaps, vec![(1, 0, frame_offset)]);
+    }
+
+    #[test]
+    fn should_report_single_gap_when_buffer_not_full() {
+        let tail = align(HEADER_LENGTH, FRAME_ALIGNMENT) as usize;
+        let high_water_mark = (FRAME_ALIGNMENT * 3) as usize;
+
+        let mut bytes = vec![0u8; 4096];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(
+            tail - align(HEADER_LENGTH, FRAME_ALIGNMENT) as usize,
+            HEADER_LENGTH,
+        );
+        term_buffer.put_i32_volatile(tail, 0);
+        term_buffer.put_i32_volatile(
+            high_water_mark - align(HEADER_LENGTH, FRAME_ALIGNMENT) as usize,
+            HEADER_LENGTH,
+        );
+
+        let mut gaps = Vec::new();
+        let result = TermGapScanner::scan_for_gap(
+            &term_buffer,
+            1,
+            tail,
+            high_water_mark,
+            |term_id, offset, length| {
+                gaps.push((term_id, offset, length));
+            },
+        );
+
+        assert_eq!(result, tail);
+        assert_eq!(
+            gaps,
+            vec![(1, tail, align(HEADER_LENGTH, FRAME_ALIGNMENT) as usize)]
+        );
+    }
+
+    #[test]
+    fn should_report_no_gap_when_hwm_is_in_padding() {
+        let padding_length = (align(HEADER_LENGTH, FRAME_ALIGNMENT) * 2) as usize;
+        let capacity = 4096;
+        let tail = capacity - padding_length;
+        let high_water_mark = capacity - padding_length + HEADER_LENGTH as usize;
+
+        let mut bytes = vec![0u8; capacity];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(tail, padding_length as i32);
+        term_buffer.put_i32_volatile(tail + HEADER_LENGTH as usize, 0);
+
+        let mut gaps = Vec::new();
+        let result = TermGapScanner::scan_for_gap(
+            &term_buffer,
+            1,
+            tail,
+            high_water_mark,
+            |term_id, offset, length| {
+                gaps.push((term_id, offset, length));
+            },
+        );
+
+        assert_eq!(result, capacity);
+        assert!(gaps.is_empty());
+    }
+
+    #[test]
+    fn should_report_single_header_gap() {
+        let offset = 8192 + 384;
+        let mut bytes = vec![0u8; 16384];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(offset, 0);
+        term_buffer.put_i32_volatile(offset + HEADER_LENGTH as usize, 128);
+
+        let capacity = term_buffer.capacity();
+        let mut gaps = Vec::new();
+        let result = TermGapScanner::scan_for_gap(
+            &term_buffer,
+            1,
+            offset,
+            capacity,
+            |term_id, offset, length| {
+                gaps.push((term_id, offset, length));
+            },
+        );
+
+        assert_eq!(result, offset);
+        assert_eq!(gaps, vec![(1, offset, HEADER_LENGTH as usize)]);
+    }
+
+    #[test]
+    fn should_report_gap_at_the_end_of_the_buffer() {
+        let capacity = 4096;
+        let offset = capacity - 128;
+        let mut bytes = vec![0u8; capacity];
+        let term_buffer = AtomicBuffer::new(&mut bytes);
+        term_buffer.put_i32_volatile(offset, 0);
+
+        let mut gaps = Vec::new();
+        let result = TermGapScanner::scan_for_gap(
+            &term_buffer,
+            1,
+            offset,
+            capacity,
+            |term_id, offset, length| {
+                gaps.push((term_id, offset, length));
+            },
+        );
+
+        assert_eq!(result, offset);
+        assert_eq!(gaps, vec![(1, offset, 128)]);
+    }
+
+    #[test]
+    fn term_reader_should_pack_and_unpack() {
+        let offset = 4096;
+        let fragments_read = 5;
+        let packed = TermReader::pack(offset, fragments_read);
+
+        assert_eq!(TermReader::offset(packed), offset);
+        assert_eq!(TermReader::fragments_read(packed), fragments_read);
+    }
+
+    #[test]
+    fn should_read_first_message() {
+        let msg_length = 1;
+        let frame_length = HEADER_LENGTH + msg_length;
+        let aligned_frame_length = align(frame_length, FRAME_ALIGNMENT);
+        let term_offset = 0;
+
+        let mut term_bytes = vec![0u8; 4096];
+        let term_buffer = AtomicBuffer::new(&mut term_bytes);
+        term_buffer.put_i32_volatile(0, frame_length);
+        term_buffer.put_i16(protocol::TYPE_FIELD_OFFSET, protocol::HDR_TYPE_DATA as i16);
+
+        let mut counter_values = vec![0u8; 1024];
+        let values_buffer = AtomicBuffer::new(&mut counter_values);
+        let subscriber_position = agrona::counters::AtomicCounter::new(values_buffer, 0);
+
+        let mut header = Header::new(7, 16);
+        let mut fragment_calls = Vec::new();
+
+        let read_outcome = TermReader::read_with_position(
+            &term_buffer,
+            term_offset,
+            |_buf, offset, length, _hdr| {
+                fragment_calls.push((offset, length));
+            },
+            usize::MAX,
+            &mut header,
+            |_| (),
+            0,
+            &subscriber_position,
+        );
+
+        assert_eq!(read_outcome, 1);
+        assert_eq!(fragment_calls, vec![(HEADER_LENGTH as usize, msg_length)]);
+        assert_eq!(subscriber_position.get(), aligned_frame_length as i64);
+    }
+
+    #[test]
+    fn should_not_read_past_tail() {
+        let mut term_bytes = vec![0u8; 4096];
+        let term_buffer = AtomicBuffer::new(&mut term_bytes);
+
+        let mut counter_values = vec![0u8; 1024];
+        let values_buffer = AtomicBuffer::new(&mut counter_values);
+        let subscriber_position = agrona::counters::AtomicCounter::new(values_buffer, 0);
+
+        let mut header = Header::new(7, 16);
+        let mut fragment_calls = Vec::new();
+
+        let read_outcome = TermReader::read_with_position(
+            &term_buffer,
+            0,
+            |_buf, offset, length, _hdr| {
+                fragment_calls.push((offset, length));
+            },
+            usize::MAX,
+            &mut header,
+            |_| (),
+            0,
+            &subscriber_position,
+        );
+
+        assert_eq!(read_outcome, 0);
+        assert!(fragment_calls.is_empty());
+        assert_eq!(subscriber_position.get(), 0);
+    }
+
+    #[test]
+    fn should_read_one_limited_message() {
+        let msg_length = 1;
+        let frame_length = HEADER_LENGTH + msg_length;
+        let aligned_frame_length = align(frame_length, FRAME_ALIGNMENT);
+
+        let mut term_bytes = vec![0u8; 4096];
+        let term_buffer = AtomicBuffer::new(&mut term_bytes);
+        term_buffer.put_i32_volatile(0, frame_length);
+        term_buffer.put_i16(protocol::TYPE_FIELD_OFFSET, protocol::HDR_TYPE_DATA as i16);
+
+        let second_offset = aligned_frame_length as usize;
+        term_buffer.put_i32_volatile(second_offset, frame_length);
+        term_buffer.put_i16(
+            second_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_DATA as i16,
+        );
+
+        let mut counter_values = vec![0u8; 1024];
+        let values_buffer = AtomicBuffer::new(&mut counter_values);
+        let subscriber_position = agrona::counters::AtomicCounter::new(values_buffer, 0);
+
+        let mut header = Header::new(7, 16);
+        let mut fragment_calls = Vec::new();
+
+        let read_outcome = TermReader::read_with_position(
+            &term_buffer,
+            0,
+            |_buf, offset, length, _hdr| {
+                fragment_calls.push((offset, length));
+            },
+            1,
+            &mut header,
+            |_| (),
+            0,
+            &subscriber_position,
+        );
+
+        assert_eq!(read_outcome, 1);
+        assert_eq!(fragment_calls.len(), 1);
+        assert_eq!(subscriber_position.get(), aligned_frame_length as i64);
+    }
+
+    #[test]
+    fn should_read_multiple_messages() {
+        let msg_length = 1;
+        let frame_length = HEADER_LENGTH + msg_length;
+        let aligned_frame_length = align(frame_length, FRAME_ALIGNMENT);
+
+        let mut term_bytes = vec![0u8; 4096];
+        let term_buffer = AtomicBuffer::new(&mut term_bytes);
+        term_buffer.put_i32_volatile(0, frame_length);
+        term_buffer.put_i16(protocol::TYPE_FIELD_OFFSET, protocol::HDR_TYPE_DATA as i16);
+
+        let second_offset = aligned_frame_length as usize;
+        term_buffer.put_i32_volatile(second_offset, frame_length);
+        term_buffer.put_i16(
+            second_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_DATA as i16,
+        );
+
+        let mut counter_values = vec![0u8; 1024];
+        let values_buffer = AtomicBuffer::new(&mut counter_values);
+        let subscriber_position = agrona::counters::AtomicCounter::new(values_buffer, 0);
+
+        let mut header = Header::new(7, 16);
+        let mut fragment_calls = Vec::new();
+
+        let read_outcome = TermReader::read_with_position(
+            &term_buffer,
+            0,
+            |_buf, offset, length, _hdr| {
+                fragment_calls.push((offset, length));
+            },
+            usize::MAX,
+            &mut header,
+            |_| (),
+            0,
+            &subscriber_position,
+        );
+
+        assert_eq!(read_outcome, 2);
+        assert_eq!(fragment_calls.len(), 2);
+        assert_eq!(subscriber_position.get(), (aligned_frame_length * 2) as i64);
+    }
+
+    #[test]
+    fn should_not_read_last_message_when_padding() {
+        let msg_length = 1;
+        let frame_length = HEADER_LENGTH + msg_length;
+        let aligned_frame_length = align(frame_length, FRAME_ALIGNMENT);
+        let capacity = 4096;
+        let frame_offset = capacity - aligned_frame_length as usize;
+        let current_position = 1000i64;
+
+        let mut term_bytes = vec![0u8; capacity];
+        let term_buffer = AtomicBuffer::new(&mut term_bytes);
+        term_buffer.put_i32_volatile(frame_offset, frame_length);
+        term_buffer.put_i16(
+            frame_offset + protocol::TYPE_FIELD_OFFSET,
+            protocol::HDR_TYPE_PAD as i16,
+        );
+
+        let mut counter_values = vec![0u8; 1024];
+        let values_buffer = AtomicBuffer::new(&mut counter_values);
+        let subscriber_position = agrona::counters::AtomicCounter::new(values_buffer, 0);
+
+        let mut header = Header::new(7, 16);
+        let mut fragment_calls = Vec::new();
+
+        let read_outcome = TermReader::read_with_position(
+            &term_buffer,
+            frame_offset,
+            |_buf, offset, length, _hdr| {
+                fragment_calls.push((offset, length));
+            },
+            usize::MAX,
+            &mut header,
+            |_| (),
+            current_position,
+            &subscriber_position,
+        );
+
+        assert_eq!(read_outcome, 0);
+        assert!(fragment_calls.is_empty());
+        assert_eq!(
+            subscriber_position.get(),
+            current_position + aligned_frame_length as i64
+        );
+    }
+}

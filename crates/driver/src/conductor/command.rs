@@ -406,3 +406,97 @@ pub fn error_code(error: &DriverError) -> i32 {
         DriverError::IllegalState(_) | DriverError::IllegalArgument(_) => 11,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agrona::AtomicBuffer;
+
+    const CLIENT_ID: i64 = 42;
+
+    #[test]
+    fn malformed_variable_length_commands_are_rejected_without_panicking() {
+        let mut bytes = vec![0u8; 32];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        buffer.put_i64(0, CLIENT_ID);
+        buffer.put_i64(8, 91);
+        buffer.put_i32(aeron_client::command::PUB_CHANNEL_LENGTH_OFFSET, 128);
+
+        let command = decode_command(
+            aeron_client::driver_proxy::ADD_PUBLICATION,
+            &buffer,
+            0,
+            aeron_client::command::PUB_CHANNEL_OFFSET,
+        );
+        assert!(matches!(
+            command,
+            Some(Command::Unknown {
+                correlation_id: 91,
+                message_type: aeron_client::driver_proxy::ADD_PUBLICATION,
+            })
+        ));
+    }
+
+    #[test]
+    fn decodes_java_counter_with_unaligned_key_length() {
+        // Aeron 1.54.0 CounterVector.java output, including one padding byte.
+        let mut bytes = [
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13,
+            0x12, 0x11, 0x24, 0x23, 0x22, 0x21, 0x03, 0, 0, 0, 0x31, 0x32, 0x33, 0, 0x03, 0, 0, 0,
+            0x61, 0x62, 0x63,
+        ];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        assert!(matches!(
+            decode_command(aeron_client::driver_proxy::ADD_COUNTER, &buffer, 0, 35),
+            Some(Command::AddCounter {
+                client_id: 0x0102030405060708,
+                correlation_id: 0x1112131415161718,
+                type_id: 0x21222324,
+                key,
+                label,
+            }) if key == b"123" && label == "abc"
+        ));
+        assert!(matches!(
+            decode_command(aeron_client::driver_proxy::ADD_COUNTER, &buffer, 0, 34),
+            Some(Command::Unknown { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_counter_lengths_are_rejected_without_panicking() {
+        let mut bytes = vec![0u8; 32];
+        let buffer = AtomicBuffer::new(&mut bytes);
+        buffer.put_i64(8, 92);
+        buffer.put_i32(aeron_client::command::KEY_LENGTH_OFFSET, -1);
+
+        let command = decode_command(
+            aeron_client::driver_proxy::ADD_COUNTER,
+            &buffer,
+            0,
+            aeron_client::command::KEY_BUFFER_OFFSET,
+        );
+        assert!(matches!(
+            command,
+            Some(Command::Unknown {
+                correlation_id: 92,
+                message_type: aeron_client::driver_proxy::ADD_COUNTER,
+            })
+        ));
+    }
+
+    #[test]
+    fn classifies_command_failures_like_aeron_error_codes() {
+        assert_eq!(error_code(&DriverError::InvalidChannel("bad".into())), 1);
+        assert_eq!(
+            error_code(&DriverError::IllegalState("No space left on device".into())),
+            12
+        );
+        assert_eq!(
+            error_code(&DriverError::IllegalArgument(
+                "There is not enough space on the disk".into()
+            )),
+            12
+        );
+        assert_eq!(error_code(&DriverError::IllegalState("other".into())), 11);
+    }
+}

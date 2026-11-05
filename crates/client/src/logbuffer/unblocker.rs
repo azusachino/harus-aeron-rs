@@ -157,3 +157,95 @@ impl LogBufferUnblocker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logbuffer::descriptor::{
+        LOG_META_DATA_LENGTH, compute_position, initialise_tail_with_term_id,
+        position_bits_to_shift, raw_tail_volatile_active, set_initial_term_id, term_id,
+    };
+    use crate::logbuffer::frame_descriptor::HEADER_LENGTH;
+    use crate::protocol;
+    use agrona::AtomicBuffer;
+
+    #[test]
+    fn should_take_no_action_when_message_is_complete() {
+        let mut meta_bytes = vec![0u8; LOG_META_DATA_LENGTH];
+        let meta_buffer = AtomicBuffer::new(&mut meta_bytes);
+        let mut term_bytes = vec![0u8; 4096];
+        let term_buffer = AtomicBuffer::new(&mut term_bytes);
+
+        term_buffer.put_i32_volatile(0, HEADER_LENGTH);
+
+        let status = TermUnblocker::unblock(&meta_buffer, &term_buffer, 0, 4096, 7);
+        assert_eq!(status, UnblockStatus::NoAction);
+    }
+
+    #[test]
+    fn should_patch_non_committed_message() {
+        let mut meta_bytes = vec![0u8; LOG_META_DATA_LENGTH];
+        let meta_buffer = AtomicBuffer::new(&mut meta_bytes);
+        let mut term_bytes = vec![0u8; 4096];
+        let term_buffer = AtomicBuffer::new(&mut term_bytes);
+
+        let msg_length = HEADER_LENGTH * 4;
+        term_buffer.put_i32_volatile(0, -msg_length);
+
+        let status = TermUnblocker::unblock(&meta_buffer, &term_buffer, 0, msg_length as usize, 7);
+        assert_eq!(status, UnblockStatus::Unblocked);
+        assert_eq!(term_buffer.get_i32(0), msg_length);
+        assert_eq!(
+            term_buffer.get_i16(protocol::TYPE_FIELD_OFFSET),
+            protocol::HDR_TYPE_PAD as i16
+        );
+    }
+
+    #[test]
+    fn should_unblock_log_buffer_when_position_has_non_committed_message() {
+        let term_length = 65536;
+        let mut meta_bytes = vec![0u8; LOG_META_DATA_LENGTH];
+        let meta_buffer = AtomicBuffer::new(&mut meta_bytes);
+
+        let initial_term_id_val = 1;
+        set_initial_term_id(&meta_buffer, initial_term_id_val);
+        initialise_tail_with_term_id(&meta_buffer, 0, initial_term_id_val);
+
+        let shift = position_bits_to_shift(term_length);
+        let blocked_offset = (HEADER_LENGTH * 4) as usize;
+        let msg_length = HEADER_LENGTH * 4;
+        let blocked_position = compute_position(
+            initial_term_id_val,
+            blocked_offset as i32,
+            shift as i32,
+            initial_term_id_val,
+        );
+
+        let mut term_0_bytes = vec![0u8; term_length];
+        let mut term_1_bytes = vec![0u8; term_length];
+        let mut term_2_bytes = vec![0u8; term_length];
+
+        let term_buffer_0 = AtomicBuffer::new(&mut term_0_bytes);
+        let term_buffer_1 = AtomicBuffer::new(&mut term_1_bytes);
+        let term_buffer_2 = AtomicBuffer::new(&mut term_2_bytes);
+
+        term_buffer_0.put_i32_volatile(blocked_offset, -msg_length);
+
+        let term_buffers = [term_buffer_0, term_buffer_1, term_buffer_2];
+
+        let unblocked =
+            LogBufferUnblocker::unblock(&term_buffers, &meta_buffer, blocked_position, term_length);
+        assert!(unblocked);
+
+        let raw_tail_val = raw_tail_volatile_active(&meta_buffer);
+        assert_eq!(
+            blocked_position + msg_length as i64,
+            compute_position(
+                term_id(raw_tail_val),
+                (blocked_offset + msg_length as usize) as i32,
+                shift as i32,
+                initial_term_id_val,
+            )
+        );
+    }
+}
