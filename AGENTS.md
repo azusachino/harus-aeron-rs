@@ -71,8 +71,16 @@ make astro-e2e         # headless browser acceptance checks
 - **Wire types**: `#[repr(C)]` structs for protocol frames, matching Aeron's wire layout.
 - **Naming**: snake_case for functions/variables, PascalCase for types, SCREAMING_SNAKE
   for constants — standard Rust, no deviation.
-- **Tests**: `#[cfg(test)]` modules per file for unit tests; `tests/` per crate for
-  integration tests once they exist.
+- **Module boundaries & sizing**: Avoid monolithic single-file modules (> 500-1,000 lines).
+  Decompose complex subsystems into focused, cohesive submodules (e.g., commands, entries,
+  descriptors, flyweights, duty cycle loop).
+- **Test organization & collocation**:
+  - Unit tests MUST be collocated with the implementation in `#[cfg(test)] mod tests`
+    within each respective submodule file.
+  - Never dump an entire subsystem's unit tests into a monolithic catch-all `tests.rs`.
+  - Multi-module or lifecycle test suites requiring shared test fixtures belong in focused,
+    domain-specific submodules (e.g., `conductor/tests/client_commands.rs`,
+    `conductor/tests/network.rs`, `conductor/tests/liveness.rs`) or crate-level `tests/`.
 
 ## Key Files & Entry Points
 
