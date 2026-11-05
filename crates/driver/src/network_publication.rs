@@ -223,6 +223,20 @@ impl NetworkPublication {
         let mut work = self.endpoint.poll_control()?;
         for status in self.endpoint.take_status_messages() {
             if status.session_id == self.session_id && status.stream_id == self.stream_id {
+                let term_length = self.term_length as i32;
+                if status.term_offset < 0
+                    || status.term_offset >= term_length
+                    || status.term_offset % 32 != 0
+                    || status.receiver_window_length < 0
+                    || status.receiver_window_length > term_length / 2
+                {
+                    continue;
+                }
+                if status.flags & aeron_client::protocol::SEND_SETUP_FLAG != 0 {
+                    self.setup_sent = false;
+                    work += 1;
+                    continue;
+                }
                 // The channel endpoint already decoded the wire frame into plain fields; rebuild
                 // a flyweight view over them so the selected flow-control strategy (which mirrors
                 // vendor's flyweight-based API) can read it exactly as it would off the wire.
@@ -266,6 +280,14 @@ impl NetworkPublication {
         }
         for nak in self.endpoint.take_nak_messages() {
             if nak.session_id == self.session_id && nak.stream_id == self.stream_id {
+                if nak.term_offset < 0
+                    || nak.term_offset >= self.term_length as i32
+                    || nak.term_offset % 32 != 0
+                    || nak.length < 0
+                    || nak.term_offset as i64 + nak.length as i64 > self.term_length as i64
+                {
+                    continue;
+                }
                 let flow_control = PublicationRetransmitFlowControl {
                     retransmit_receiver_window_multiple: self.retransmit_receiver_window_multiple,
                 };
@@ -339,16 +361,6 @@ impl NetworkPublication {
             return Err(error);
         }
         work += retransmit_work;
-        let setup_requests = self.endpoint.take_setup_requests();
-        if setup_requests.iter().any(|&(session_id, stream_id)| {
-            session_id == self.session_id && stream_id == self.stream_id
-        }) {
-            // Matches SendChannelEndpoint.onStatusMessage(SEND_SETUP_FLAG): the next sender
-            // duty cycle must immediately announce SETUP instead of waiting for the periodic
-            // announcement interval.
-            self.setup_sent = false;
-            work += 1;
-        }
         // Expire receivers min/tagged flow control has not heard from within their timeout,
         // independent of whether an SM arrived this cycle -- a receiver that stops sending
         // status messages entirely (crash, network partition) must eventually stop constraining

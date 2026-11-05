@@ -19,6 +19,7 @@ pub mod media;
 pub mod multicast_flow_control;
 pub mod network_publication;
 pub mod optimal_multicast_delay;
+mod packet_validation;
 pub mod publication_image;
 pub mod publication_params;
 pub mod receiver;
