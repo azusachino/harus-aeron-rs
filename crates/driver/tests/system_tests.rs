@@ -1136,6 +1136,404 @@ fn manual_add_destination_casts_data_to_a_second_receiver() {
 }
 
 #[test]
+fn manual_mdc_destination_remove_stops_traffic_and_readd_resumes() {
+    const STREAM_ID: i32 = 8018;
+
+    let first_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind first receiver");
+    let second_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind second receiver");
+    for socket in [&first_receiver, &second_receiver] {
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+    }
+    let first_port = first_receiver.local_addr().unwrap().port();
+    let second_port = second_receiver.local_addr().unwrap().port();
+    let channel = format!("aeron:udp?endpoint=127.0.0.1:{first_port}");
+    let second_destination = format!("aeron:udp?endpoint=127.0.0.1:{second_port}");
+
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    driver
+        .do_work()
+        .expect("register publication and send setup");
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+
+    // Capture SETUP on first_receiver and reply with SM so flow-control opens
+    let mut buf = [0u8; 2048];
+    let (n, source) = first_receiver.recv_from(&mut buf).expect("receive setup");
+    let setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+    let session_id = setup.session_id();
+    let initial_term_id = setup.initial_term_id();
+
+    let mut status_bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+    let status = StatusMessageFlyweight::new(AtomicBuffer::new(&mut status_bytes));
+    status
+        .header()
+        .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+        .set_version(aeron_client::protocol::CURRENT_VERSION)
+        .set_flags(0)
+        .set_header_type(aeron_client::protocol::HDR_TYPE_SM);
+    status
+        .set_session_id(session_id)
+        .set_stream_id(STREAM_ID)
+        .set_consumption_term_id(initial_term_id)
+        .set_consumption_term_offset(0)
+        .set_receiver_window_length(TERM_MIN_LENGTH / 2)
+        .set_receiver_id(1);
+    first_receiver.send_to(&status_bytes, source).unwrap();
+
+    for _ in 0..20 {
+        driver.do_work().expect("process status message");
+        if driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(driver.sender().network_publications()[0].receiver_limit() > 0);
+
+    // 1. Add second destination -> 2 destinations
+    publisher
+        .driver_proxy()
+        .add_destination(pub_reg, &second_destination)
+        .expect("add manual MDC destination");
+    driver.do_work().expect("apply destination update");
+    assert_eq!(
+        driver.sender().network_publications()[0]
+            .destinations()
+            .len(),
+        2
+    );
+
+    // Helper to receive data payload on a socket
+    let recv_data = |socket: &UdpSocket| -> Option<Vec<u8>> {
+        let mut b = [0u8; 2048];
+        for _ in 0..10 {
+            if let Ok(len) = socket.recv(&mut b) {
+                let (frame_type, frame_len) = {
+                    let header = HeaderFlyweight::new(AtomicBuffer::new(&mut b[..len]));
+                    (header.header_type(), header.frame_length() as usize)
+                };
+                if frame_type == HDR_TYPE_DATA && frame_len > DATA_HEADER_LENGTH {
+                    return Some(b[DATA_HEADER_LENGTH..frame_len].to_vec());
+                }
+            } else {
+                break;
+            }
+        }
+        None
+    };
+
+    // Offer message 1 -> both receive
+    let pub_ref = publisher.publication(pub_reg).expect("publication ready");
+    let mut payload1 = *b"msg-1-both";
+    let len1 = payload1.len();
+    let src1 = AtomicBuffer::new(&mut payload1);
+    assert!(pub_ref.offer(&src1, 0, len1).unwrap() > 0);
+    for _ in 0..20 {
+        driver.do_work().expect("flush data");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        recv_data(&first_receiver).as_deref(),
+        Some(&b"msg-1-both"[..])
+    );
+    assert_eq!(
+        recv_data(&second_receiver).as_deref(),
+        Some(&b"msg-1-both"[..])
+    );
+
+    // 2. Remove second destination -> 1 destination
+    publisher
+        .driver_proxy()
+        .remove_destination(pub_reg, &second_destination)
+        .expect("remove manual MDC destination");
+    driver.do_work().expect("apply remove destination update");
+    assert_eq!(
+        driver.sender().network_publications()[0]
+            .destinations()
+            .len(),
+        1
+    );
+
+    // Drain any old buffered packets on sockets
+    while first_receiver.recv(&mut buf).is_ok() {}
+    while second_receiver.recv(&mut buf).is_ok() {}
+
+    // Offer message 2 -> only first receives, second receives nothing
+    let mut payload2 = *b"msg-2-first-only";
+    let len2 = payload2.len();
+    let src2 = AtomicBuffer::new(&mut payload2);
+    assert!(pub_ref.offer(&src2, 0, len2).unwrap() > 0);
+    for _ in 0..20 {
+        driver.do_work().expect("flush data");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        recv_data(&first_receiver).as_deref(),
+        Some(&b"msg-2-first-only"[..])
+    );
+    assert_eq!(
+        recv_data(&second_receiver),
+        None,
+        "removed destination must not receive data frames"
+    );
+
+    // 3. Re-add second destination -> 2 destinations
+    publisher
+        .driver_proxy()
+        .add_destination(pub_reg, &second_destination)
+        .expect("re-add manual MDC destination");
+    driver.do_work().expect("apply re-add destination update");
+    assert_eq!(
+        driver.sender().network_publications()[0]
+            .destinations()
+            .len(),
+        2
+    );
+
+    // Drain old packets
+    while first_receiver.recv(&mut buf).is_ok() {}
+    while second_receiver.recv(&mut buf).is_ok() {}
+
+    // Offer message 3 -> both receive again!
+    let mut payload3 = *b"msg-3-both-again";
+    let len3 = payload3.len();
+    let src3 = AtomicBuffer::new(&mut payload3);
+    assert!(pub_ref.offer(&src3, 0, len3).unwrap() > 0);
+    for _ in 0..20 {
+        driver.do_work().expect("flush data");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        recv_data(&first_receiver).as_deref(),
+        Some(&b"msg-3-both-again"[..])
+    );
+    assert_eq!(
+        recv_data(&second_receiver).as_deref(),
+        Some(&b"msg-3-both-again"[..])
+    );
+}
+
+#[test]
+fn manual_mdc_publication_initializes_with_empty_destinations_when_port_is_zero() {
+    const STREAM_ID: i32 = 8019;
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let port = receiver.local_addr().unwrap().port();
+    let dest_channel = format!("aeron:udp?endpoint=127.0.0.1:{port}");
+
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+    let pub_reg = publisher
+        .add_publication("aeron:udp?control-mode=manual", STREAM_ID)
+        .unwrap();
+    driver.do_work().expect("register publication");
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().expect("publisher services events");
+
+    // Initially destination port is 0, so publication has NO destinations
+    assert!(
+        driver.sender().network_publications()[0]
+            .destinations()
+            .is_empty()
+    );
+
+    // Add destination
+    publisher
+        .driver_proxy()
+        .add_destination(pub_reg, &dest_channel)
+        .expect("add destination");
+    driver.do_work().expect("apply destination");
+    assert_eq!(
+        driver.sender().network_publications()[0]
+            .destinations()
+            .len(),
+        1
+    );
+
+    // Receiver captures SETUP and sends SM
+    let mut buf = [0u8; 2048];
+    let (n, source) = receiver.recv_from(&mut buf).expect("receive setup");
+    let setup = SetupFlyweight::new(AtomicBuffer::new(&mut buf[..n]));
+
+    let mut status_bytes = [0u8; STATUS_MESSAGE_HEADER_LENGTH];
+    let status = StatusMessageFlyweight::new(AtomicBuffer::new(&mut status_bytes));
+    status
+        .header()
+        .set_frame_length(STATUS_MESSAGE_HEADER_LENGTH as i32)
+        .set_version(aeron_client::protocol::CURRENT_VERSION)
+        .set_flags(0)
+        .set_header_type(aeron_client::protocol::HDR_TYPE_SM);
+    status
+        .set_session_id(setup.session_id())
+        .set_stream_id(STREAM_ID)
+        .set_consumption_term_id(setup.initial_term_id())
+        .set_consumption_term_offset(0)
+        .set_receiver_window_length(TERM_MIN_LENGTH / 2)
+        .set_receiver_id(1);
+    receiver.send_to(&status_bytes, source).unwrap();
+
+    for _ in 0..20 {
+        driver.do_work().expect("process status message");
+        if driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(driver.sender().network_publications()[0].receiver_limit() > 0);
+
+    // Offer data
+    let pub_ref = publisher.publication(pub_reg).expect("publication ready");
+    let mut payload = *b"hello-manual-mdc";
+    let len = payload.len();
+    let src = AtomicBuffer::new(&mut payload);
+    assert!(pub_ref.offer(&src, 0, len).unwrap() > 0);
+    for _ in 0..20 {
+        driver.do_work().expect("flush data");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let mut data_payload = None;
+    for _ in 0..10 {
+        if let Ok(len) = receiver.recv(&mut buf) {
+            let (frame_type, frame_len) = {
+                let header = HeaderFlyweight::new(AtomicBuffer::new(&mut buf[..len]));
+                (header.header_type(), header.frame_length() as usize)
+            };
+            if frame_type == HDR_TYPE_DATA && frame_len > DATA_HEADER_LENGTH {
+                data_payload = Some(buf[DATA_HEADER_LENGTH..frame_len].to_vec());
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    assert_eq!(data_payload.as_deref(), Some(&b"hello-manual-mdc"[..]));
+
+    // Remove destination -> destinations becomes empty again
+    publisher
+        .driver_proxy()
+        .remove_destination(pub_reg, &dest_channel)
+        .expect("remove destination");
+    driver.do_work().expect("apply destination removal");
+    assert!(
+        driver.sender().network_publications()[0]
+            .destinations()
+            .is_empty()
+    );
+}
+
+#[test]
+fn supports_closing_and_reopening_publication_with_same_channel() {
+    const STREAM_ID: i32 = 8020;
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut publisher = client_conductor(&driver, 1);
+
+    let uris = [
+        "aeron:ipc",
+        "aeron:udp?endpoint=127.0.0.1:20121",
+        "aeron:udp?control-mode=manual",
+    ];
+
+    for uri in &uris {
+        for _ in 0..5 {
+            let pub_reg = publisher.add_publication(uri, STREAM_ID).unwrap();
+            driver.do_work().expect("register publication");
+            for (id, counter) in driver.conductor().counters() {
+                publisher.register_counter(*id, counter.clone());
+            }
+            publisher.do_work().expect("publisher ready");
+
+            assert!(publisher.publication(pub_reg).is_some());
+
+            publisher.remove_publication(pub_reg).unwrap();
+            driver.do_work().expect("remove publication");
+            publisher.do_work().expect("publisher process removal");
+
+            assert!(publisher.publication(pub_reg).is_none());
+        }
+    }
+}
+
+#[test]
+fn subscription_receive_destination_lifecycle_and_isolation() {
+    const STREAM_ID: i32 = 8021;
+    let mut driver = MediaDriver::launch(small_udp_config()).expect("launch");
+    let mut client1 = client_conductor(&driver, 1);
+    let mut client2 = client_conductor(&driver, 2);
+
+    let sub_reg1 = client1
+        .add_subscription("aeron:udp?control-mode=manual", STREAM_ID)
+        .unwrap();
+    let sub_reg2 = client2
+        .add_subscription("aeron:udp?control-mode=manual", STREAM_ID)
+        .unwrap();
+    driver.do_work().expect("register subscriptions");
+
+    let dest_channel = "aeron:udp?endpoint=127.0.0.1:20551";
+
+    // 1. Client 1 adds destination endpoint
+    client1
+        .driver_proxy()
+        .add_receive_destination(sub_reg1, dest_channel)
+        .unwrap();
+    driver.do_work().expect("add receive destination for sub1");
+    assert!(
+        driver
+            .conductor()
+            .receive_destination_aliases()
+            .contains_key(dest_channel)
+    );
+
+    // 2. Client 1 removes destination
+    client1
+        .driver_proxy()
+        .remove_receive_destination(sub_reg1, dest_channel)
+        .unwrap();
+    driver
+        .do_work()
+        .expect("remove receive destination for sub1");
+    assert!(
+        !driver
+            .conductor()
+            .receive_destination_aliases()
+            .contains_key(dest_channel)
+    );
+
+    // 3. Client 2 adds destination now
+    client2
+        .driver_proxy()
+        .add_receive_destination(sub_reg2, dest_channel)
+        .unwrap();
+    driver.do_work().expect("add receive destination for sub2");
+    assert!(
+        driver
+            .conductor()
+            .receive_destination_aliases()
+            .contains_key(dest_channel)
+    );
+
+    // 4. Remove subscription 2 -> automatically cleans up receive destination aliases
+    client2.remove_subscription(sub_reg2).unwrap();
+    driver.do_work().expect("remove sub2");
+    assert!(
+        !driver
+            .conductor()
+            .receive_destination_aliases()
+            .contains_key(dest_channel)
+    );
+}
+
+#[test]
 fn fragmented_ipc_message_reassembles_into_one_callback() {
     const STREAM_ID: i32 = 6006;
     let mut driver = MediaDriver::launch(small_mtu_ipc_config()).expect("launch");
