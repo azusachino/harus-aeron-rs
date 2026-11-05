@@ -6,9 +6,8 @@ A channel endpoint's real job is turning "a UDP socket that has bytes on it" int
 small, tagged records that someone else can match against a publication or an image." Look at
 `crates/driver/src/media/send_channel_endpoint.rs` and
 `crates/driver/src/media/receive_channel_endpoint.rs` and you'll find the endpoint itself owns no
-session-keyed map at all — it's simpler than that. `SendChannelEndpoint` holds three flat queues:
-`status_messages: Vec<StatusMessage>`, `nak_messages: Vec<NakMessage>`, and
-`setup_requests: Vec<(i32, i32)>`; `ReceiveChannelEndpoint` holds `setup_messages:
+session-keyed map at all — it's simpler than that. `SendChannelEndpoint` holds two flat queues:
+`status_messages: Vec<StatusMessage>` and `nak_messages: Vec<NakMessage>`; `ReceiveChannelEndpoint` holds `setup_messages:
 Vec<SetupMessage>` and `data_packets: Vec<DataPacket>`. Every record in every one of those queues
 carries `session_id` and `stream_id` fields — `StatusMessage`, `NakMessage`, `SetupMessage`, and
 `DataPacket` all tag themselves this way. `take_status_messages()` / `take_nak_messages()` drain
@@ -17,6 +16,13 @@ the queue for the `Sender`/`Receiver` duty cycle (Chapter 8) to match, by `sessi
 session-id-*keyed map* — `images: HashMap<NetworkImageKey, PublicationImage>` — lives one layer up
 in `DriverConductor` (`crates/driver/src/conductor.rs`), not on the endpoint itself; the endpoint's
 job stops at "read the socket, tag the record, queue it."
+
+Before the receiver advances a position or queues a packet, it validates every DATA or PAD
+frame, including later frames. The conductor repeats the check against the image term length
+before rebuilding. A final PAD may advertise more logical bytes than the UDP packet carries;
+a zero-length DATA heartbeat carries only its header. Malformed packets do not partially insert
+an earlier valid frame. Sender-side SM and NAK fields are checked against the publication term
+before flow control or retransmission; sender-relative SM bounds remain a separate task.
 
 ## UDP Channel Transport & Pollers
 

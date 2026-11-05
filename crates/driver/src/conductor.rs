@@ -1273,7 +1273,10 @@ impl DriverConductor {
         channel: Option<&str>,
         receiver_status: Option<ReceiverStatus>,
     ) -> Result<()> {
-        if frame.len() < DATA_HEADER_LENGTH {
+        if !crate::packet_validation::valid_receive_packet(
+            frame,
+            aeron_client::logbuffer::TERM_MAX_LENGTH,
+        ) {
             return Ok(());
         }
         let mut bytes = frame.to_vec();
@@ -1281,7 +1284,7 @@ impl DriverConductor {
         let frame_type = buf.get_i16(TYPE_FIELD_OFFSET) as u16;
         match frame_type {
             HDR_TYPE_SETUP => self.on_setup(&buf, source, now_ns, channel),
-            HDR_TYPE_DATA => {
+            HDR_TYPE_DATA | aeron_client::protocol::HDR_TYPE_PAD => {
                 self.on_data(&buf, frame.len(), source, now_ns, channel, receiver_status);
                 Ok(())
             }
@@ -1540,13 +1543,38 @@ impl DriverConductor {
             }
             return;
         };
+        let mut packet = vec![0; length];
+        buf.get_bytes(0, &mut packet);
+        if !crate::packet_validation::valid_receive_packet(&packet, image.term_length() as i32) {
+            return;
+        }
+        let initial_length = buf.get_i32(FRAME_LENGTH_FIELD_OFFSET);
+        if initial_length != 0 {
+            let start = buf.get_i32(DATA_TERM_OFFSET_FIELD_OFFSET) as usize;
+            let mut pos = 0;
+            let mut logical = 0usize;
+            while pos + DATA_HEADER_LENGTH <= length {
+                let frame_len = buf.get_i32(pos + FRAME_LENGTH_FIELD_OFFSET) as usize;
+                let aligned = (frame_len + 31) & !31;
+                logical += aligned;
+                pos += aligned;
+            }
+            if !image.accepts_packet(buf.get_i32(DATA_TERM_ID_FIELD_OFFSET), start, logical) {
+                return;
+            }
+        }
         let mut offset = 0usize;
         while offset + DATA_HEADER_LENGTH <= length {
             let frame_length = buf.get_i32(offset + FRAME_LENGTH_FIELD_OFFSET);
             if frame_length == 0 {
                 let term_id = buf.get_i32(offset + DATA_TERM_ID_FIELD_OFFSET);
                 let term_offset = buf.get_i32(offset + DATA_TERM_OFFSET_FIELD_OFFSET);
-                image.on_heartbeat(term_id, term_offset.max(0) as usize, now_ns);
+                image.on_heartbeat_with_flags(
+                    term_id,
+                    term_offset as usize,
+                    buf.get_u8(offset + FLAGS_FIELD_OFFSET),
+                    now_ns,
+                );
                 break;
             }
             if frame_length < 0 {
@@ -1556,9 +1584,7 @@ impl DriverConductor {
                 break;
             }
             let aligned = align(frame_length, FRAME_ALIGNMENT) as usize;
-            if aligned > length.saturating_sub(offset) {
-                break;
-            }
+            let wire_length = aligned.min(length.saturating_sub(offset));
             let frame_session_id = buf.get_i32(offset + DATA_SESSION_ID_FIELD_OFFSET);
             let frame_stream_id = buf.get_i32(offset + DATA_STREAM_ID_FIELD_OFFSET);
             if frame_session_id != session_id || frame_stream_id != stream_id {
@@ -1570,12 +1596,19 @@ impl DriverConductor {
                 break;
             }
 
-            let mut frame_bytes = vec![0u8; aligned];
-            buf.get_bytes(offset, &mut frame_bytes);
+            let mut frame_bytes = vec![0u8; wire_length];
+            buf.get_bytes(offset, &mut frame_bytes[..wire_length]);
             let frame = AtomicBuffer::new(&mut frame_bytes);
-            image.on_data_frame(term_id, term_offset as usize, &frame, aligned, now_ns);
+            image.on_data_frame_with_logical_length(
+                term_id,
+                term_offset as usize,
+                &frame,
+                wire_length,
+                aligned,
+                now_ns,
+            );
 
-            offset += aligned;
+            offset += wire_length;
         }
         if let Some(status) = receiver_status {
             // The status describes the contiguous position reached after this datagram. Apply it
