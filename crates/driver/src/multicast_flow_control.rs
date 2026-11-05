@@ -381,6 +381,10 @@ impl TaggedMulticastFlowControl {
         self.inner.receiver_timeout_ns()
     }
 
+    pub fn has_required_receivers(&self) -> bool {
+        self.inner.has_required_receivers()
+    }
+
     pub fn on_status_message(
         &mut self,
         status_message: StatusMessageFlyweight<'_>,
@@ -504,6 +508,24 @@ impl NetworkFlowControl {
             NetworkFlowControl::Tagged(tagged) => tagged.on_idle(time_ns, sender_limit),
         }
     }
+
+    /// Whether the required number of receivers have been observed according to group constraints.
+    pub fn has_required_receivers(&self) -> bool {
+        match self {
+            NetworkFlowControl::Max => true,
+            NetworkFlowControl::Min(min) => min.has_required_receivers(),
+            NetworkFlowControl::Tagged(tagged) => tagged.has_required_receivers(),
+        }
+    }
+
+    /// The receiver timeout configured for this flow control strategy, in nanoseconds.
+    pub fn receiver_timeout_ns(&self) -> i64 {
+        match self {
+            NetworkFlowControl::Max => DEFAULT_RECEIVER_TIMEOUT_NS,
+            NetworkFlowControl::Min(min) => min.receiver_timeout_ns(),
+            NetworkFlowControl::Tagged(tagged) => tagged.receiver_timeout_ns(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -594,6 +616,16 @@ mod min_flow_control_tests {
         term_offset: i32,
         sender_limit: i64,
     ) -> i64 {
+        on_status_message_at(flow_control, receiver_id, term_offset, sender_limit, 0)
+    }
+
+    fn on_status_message_at(
+        flow_control: &mut MinMulticastFlowControl,
+        receiver_id: i64,
+        term_offset: i32,
+        sender_limit: i64,
+        time_ns: i64,
+    ) -> i64 {
         let mut bytes = [0u8; 128];
         let status = StatusMessageFlyweight::new(AtomicBuffer::new(&mut bytes));
         status
@@ -601,7 +633,7 @@ mod min_flow_control_tests {
             .set_consumption_term_id(0)
             .set_consumption_term_offset(term_offset)
             .set_receiver_window_length(WINDOW_LENGTH);
-        flow_control.on_status_message(status, sender_limit, 0, 0, 0)
+        flow_control.on_status_message(status, sender_limit, 0, 0, time_ns)
     }
 
     #[test]
@@ -708,6 +740,42 @@ mod min_flow_control_tests {
                 5000
             ),
             i64::from(WINDOW_LENGTH * 2)
+        );
+    }
+
+    #[test]
+    fn should_remove_only_timed_out_receivers_when_the_last_receiver_has_also_timed_out() {
+        let mut flow_control = initialized(
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=min,g:/1,t:100ms",
+        );
+
+        let sender_limit = 5000;
+        let term_offset_one = 1000;
+        let term_offset_two = 2000;
+        let term_offset_three = 3000;
+
+        on_status_message_at(&mut flow_control, 1, term_offset_one, sender_limit, 0);
+        on_status_message_at(&mut flow_control, 2, term_offset_two, sender_limit, 0);
+        on_status_message_at(&mut flow_control, 3, term_offset_three, sender_limit, 0);
+
+        on_status_message_at(
+            &mut flow_control,
+            2,
+            term_offset_two,
+            sender_limit,
+            50_000_000,
+        );
+
+        // receivers one and three have timed out, receiver two has not
+        assert_eq!(
+            flow_control.on_idle(100_000_001, sender_limit),
+            i64::from(term_offset_two + WINDOW_LENGTH)
+        );
+
+        // receiver two must be the receiver that survived the removal pass
+        assert_eq!(
+            flow_control.on_idle(100_000_002, sender_limit),
+            i64::from(term_offset_two + WINDOW_LENGTH)
         );
     }
 }
