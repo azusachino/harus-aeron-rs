@@ -13,19 +13,21 @@ Cargo workspace mirroring upstream Aeron's actual module boundaries: `agrona`
 (Conductor/Sender/Receiver + UDP transport, also home to the `aeron-driver` binary),
 `aeron-archive`, and `aeron-cluster`.
 
-The upstream reference is Aeron 1.54.0. The existing 268-row parity ledger and
-older interoperability records describe the previous 1.50.x scope; reference selection
-alone does not establish 1.54 behavioral parity. [Issue #44](https://github.com/azusachino/harus-aeron-rs/issues/44)
-tracks the remaining catch-up work.
+The upstream reference is Aeron 1.54.0. The previous 268-row ledger described the
+1.50.x scope. The reconciled 1.54.0 inventory contains 335 current paths plus one
+retained historical path; 163 added or changed sources remain queued for review.
+Reference selection and file counts alone do not establish behavioral parity. See
+[the inventory audit](docs/aeron-1.54.0-test-inventory.md) and [issue #44](https://github.com/azusachino/harus-aeron-rs/issues/44).
 
 The current branch has working driver and Archive slices plus a bounded cluster core:
 shared mmap CnC/log buffers, real `DriverConductor` command processing, IPC and UDP
 publication paths, Archive control/runtime services, deterministic cluster election,
-node state, recording-log metadata, and failover comparison tests. The latest parity
-ledger is 268/268 files resolved: 175 bounded equivalents and 93 documented skips.
-The 83 driver/client system-test rows are specifically 43 bounded equivalents and 40
-skips; this is a complete audit, not a claim of full Java method parity. See
-[`docs/plan.md`](docs/plan.md), [`docs/system-test-parity-boundaries.md`](docs/system-test-parity-boundaries.md),
+node state, recording-log metadata, and failover comparison tests. The previous
+ledger recorded 175 bounded equivalents and 93 skips across 268 paths. The current
+inventory preserves those statuses as earlier audit evidence and queues changed/new
+source review; skips do not count as implemented parity. See [`docs/plan.md`](docs/plan.md),
+[`docs/aeron-1.54.0-test-inventory.md`](docs/aeron-1.54.0-test-inventory.md),
+[`docs/system-test-parity-boundaries.md`](docs/system-test-parity-boundaries.md),
 [`docs/cluster-parity-boundaries.md`](docs/cluster-parity-boundaries.md), and
 [`docs/interop-soak.md`](docs/interop-soak.md).
 
@@ -80,8 +82,8 @@ and tutorial chapters remain in `docs/`.
 
 ## Test parity
 
-`0.1.0` ships once near-100% of upstream Aeron's 268 test files have a Rust
-equivalent (see [`docs/plan.md`](docs/plan.md)). Track progress with:
+`0.1.0` ships once near-100% of the current upstream test-file inventory has a Rust
+equivalent (see [`docs/plan.md`](docs/plan.md) and the [inventory audit](docs/aeron-1.54.0-test-inventory.md)). Track progress with:
 
 ```bash
 make test-parity   # wraps: uv run scripts/upstream_tests.py report
