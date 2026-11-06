@@ -4,7 +4,7 @@
 pub mod mpsc;
 pub mod spsc;
 
-pub use mpsc::ManyToOneRingBuffer;
+pub use mpsc::{ControlledReadAction, ManyToOneRingBuffer};
 pub use spsc::OneToOneRingBuffer;
 
 /// Cache line length assumed for false-sharing padding, matching upstream agrona.
@@ -41,6 +41,8 @@ pub const TRAILER_LENGTH: usize = COUNTER_PADDING * 6;
 
 /// Length of the record header (4 bytes length + 4 bytes type ID).
 pub const HEADER_LENGTH: usize = 8;
+/// Minimum data capacity for a ring buffer, equal to record header length.
+pub const MIN_CAPACITY: usize = HEADER_LENGTH;
 /// Offset of the record length in the record header.
 pub const LENGTH_OFFSET: usize = 0;
 /// Offset of the record type ID in the record header.
