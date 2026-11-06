@@ -56,9 +56,52 @@ pub struct LossRange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ImageLink {
-    subscription_registration_id: i64,
-    correlation_id: i64,
+pub enum UntetheredSubscriptionStateKind {
+    Active,
+    Linger,
+    Resting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageLink {
+    pub subscription_registration_id: i64,
+    pub correlation_id: i64,
+    pub subscriber_position_id: i32,
+    pub tethered: bool,
+    pub rejoin: bool,
+    pub state: UntetheredSubscriptionStateKind,
+    pub time_of_last_update_ns: i64,
+    pub window_limit_timeout_ns: u64,
+    pub linger_timeout_ns: u64,
+    pub resting_timeout_ns: u64,
+}
+
+impl ImageLink {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        subscription_registration_id: i64,
+        correlation_id: i64,
+        subscriber_position_id: i32,
+        tethered: bool,
+        rejoin: bool,
+        now_ns: i64,
+        window_limit_timeout_ns: u64,
+        linger_timeout_ns: u64,
+        resting_timeout_ns: u64,
+    ) -> Self {
+        Self {
+            subscription_registration_id,
+            correlation_id,
+            subscriber_position_id,
+            tethered,
+            rejoin,
+            state: UntetheredSubscriptionStateKind::Active,
+            time_of_last_update_ns: now_ns,
+            window_limit_timeout_ns,
+            linger_timeout_ns,
+            resting_timeout_ns,
+        }
+    }
 }
 
 /// Reassembles a single session's data frames into a shared image log.
@@ -87,6 +130,7 @@ pub struct PublicationImage {
     receiver_released: bool,
     last_packet_ns: i64,
     end_of_stream: bool,
+    all_tethered_drained: bool,
 }
 
 impl PublicationImage {
@@ -150,10 +194,17 @@ impl PublicationImage {
             log_buffers,
             log_file_name,
             source_addr,
-            image_links: vec![ImageLink {
+            image_links: vec![ImageLink::new(
                 subscription_registration_id,
                 correlation_id,
-            }],
+                0,
+                true,
+                true,
+                0,
+                0,
+                0,
+                0,
+            )],
             hwm_position: active_position,
             rebuild_position: active_position,
             last_status_position: active_position,
@@ -165,6 +216,7 @@ impl PublicationImage {
             receiver_released: false,
             last_packet_ns: 0,
             end_of_stream: false,
+            all_tethered_drained: true,
         }
     }
 
@@ -216,17 +268,42 @@ impl PublicationImage {
             .any(|link| link.subscription_registration_id == subscription_registration_id)
     }
 
+    pub fn links(&self) -> &[ImageLink] {
+        &self.image_links
+    }
+
+    pub fn links_mut(&mut self) -> &mut [ImageLink] {
+        &mut self.image_links
+    }
+
+    pub fn add_link(&mut self, link: ImageLink) {
+        if !self.has_subscription(link.subscription_registration_id) {
+            self.image_links.push(link);
+        } else if let Some(existing) = self
+            .image_links
+            .iter_mut()
+            .find(|l| l.subscription_registration_id == link.subscription_registration_id)
+        {
+            *existing = link;
+        }
+    }
+
     pub fn add_subscription_link(
         &mut self,
         subscription_registration_id: i64,
         correlation_id: i64,
     ) {
-        if !self.has_subscription(subscription_registration_id) {
-            self.image_links.push(ImageLink {
-                subscription_registration_id,
-                correlation_id,
-            });
-        }
+        self.add_link(ImageLink::new(
+            subscription_registration_id,
+            correlation_id,
+            0,
+            true,
+            true,
+            0,
+            0,
+            0,
+            0,
+        ));
     }
 
     pub fn remove_subscription_link(&mut self, subscription_registration_id: i64) {
@@ -274,14 +351,13 @@ impl PublicationImage {
         self.receiver_released && self.state == PublicationImageState::Done
     }
 
-    /// Whether every received byte has been rebuilt into the shared log.
-    ///
-    /// Upstream `isDrained` also requires each subscriber position to have caught up to the rebuild
-    /// position. The driver-side image does not hold the subscriber position counters (the
-    /// conductor owns them), and subscribers read the shared log even after the image is freed, so
-    /// the drain gate here is the data-side condition only.
-    fn is_drained(&self) -> bool {
-        self.rebuild_position >= self.hwm_position
+    pub fn set_all_tethered_drained(&mut self, drained: bool) {
+        self.all_tethered_drained = drained;
+    }
+
+    /// Whether every received byte has been rebuilt into the shared log and tethered subscribers drained.
+    pub fn is_drained(&self) -> bool {
+        self.rebuild_position >= self.hwm_position && self.all_tethered_drained
     }
 
     /// Advance the end-of-life state machine one tick (upstream `PublicationImage.onTimeEvent`).
@@ -406,7 +482,7 @@ impl PublicationImage {
             || now_ns.saturating_sub(self.last_packet_ns) <= liveness_timeout_ns
     }
 
-    pub(crate) fn term_length(&self) -> usize {
+    pub fn term_length(&self) -> usize {
         self.term_length
     }
 

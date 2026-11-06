@@ -539,6 +539,7 @@ impl<'a> ClientConductor<'a> {
             source_identity.into(),
             correlation_id,
         );
+        image.set_subscriber_position_id(subscriber_position_id);
         if let Some(counter) = cnc_counter {
             image.set_cnc_subscriber_position(counter);
         }

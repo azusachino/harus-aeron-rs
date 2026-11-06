@@ -22,6 +22,7 @@ pub struct Image {
     correlation_id: i64,
     source_identity: String,
     subscriber_position: Arc<AtomicI64>,
+    subscriber_position_id: i32,
     cnc_subscriber_position: Option<AtomicCounter<'static>>,
     // Kept alive so `term_buffers`' raw-pointer AtomicBuffer views stay valid; both this
     // Image and any Publication/Subscription over the same log clone the same Arc, so writes
@@ -62,6 +63,7 @@ impl Image {
             correlation_id,
             source_identity,
             subscriber_position,
+            subscriber_position_id: 0,
             cnc_subscriber_position: None,
             log_buffers,
             term_buffers,
@@ -120,6 +122,14 @@ impl Image {
 
     pub fn close(&mut self) {
         self.is_closed = true;
+    }
+
+    pub fn subscriber_position_id(&self) -> i32 {
+        self.subscriber_position_id
+    }
+
+    pub fn set_subscriber_position_id(&mut self, id: i32) {
+        self.subscriber_position_id = id;
     }
 
     pub(crate) fn set_cnc_subscriber_position(&mut self, counter: AtomicCounter<'static>) {

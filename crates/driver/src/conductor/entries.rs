@@ -4,11 +4,18 @@ use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 
 use aeron_client::uri::{
-    ChannelUri, RELIABLE_PARAM_NAME, SESSION_ID_PARAM_NAME, TETHER_PARAM_NAME,
+    ChannelUri, REJOIN_PARAM_NAME, RELIABLE_PARAM_NAME, SESSION_ID_PARAM_NAME, TETHER_PARAM_NAME,
 };
 
 use crate::error::{DriverError, Result};
-use crate::publication_params::{TaggedPublicationInfo, TaggedPublicationLookup};
+use crate::publication_image::UntetheredSubscriptionStateKind;
+use crate::publication_params::{
+    TaggedPublicationInfo, TaggedPublicationLookup, UNTETHERED_LINGER_TIMEOUT_PARAM_NAME,
+    UNTETHERED_RESTING_TIMEOUT_PARAM_NAME, UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME,
+    parse_duration,
+};
+
+pub use crate::publication_image::UntetheredSubscriptionStateKind as IpcSubscriptionStateKind;
 
 /// Source identity reported for IPC images — matches upstream's `aeron:ipc` channel identity.
 pub const IPC_SOURCE_IDENTITY: &str = "aeron:ipc";
@@ -87,13 +94,25 @@ pub fn is_udp_channel(channel: &str) -> bool {
     channel.starts_with("aeron:udp")
 }
 
+#[derive(Debug, Clone)]
+pub struct SubscriptionOptions {
+    pub identity: String,
+    pub session_id: Option<i32>,
+    pub reliable: bool,
+    pub tethered: bool,
+    pub rejoin: bool,
+    pub untethered_window_limit_timeout_ns: Option<u64>,
+    pub untethered_linger_timeout_ns: Option<u64>,
+    pub untethered_resting_timeout_ns: Option<u64>,
+}
+
 /// Return the transport identity and options that affect subscription dispatch.
 ///
 /// Reliability is a subscription property, while `session-id` narrows the interest within an
 /// otherwise shared transport. Removing both from the identity lets the conductor reject the
 /// same-session reliability conflict without treating subscriptions for different sessions as
 /// conflicting.
-pub fn subscription_options(channel: &str) -> Result<(String, Option<i32>, bool, bool)> {
+pub fn subscription_options(channel: &str) -> Result<SubscriptionOptions> {
     let mut uri = ChannelUri::parse(underlying_channel(channel)?.as_str())
         .map_err(|error| DriverError::InvalidChannel(format!("parse channel: {error}")))?;
     let session_id = uri
@@ -122,10 +141,45 @@ pub fn subscription_options(channel: &str) -> Result<(String, Option<i32>, bool,
         })
         .transpose()?
         .unwrap_or(true);
+    let rejoin = uri
+        .get(REJOIN_PARAM_NAME)
+        .map(|value| {
+            value.parse::<bool>().map_err(|_| {
+                DriverError::InvalidChannel(format!("invalid rejoin value in channel: {value}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(true);
+    let untethered_window_limit_timeout_ns = uri
+        .get(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME)
+        .map(|value| parse_duration(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME, value))
+        .transpose()?;
+    let untethered_linger_timeout_ns = uri
+        .get(UNTETHERED_LINGER_TIMEOUT_PARAM_NAME)
+        .map(|value| parse_duration(UNTETHERED_LINGER_TIMEOUT_PARAM_NAME, value))
+        .transpose()?;
+    let untethered_resting_timeout_ns = uri
+        .get(UNTETHERED_RESTING_TIMEOUT_PARAM_NAME)
+        .map(|value| parse_duration(UNTETHERED_RESTING_TIMEOUT_PARAM_NAME, value))
+        .transpose()?;
+
     uri.remove(RELIABLE_PARAM_NAME);
     uri.remove(SESSION_ID_PARAM_NAME);
     uri.remove(TETHER_PARAM_NAME);
-    Ok((uri.to_string(), session_id, reliable, tethered))
+    uri.remove(REJOIN_PARAM_NAME);
+    uri.remove(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME);
+    uri.remove(UNTETHERED_LINGER_TIMEOUT_PARAM_NAME);
+    uri.remove(UNTETHERED_RESTING_TIMEOUT_PARAM_NAME);
+    Ok(SubscriptionOptions {
+        identity: uri.to_string(),
+        session_id,
+        reliable,
+        tethered,
+        rejoin,
+        untethered_window_limit_timeout_ns,
+        untethered_linger_timeout_ns,
+        untethered_resting_timeout_ns,
+    })
 }
 
 pub fn subscription_conflicts(
@@ -135,8 +189,7 @@ pub fn subscription_conflicts(
     session_id: Option<i32>,
     reliable: bool,
 ) -> bool {
-    subscription_options(&existing.channel)
-        .is_ok_and(|(existing_identity, _, _, _)| existing_identity == identity)
+    subscription_options(&existing.channel).is_ok_and(|opts| opts.identity == identity)
         && existing.stream_id == stream_id
         && existing.reliable != reliable
         && match (existing.session_id, session_id) {
@@ -170,6 +223,14 @@ pub fn stable_channel_tag(channel: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationState {
+    Active,
+    Draining,
+    Linger,
+    Closed,
+}
+
 #[derive(Debug, Clone)]
 pub struct PublicationEntry {
     pub registration_id: i64,
@@ -191,6 +252,8 @@ pub struct PublicationEntry {
     /// Absolute path of the shared log file backing this publication; `None` until a log
     /// buffer is allocated (network publications get theirs in the Sender data-path task).
     pub log_file_name: Option<String>,
+    pub state: PublicationState,
+    pub time_of_last_state_change_ns: i64,
 }
 
 pub struct ActivePublicationLookup<'a> {
@@ -239,13 +302,11 @@ pub struct SubscriptionEntry {
     pub reliable: bool,
     /// Whether this subscription participates in local publication flow control.
     pub tethered: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IpcSubscriptionStateKind {
-    Active,
-    Linger,
-    Resting,
+    /// Whether an untethered subscription rejoins after linger.
+    pub rejoin: bool,
+    pub untethered_window_limit_timeout_ns: Option<u64>,
+    pub untethered_linger_timeout_ns: Option<u64>,
+    pub untethered_resting_timeout_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,8 +315,12 @@ pub struct IpcSubscriptionState {
     pub correlation_id: i64,
     pub subscriber_position_id: i32,
     pub tethered: bool,
-    pub state: IpcSubscriptionStateKind,
+    pub rejoin: bool,
+    pub state: UntetheredSubscriptionStateKind,
     pub time_of_last_update_ns: i64,
+    pub window_limit_timeout_ns: u64,
+    pub linger_timeout_ns: u64,
+    pub resting_timeout_ns: u64,
 }
 
 #[derive(Debug)]
