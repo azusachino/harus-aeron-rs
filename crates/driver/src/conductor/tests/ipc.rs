@@ -330,3 +330,118 @@ fn ipc_publication_and_subscription_connect_with_available_image() {
     drop(conductor);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn untethered_subscription_closed_on_draining_cleanup() {
+    let (cnc, path) = temp_cnc("untethered-drain");
+    let dir = temp_dir("untethered-drain");
+    let mut config = small_config();
+    config.untethered_window_limit_timeout_ns = 50;
+    config.untethered_linger_timeout_ns = 50;
+    config.untethered_resting_timeout_ns = 50;
+    let mut conductor = DriverConductor::new(config, cnc.clone(), dir.0.clone()).unwrap();
+    let client = proxy(&cnc);
+
+    let publication = client
+        .add_publication(
+            "aeron:ipc?term-length=64k|untethered-window-limit-timeout=50ns|untethered-linger-timeout=50ns|untethered-resting-timeout=50ns",
+            1015,
+        )
+        .unwrap();
+    let tethered_sub = client
+        .add_subscription("aeron:ipc?rejoin=true|tether=true", 1015)
+        .unwrap();
+    let untethered_sub = client
+        .add_subscription("aeron:ipc?rejoin=true|tether=false", 1015)
+        .unwrap();
+    conductor.do_work(1_000).unwrap();
+
+    let untethered_link = conductor
+        .ipc_subscriptions
+        .get(&(publication, untethered_sub))
+        .copied()
+        .unwrap();
+    let untethered_sub_pos_id = untethered_link.subscriber_position_id;
+    assert!(conductor.counters().contains_key(&untethered_sub_pos_id));
+
+    // Advance publication position past window limit (64k / 4 = 16k)
+    let publication_log = conductor.log_buffers.get(&publication).unwrap();
+    let metadata = publication_log.meta_data_buffer();
+    let initial_term_id = conductor
+        .publications()
+        .get(&publication)
+        .unwrap()
+        .initial_term_id;
+    aeron_client::logbuffer::set_raw_tail(
+        &metadata,
+        0,
+        aeron_client::logbuffer::pack_tail(initial_term_id, 48 * 1024),
+    );
+
+    // Tethered sub is at 40k (advancing consumer position so window limit = (40k - 32k) + 8k = 16k)
+    let tethered_link = conductor
+        .ipc_subscriptions
+        .get(&(publication, tethered_sub))
+        .copied()
+        .unwrap();
+    conductor
+        .counters()
+        .get(&tethered_link.subscriber_position_id)
+        .unwrap()
+        .store(40 * 1024, Ordering::Release);
+
+    // Untethered sub stays at 0 <= 16k. Past window timeout (50ns), it enters Linger
+    conductor.do_work(1_051).unwrap();
+    assert_eq!(
+        conductor
+            .ipc_subscriptions
+            .get(&(publication, untethered_sub))
+            .unwrap()
+            .state,
+        IpcSubscriptionStateKind::Linger
+    );
+
+    // Client closes publication -> publication enters DRAINING
+    client.remove_publication(publication, false).unwrap();
+    conductor.do_work(1_052).unwrap();
+
+    let pub_entry = conductor.publications().get(&publication).unwrap();
+    assert_eq!(pub_entry.state, PublicationState::Draining);
+
+    // Advance past linger timeout (50ns).
+    // In DRAINING, allowRejoin is false: untethered sub is closed and removed!
+    conductor.do_work(1_103).unwrap();
+
+    assert!(
+        !conductor.counters().contains_key(&untethered_sub_pos_id),
+        "untethered sub position counter must be closed and freed"
+    );
+    assert!(
+        !conductor
+            .ipc_subscriptions
+            .contains_key(&(publication, untethered_sub)),
+        "untethered sub must be removed from ipc_subscriptions"
+    );
+    // Tethered subscriber is still at 40k < 48k, so publication remains in DRAINING
+    assert_eq!(
+        conductor.publications().get(&publication).unwrap().state,
+        PublicationState::Draining
+    );
+
+    // Tethered subscriber now catches up to 48k
+    conductor
+        .counters()
+        .get(&tethered_link.subscriber_position_id)
+        .unwrap()
+        .store(48 * 1024, Ordering::Release);
+    conductor.do_work(1_104).unwrap();
+
+    // Publication completes drain state and is removed!
+    assert!(
+        !conductor.publications().contains_key(&publication),
+        "publication must complete drain state and be removed"
+    );
+
+    drop(conductor);
+    let _ = std::fs::remove_file(&path);
+}

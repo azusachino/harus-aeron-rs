@@ -167,6 +167,11 @@ impl MediaDriver {
         let now_ns = self
             .clock_origin_epoch_ns
             .saturating_add(self.clock_origin.elapsed().as_nanos().min(i64::MAX as u128) as i64);
+        self.do_work_at(now_ns)
+    }
+
+    /// Run one duty cycle across all agents at an explicit clock timestamp.
+    pub fn do_work_at(&mut self, now_ns: i64) -> Result<usize> {
         let conductor_work = self.conductor.do_work(now_ns)?;
         // Adopt any endpoints the conductor created this cycle into the send/receive agents.
         for publication in self.conductor.take_new_network_publications() {

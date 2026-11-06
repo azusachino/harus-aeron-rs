@@ -2314,3 +2314,103 @@ fn network_publication_connection_status_tracks_receiver_liveness_and_required_g
         "disconnected immediately on EOS"
     );
 }
+
+#[test]
+fn image_should_complete_drain_state_even_if_there_are_non_active_untethered_subscriptions() {
+    let mut config = small_ipc_config();
+    config.untethered_window_limit_timeout_ns = 20_000_000; // 20ms
+    config.untethered_linger_timeout_ns = 50_000_000; // 50ms
+    config.untethered_resting_timeout_ns = 0;
+    let mut driver = MediaDriver::launch(config).expect("launch");
+
+    const STREAM_ID: i32 = 1001;
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_channel = "aeron:ipc?term-length=64k|eos=true|untethered-window-limit-timeout=20ms|untethered-linger-timeout=50ms|untethered-resting-timeout=0s";
+    let sub_channel = "aeron:ipc?rejoin=true|tether=true";
+    let untethered_channel = "aeron:ipc?rejoin=true|tether=false";
+
+    let pub_reg = publisher.add_publication(pub_channel, STREAM_ID).unwrap();
+    let tethered_sub_reg = subscriber.add_subscription(sub_channel, STREAM_ID).unwrap();
+    let untethered_sub_reg = subscriber
+        .add_subscription(untethered_channel, STREAM_ID)
+        .unwrap();
+
+    driver.do_work().unwrap();
+
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+
+    publisher.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let tethered_sub = subscriber.subscription_mut(tethered_sub_reg).unwrap();
+    assert_eq!(tethered_sub.image_count(), 1);
+
+    let untethered_sub = subscriber.subscription_mut(untethered_sub_reg).unwrap();
+    assert_eq!(untethered_sub.image_count(), 1);
+    let untethered_image = untethered_sub.image_at_index(0).unwrap();
+    let untethered_sub_pos_counter_id = untethered_image.subscriber_position_id();
+
+    // Verify counter is allocated in CnC
+    let meta_offset =
+        untethered_sub_pos_counter_id as usize * aeron_client::cnc_file::COUNTER_METADATA_LENGTH;
+    assert_eq!(
+        driver.cnc().counters_metadata_buffer().get_i32(meta_offset),
+        aeron_client::cnc_file::COUNTER_RECORD_ALLOCATED
+    );
+
+    // Offer messages up to 32k. Tethered subscriber polls; untethered subscriber does NOT poll.
+    let mut payload = vec![0u8; 1024 - aeron_client::protocol::DATA_HEADER_LENGTH];
+    let payload_len = payload.len();
+    let src = AtomicBuffer::new(&mut payload);
+    let publication = publisher.publication(pub_reg).unwrap();
+
+    let target_window_length = 32 * 1024;
+    while publication.position() < target_window_length {
+        let pos = publication.offer(&src, 0, payload_len).unwrap();
+        if pos > 0 {
+            let tethered_sub = subscriber.subscription_mut(tethered_sub_reg).unwrap();
+            tethered_sub.poll(|_, _, _, _| {}, 10);
+        }
+    }
+
+    // Advance driver clock past untethered window limit timeout (20ms).
+    // Conductor marks untethered subscriber as Linger and sends unavailable image event.
+    let base_time_ns = 1_000_000_000i64;
+    driver.do_work_at(base_time_ns).unwrap();
+    driver.do_work_at(base_time_ns + 30_000_000).unwrap(); // +30ms > 20ms
+    subscriber.do_work().unwrap();
+
+    // Tethered subscriber consumes everything up to publication position.
+    let eos_pos = publication.position();
+    let tethered_sub = subscriber.subscription_mut(tethered_sub_reg).unwrap();
+    while tethered_sub.image_at_index(0).unwrap().position() < eos_pos {
+        tethered_sub.poll(|_, _, _, _| {}, 10);
+    }
+
+    // Close publication -> publication enters DRAINING.
+    publisher.remove_publication(pub_reg).unwrap();
+    driver.do_work_at(base_time_ns + 35_000_000).unwrap();
+
+    // Advance time past untethered linger timeout (50ms).
+    // In DRAINING, allowRejoin is false: untethered subscriber in Linger is closed.
+    driver.do_work_at(base_time_ns + 90_000_000).unwrap(); // +90ms > 30ms + 50ms
+
+    // Assert that the untethered subscriber position counter is closed!
+    assert_ne!(
+        driver.cnc().counters_metadata_buffer().get_i32(meta_offset),
+        aeron_client::cnc_file::COUNTER_RECORD_ALLOCATED,
+        "untethered subscriber position counter must be closed when image completes drain state"
+    );
+    assert!(
+        !driver
+            .conductor()
+            .counters()
+            .contains_key(&untethered_sub_pos_counter_id),
+        "untethered subscriber position counter must be removed from conductor counters"
+    );
+}
