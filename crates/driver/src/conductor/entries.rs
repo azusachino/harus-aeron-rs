@@ -254,6 +254,7 @@ pub struct PublicationEntry {
     pub log_file_name: Option<String>,
     pub state: PublicationState,
     pub time_of_last_state_change_ns: i64,
+    pub clean_position: i64,
 }
 
 pub struct ActivePublicationLookup<'a> {

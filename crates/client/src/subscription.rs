@@ -222,10 +222,114 @@ impl Subscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_buffers::LogBuffers;
+    use crate::logbuffer::{FRAME_ALIGNMENT, HEADER_LENGTH, PAGE_MIN_SIZE, TERM_MIN_LENGTH, align};
+    use crate::protocol::DataHeaderFlyweight;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicI64;
 
     const REGISTRATION_ID: i64 = 100;
     const STREAM_ID: i32 = 1002;
     const CHANNEL: &str = "aeron:udp?endpoint=localhost:40124";
+    const INITIAL_TERM_ID: i32 = 123;
+
+    fn create_test_log_buffers() -> LogBuffers {
+        let term_len = TERM_MIN_LENGTH as usize;
+        let total_len = term_len * 3 + 4096;
+        let mut contents = vec![0u8; total_len];
+        let meta_offset = total_len - 4096;
+        let mut meta_slice = contents[meta_offset..].to_vec();
+        let meta_buf = AtomicBuffer::new(&mut meta_slice);
+        crate::logbuffer::set_term_length(&meta_buf, TERM_MIN_LENGTH);
+        crate::logbuffer::set_page_size(&meta_buf, PAGE_MIN_SIZE);
+        crate::logbuffer::set_end_of_stream_position(
+            &meta_buf,
+            crate::logbuffer::NO_END_OF_STREAM_POSITION,
+        );
+        contents[meta_offset..].copy_from_slice(&meta_slice);
+        LogBuffers::from_bytes(contents).unwrap()
+    }
+
+    fn create_test_image_with_messages(
+        session_id: i32,
+        correlation_id: i64,
+        num_messages: usize,
+    ) -> Image {
+        let subscriber_pos = Arc::new(AtomicI64::new(0));
+        let log_buffers = create_test_log_buffers();
+        let terms = log_buffers.duplicate_term_buffers();
+        let mut term_offset = 0;
+        for _ in 0..num_messages {
+            let data = [1u8; 32];
+            let msg_len = HEADER_LENGTH as usize + data.len();
+            let aligned_frame_len = align(msg_len as i32, FRAME_ALIGNMENT) as usize;
+            let mut frame_bytes = vec![0u8; aligned_frame_len];
+            let frame_buf = AtomicBuffer::new(&mut frame_bytes);
+            let data_header = DataHeaderFlyweight::new(frame_buf);
+            data_header.set_header_type(crate::protocol::HDR_TYPE_DATA);
+            data_header.set_frame_length(msg_len as i32);
+            data_header.set_session_id(session_id);
+            data_header.set_term_id(INITIAL_TERM_ID);
+            data_header.set_term_offset(term_offset as i32);
+            terms[0].put_bytes(term_offset, &frame_bytes);
+            term_offset += aligned_frame_len;
+        }
+        Image::new(
+            1,
+            session_id,
+            INITIAL_TERM_ID,
+            0,
+            subscriber_pos,
+            log_buffers,
+            "test".to_string(),
+            correlation_id,
+        )
+    }
+
+    #[test]
+    fn should_round_robin_starting_image_when_polling_with_exhausted_fragment_limit() {
+        let mut subscription = Subscription::new(REGISTRATION_ID, STREAM_ID, CHANNEL.to_string());
+        let img1 = create_test_image_with_messages(101, 1, 3);
+        let img2 = create_test_image_with_messages(202, 2, 3);
+        subscription.add_image(img1);
+        subscription.add_image(img2);
+
+        let mut poll_session_ids = Vec::new();
+        for _ in 0..6 {
+            let read = subscription.poll(
+                |_buf, _offset, _len, header| {
+                    poll_session_ids.push(header.session_id());
+                },
+                1,
+            );
+            assert_eq!(read, 1);
+        }
+
+        assert_eq!(poll_session_ids, vec![101, 202, 101, 202, 101, 202]);
+    }
+
+    #[test]
+    fn should_round_robin_starting_image_when_controlled_polling_with_exhausted_fragment_limit() {
+        let mut subscription = Subscription::new(REGISTRATION_ID, STREAM_ID, CHANNEL.to_string());
+        let img1 = create_test_image_with_messages(101, 1, 3);
+        let img2 = create_test_image_with_messages(202, 2, 3);
+        subscription.add_image(img1);
+        subscription.add_image(img2);
+
+        let mut poll_session_ids = Vec::new();
+        for _ in 0..6 {
+            let read = subscription.controlled_poll(
+                |_buf, _offset, _len, header| {
+                    poll_session_ids.push(header.session_id());
+                    ControlledPollAction::Continue
+                },
+                1,
+            );
+            assert_eq!(read, 1);
+        }
+
+        assert_eq!(poll_session_ids, vec![101, 202, 101, 202, 101, 202]);
+    }
 
     #[test]
     fn should_ensure_subscription_is_open_when_polling() {

@@ -19,6 +19,7 @@ use crate::cnc_file::{
 use crate::driver_events::{DriverEvent, DriverEventsAdapter};
 use crate::driver_proxy::DriverProxy;
 use crate::error::{AeronError, Result};
+use crate::exclusive_publication::ExclusivePublication;
 use crate::image::Image;
 use crate::log_buffers::LogBuffers;
 use crate::logbuffer::initial_term_id;
@@ -49,6 +50,7 @@ pub struct ClientConductor<'a> {
     pending_publications: HashMap<i64, PendingPublication>,
     pending_subscriptions: HashMap<i64, PendingSubscription>,
     publications: HashMap<i64, ConcurrentPublication>,
+    exclusive_publications: HashMap<i64, ExclusivePublication>,
     subscriptions: HashMap<i64, Subscription>,
     counter_values: HashMap<i32, Arc<AtomicI64>>,
     /// CnC counter slots mirrored into the stable Arc handles used by publications and images.
@@ -76,6 +78,7 @@ impl<'a> ClientConductor<'a> {
             pending_publications: HashMap::new(),
             pending_subscriptions: HashMap::new(),
             publications: HashMap::new(),
+            exclusive_publications: HashMap::new(),
             subscriptions: HashMap::new(),
             counter_values: HashMap::new(),
             cnc_counter_offsets: HashMap::new(),
@@ -458,6 +461,20 @@ impl<'a> ClientConductor<'a> {
                     "missing publication limit counter {publication_limit_counter_id}"
                 ))
             })?;
+        if exclusive {
+            let publication = ExclusivePublication::new(
+                pending.channel.clone(),
+                stream_id,
+                session_id,
+                initial_term_id,
+                registration_id,
+                correlation_id,
+                publication_limit.clone(),
+                buffers.clone(),
+            );
+            self.exclusive_publications
+                .insert(registration_id, publication);
+        }
         let publication = ConcurrentPublication::new(
             pending.channel,
             stream_id,
@@ -606,6 +623,17 @@ impl<'a> ClientConductor<'a> {
         self.publications.get(&registration_id)
     }
 
+    pub fn exclusive_publication(&self, registration_id: i64) -> Option<&ExclusivePublication> {
+        self.exclusive_publications.get(&registration_id)
+    }
+
+    pub fn exclusive_publication_mut(
+        &mut self,
+        registration_id: i64,
+    ) -> Option<&mut ExclusivePublication> {
+        self.exclusive_publications.get_mut(&registration_id)
+    }
+
     pub fn subscription(&self, registration_id: i64) -> Option<&Subscription> {
         self.subscriptions.get(&registration_id)
     }
@@ -630,16 +658,31 @@ impl<'a> ClientConductor<'a> {
         // shared/duplicate publication resolves to another client's existing registration_id).
         // Fall back to matching on original_registration_id, mirroring on_error's lookup, so
         // callers can still remove a publication using the id they were originally given.
-        let actual_key = if self.publications.contains_key(&registration_id) {
+        let actual_key = if self.publications.contains_key(&registration_id)
+            || self.exclusive_publications.contains_key(&registration_id)
+        {
             Some(registration_id)
+        } else if let Some((key, _)) = self
+            .publications
+            .iter()
+            .find(|(_, publication)| publication.original_registration_id() == registration_id)
+        {
+            Some(*key)
         } else {
-            self.publications
+            self.exclusive_publications
                 .iter()
                 .find(|(_, publication)| publication.original_registration_id() == registration_id)
                 .map(|(key, _)| *key)
         };
         if let Some(actual_key) = actual_key {
             if let Some(mut publication) = self.publications.remove(&actual_key) {
+                publication.close();
+                self.driver_proxy.remove_publication(actual_key, false)?;
+                self.registration_states
+                    .insert(registration_id, RegistrationState::Closed);
+                return Ok(true);
+            }
+            if let Some(mut publication) = self.exclusive_publications.remove(&actual_key) {
                 publication.close();
                 self.driver_proxy.remove_publication(actual_key, false)?;
                 self.registration_states
@@ -661,6 +704,7 @@ impl<'a> ClientConductor<'a> {
     pub fn remove_subscription(&mut self, registration_id: i64) -> Result<bool> {
         self.ensure_open()?;
         if self.publications.contains_key(&registration_id)
+            || self.exclusive_publications.contains_key(&registration_id)
             || self.pending_publications.contains_key(&registration_id)
         {
             return Err(AeronError::WrongResourceType {
@@ -691,7 +735,9 @@ impl<'a> ClientConductor<'a> {
     }
 
     pub fn publication_count(&self) -> usize {
-        self.publications.len() + self.pending_publications.len()
+        self.publications.len()
+            + self.exclusive_publications.len()
+            + self.pending_publications.len()
     }
 
     pub fn subscription_count(&self) -> usize {
@@ -705,6 +751,7 @@ impl<'a> ClientConductor<'a> {
         for registration_id in self
             .publications
             .keys()
+            .chain(self.exclusive_publications.keys())
             .copied()
             .chain(self.pending_publications.keys().copied())
             .collect::<Vec<_>>()
@@ -735,10 +782,14 @@ impl<'a> ClientConductor<'a> {
         for publication in self.publications.values_mut() {
             publication.close();
         }
+        for publication in self.exclusive_publications.values_mut() {
+            publication.close();
+        }
         for subscription in self.subscriptions.values_mut() {
             subscription.close();
         }
         self.publications.clear();
+        self.exclusive_publications.clear();
         self.subscriptions.clear();
         self.pending_publications.clear();
         self.pending_subscriptions.clear();
