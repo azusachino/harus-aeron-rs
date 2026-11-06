@@ -224,6 +224,30 @@ impl<'a> AtomicBuffer<'a> {
         self.try_put_bytes_from(offset, src, src_offset, length)
             .expect("Agrona operation failed");
     }
+
+    /// Set a memory range to the given byte value.
+    pub fn set_memory(&self, offset: usize, length: usize, value: u8) {
+        self.check_bounds(offset, length)
+            .expect("Agrona operation failed");
+        if offset % 8 == 0 && length % 8 == 0 && value == 0 {
+            let words = length / 8;
+            for i in 0..words {
+                unsafe {
+                    let dest =
+                        &*(self.ptr.add(offset + i * 8) as *const std::sync::atomic::AtomicI64);
+                    dest.store(0, Ordering::Relaxed);
+                }
+            }
+        } else {
+            for index in 0..length {
+                unsafe {
+                    let dest =
+                        &*(self.ptr.add(offset + index) as *const std::sync::atomic::AtomicU8);
+                    dest.store(value, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, loom))]
@@ -384,6 +408,23 @@ impl<'a> AtomicBuffer<'a> {
     ) {
         self.try_put_bytes_from(offset, src, src_offset, length)
             .expect("Agrona operation failed");
+    }
+
+    /// Set a memory range to the given byte value.
+    pub fn set_memory(&self, offset: usize, length: usize, value: u8) {
+        self.check_bounds(offset, length)
+            .expect("Agrona operation failed");
+        for i in 0..length {
+            let word_idx = (offset + i) / 8;
+            let byte_shift = ((offset + i) % 8) * 8;
+            let mask = !(0xFFi64 << byte_shift);
+            let val = (value as i64) << byte_shift;
+            let _ = self.inner[word_idx].fetch_update(
+                loom::sync::atomic::Ordering::Relaxed,
+                loom::sync::atomic::Ordering::Relaxed,
+                |old| Some((old & mask) | val),
+            );
+        }
     }
 }
 

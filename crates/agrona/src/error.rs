@@ -42,4 +42,21 @@ pub enum AgronaError {
         /// The transmitter's tail position.
         tail: i64,
     },
+
+    /// Invalid message type ID (must be positive).
+    #[error("Invalid message type ID: {0}. Must be positive.")]
+    InvalidMessageType(i32),
+
+    /// Message exceeds maximum allowed size for ring buffer.
+    #[error("Message length {length} exceeds maximum {max_length}")]
+    MessageTooLarge {
+        /// Attempted message length.
+        length: usize,
+        /// Maximum allowed message length.
+        max_length: usize,
+    },
+
+    /// Invalid offset supplied for buffer claim commit or abort.
+    #[error("Invalid claim offset: {0}")]
+    InvalidClaimOffset(usize),
 }
