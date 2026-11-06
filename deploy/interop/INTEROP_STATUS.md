@@ -41,21 +41,28 @@ That harness starts separate Rust driver processes and client processes for IPC,
 separate publisher/subscriber driver and client processes for UDP. Each process has a
 bounded timeout and is released or killed during cleanup.
 
-## Aeron 1.54.0 checkpoint
+## Aeron 1.54.0 Compatibility Checkpoint
 
-Verified during PR #45 validation on macOS arm64 with Corretto 25.0.5, after a
-fresh `gradlew clean :aeron-all:shadowJar` under that JDK. Earlier validation also
-passed with Corretto 17.0.21 and Temurin 21.0.13; the project now selects Corretto's
-25.0 minor line. The selected source is
-`454da1e4e6c7edf3dd6d34878512d3243384992a`, tag `1.54.0`, and the harness uses
-`aeron-all-1.54.0.jar` built from that checkout.
+Completed across S0 through S13 of the 1.54 catch-up plan ([issue #44](https://github.com/azusachino/harus-aeron-rs/issues/44)), verified on macOS arm64 (`Darwin 25.1.0 arm64`) with Amazon Corretto 25.0.5+10-LTS.
 
-- `make interop-smoke` passed: Java CnC readers, Java IPC and UDP through the Rust
-  driver, and Rust-client IPC through the Java driver.
-- `make interop-soak` passed the same probes with 1,000 ordered UDP messages.
-- Rerunning `make setup-upstream-aeron` preserved the exact reference rather than
-  following the newer `release/1.54.x` branch head.
-
-The older 1.50.x evidence remains in Git history. These new runs do not establish
-Archive authentication/control compatibility, full system-test parity, or Aeron
-Cluster wire/recovery support; issue #44 tracks that work.
+- **Exact Reference**: `454da1e4e6c7edf3dd6d34878512d3243384992a` (Aeron release tag `1.54.0`).
+- **Target JAR**: `aeron-all-1.54.0.jar` built from that exact commit via `./gradlew clean :aeron-all:shadowJar`.
+- **Smoke & Soak Results**:
+  - `make interop-smoke`: Java CnC readers, Java IPC and UDP loopback through the Rust driver, and Rust-client IPC through the Java driver pass cleanly.
+  - `make interop-soak`: 1,000 ordered sequence-tagged UDP datagrams delivered without loss or reordering.
+  - `make interop-rust-smoke` and `make interop-rust-soak`: independent multi-process Rust driver/client IPC and cross-driver UDP probes pass with 1,000 messages.
+  - `RUSTFLAGS="--cfg loom" cargo test -p agrona --lib`: 10 concurrency tests pass, exhaustively proving SPSC, MPSC (reservation, unblock, wrap), and broadcast buffer safety.
+- **Archive Compatibility**:
+  - Modern `AuthConnectRequest` (template 58, schema 14, semantic version 1.12.0) implemented; legacy template 2 retired.
+  - Source-image identity binding enforces session ownership on requests and closing.
+  - Active replays stopped before recording truncation.
+- **Client & Driver Lifecycle**:
+  - Buffer claim commit/abort, 64-bit reserved values, controlled polling, and `ControlledFragmentAssembler` retry semantics verified end-to-end.
+  - Concurrent publication term rotation race verified with driver IPC term buffer zeroing (`cleanBufferTo`).
+  - Min flow control receiver liveness tracking, MDC destination cleanup/re-add, and untethered subscriber draining verified under live traffic.
+- **Explicit Follow-Up Boundaries**:
+  - Persistent subscriptions (orchestration layer) kept open under [#8](https://github.com/azusachino/harus-aeron-rs/issues/8).
+  - Driver UDP name resolution gossip kept open under [#12](https://github.com/azusachino/harus-aeron-rs/issues/12).
+  - NativeResourceAgent scheduling kept open under [#10](https://github.com/azusachino/harus-aeron-rs/issues/10).
+  - Replicated cluster consensus, service container, and Archive recovery kept open under [#18](https://github.com/azusachino/harus-aeron-rs/issues/18) and [#19](https://github.com/azusachino/harus-aeron-rs/issues/19).
+  - Release acceptance remains governed by [#23](https://github.com/azusachino/harus-aeron-rs/issues/23).
