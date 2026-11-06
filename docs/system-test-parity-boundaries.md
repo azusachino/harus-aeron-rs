@@ -33,8 +33,7 @@ but are not promoted to full Java system-test parity.
 The 40 driver/client skips name a missing boundary rather than hiding it. The
 main groups are:
 
-- API and runtime depth varies: `BufferClaim` and controlled polling now exist in Rust, but the Java system-test scenarios for claim commit/abort and controlled delivery are not yet fully exercised end to end; async
-  resources, exclusive-publication offer/claim depth, and two-buffer offers;
+- API and runtime depth: `BufferClaim` (commit/abort, reserved values over IPC and UDP), controlled polling (`Abort`, `Break`, `Continue`), and `ControlledFragmentAssembler` retry semantics are fully exercised end to end (verified in S11); remaining unexercised areas include async resources, two-buffer offers, and multi-stream exclusive publication depth;
 - transports or driver features not implemented: true multicast, multipath,
   response channels, publication revoke/reject-image, live resolver gossip,
   timestamp writes, and strategy-selected multicast flow control;

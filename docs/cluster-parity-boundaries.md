@@ -26,7 +26,7 @@ the other cluster boundaries:
 - `consensus_module.rs`: vote collection, majority quorum, appointed leadership, and heartbeat handling.
 - `cluster_node.rs`: a minimal node context and step loop.
 - `node_state.rs`: versioned local candidate-term persistence.
-- `recording_log.rs`: bounded local term/snapshot metadata persistence.
+- `recording_log.rs`: bounded local term/snapshot metadata persistence and snapshot ordering by `(leadership_term_id, log_position, service_id)` (verified in S12).
 - `cluster_clock.rs` and `log_source_validator.rs`: pure clock and source-acceptance contracts.
 
 The failover tests include an in-memory election model and a real Tokio UDP process
