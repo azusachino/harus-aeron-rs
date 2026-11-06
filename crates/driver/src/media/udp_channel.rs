@@ -26,6 +26,8 @@ pub const RECEIVER_WINDOW_LENGTH_PARAM_NAME: &str = "rcv-wnd";
 pub const CHANNEL_RECEIVE_TIMESTAMP_OFFSET_PARAM_NAME: &str = "channel-rcv-ts-offset";
 pub const CHANNEL_SEND_TIMESTAMP_OFFSET_PARAM_NAME: &str = "channel-snd-ts-offset";
 pub const GROUP_TAG_PARAM_NAME: &str = "gtag";
+pub const SOCKET_TOS_PARAM_NAME: &str = "so-tos";
+pub const SOCKET_TOS_DEFAULT: u8 = 0;
 pub const RESERVED_OFFSET_STR: &str = "reserved";
 
 static UNIQUE_CANONICAL_FORM_VALUE: AtomicU64 = AtomicU64::new(0);
@@ -53,6 +55,7 @@ pub struct UdpChannel {
     pub socket_rcvbuf_length: usize,
     pub socket_sndbuf_length: usize,
     pub receiver_window_length: usize,
+    pub socket_tos: u8,
     pub channel_receive_timestamp_offset: i32,
     pub channel_send_timestamp_offset: i32,
     pub group_tag: Option<i64>,
@@ -107,6 +110,7 @@ impl UdpChannel {
         let socket_sndbuf_length = parse_buffer_length(&channel_uri, SOCKET_SNDBUF_PARAM_NAME)?;
         let receiver_window_length =
             parse_buffer_length(&channel_uri, RECEIVER_WINDOW_LENGTH_PARAM_NAME)?;
+        let socket_tos = parse_socket_tos(&channel_uri)?;
 
         let requires_additional_suffix = !is_destination
             && ((endpoint_address.is_none() && control_address.is_none())
@@ -278,6 +282,7 @@ impl UdpChannel {
             socket_rcvbuf_length,
             socket_sndbuf_length,
             receiver_window_length,
+            socket_tos,
             channel_receive_timestamp_offset,
             channel_send_timestamp_offset,
             group_tag,
@@ -303,6 +308,14 @@ impl UdpChannel {
 
     pub fn is_response_control_mode(&self) -> bool {
         self.control_mode == ControlMode::Response
+    }
+
+    pub fn socket_tos(&self) -> u8 {
+        self.socket_tos
+    }
+
+    pub fn receiver_window_length(&self) -> usize {
+        self.receiver_window_length
     }
 }
 
@@ -345,6 +358,15 @@ fn parse_buffer_length(channel_uri: &ChannelUri, param_name: &str) -> Result<usi
         parse_size(param_name, val)
     } else {
         Ok(0)
+    }
+}
+
+fn parse_socket_tos(channel_uri: &ChannelUri) -> Result<u8> {
+    if let Some(val) = channel_uri.get(SOCKET_TOS_PARAM_NAME) {
+        val.parse::<u8>()
+            .map_err(|_| DriverError::InvalidChannel(format!("invalid socket tos: {val}")))
+    } else {
+        Ok(SOCKET_TOS_DEFAULT)
     }
 }
 
@@ -699,5 +721,31 @@ mod tests {
                 "unexpected multicast result for {uri}"
             );
         }
+    }
+
+    #[test]
+    fn should_parse_socket_tos() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|so-tos=184").unwrap();
+        assert_eq!(channel.socket_tos(), 184);
+
+        let channel_without_tos = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999").unwrap();
+        assert_eq!(channel_without_tos.socket_tos(), SOCKET_TOS_DEFAULT);
+    }
+
+    #[test]
+    fn should_reject_invalid_socket_tos() {
+        for invalid in ["-1", "256", "not-a-number"] {
+            let uri = format!("aeron:udp?endpoint=127.0.0.1:9999|so-tos={invalid}");
+            assert!(
+                UdpChannel::parse(&uri).is_err(),
+                "expected error for invalid socket tos: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_parse_receiver_window() {
+        let channel = UdpChannel::parse("aeron:udp?endpoint=127.0.0.1:9999|rcv-wnd=8192").unwrap();
+        assert_eq!(channel.receiver_window_length(), 8192);
     }
 }

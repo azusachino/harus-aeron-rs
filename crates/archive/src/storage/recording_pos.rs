@@ -263,4 +263,36 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn multi_archive_isolation_and_wildcard_lookups() {
+        with_manager(8, |manager| {
+            let c_arch100 = allocate(manager, 100, 501, 1001, 1, "ch1", "src1").unwrap();
+            let c_arch200 = allocate(manager, 200, 501, 1001, 1, "ch1", "src1").unwrap();
+            let c_arch300 = allocate(manager, 300, 501, 1001, 1, "ch1", "src1").unwrap();
+
+            // Exact archive ID match
+            assert_eq!(c_arch100, find_counter_id_by_recording(manager, 501, 100));
+            assert_eq!(c_arch200, find_counter_id_by_recording(manager, 501, 200));
+            assert_eq!(c_arch300, find_counter_id_by_recording(manager, 501, 300));
+
+            assert_eq!(c_arch100, find_counter_id_by_session(manager, 1001, 100));
+            assert_eq!(c_arch200, find_counter_id_by_session(manager, 1001, 200));
+            assert_eq!(c_arch300, find_counter_id_by_session(manager, 1001, 300));
+
+            // Unknown archive ID returns NULL_VALUE
+            assert_eq!(NULL_VALUE, find_counter_id_by_recording(manager, 501, 999));
+            assert_eq!(NULL_VALUE, find_counter_id_by_session(manager, 1001, 999));
+
+            // Wildcard NULL_RECORDING_ID (-1) returns the first allocated match
+            assert_eq!(
+                c_arch100,
+                find_counter_id_by_recording(manager, 501, NULL_RECORDING_ID)
+            );
+            assert_eq!(
+                c_arch100,
+                find_counter_id_by_session(manager, 1001, NULL_RECORDING_ID)
+            );
+        });
+    }
 }

@@ -414,4 +414,99 @@ mod tests {
         assert!(log.find_term(1).is_some());
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn should_order_snapshots_by_term_position_and_service_id_and_filter_invalids() {
+        let valid_snapshot1 = RecordingLogEntry {
+            recording_id: 1,
+            leadership_term_id: 2,
+            term_base_log_position: 0,
+            log_position: 1000,
+            timestamp: 10,
+            service_id: 1,
+            entry_type: ENTRY_TYPE_SNAPSHOT,
+            archive_endpoint: None,
+            is_valid: true,
+            entry_index: 0,
+        };
+        let valid_snapshot2 = RecordingLogEntry {
+            recording_id: 2,
+            leadership_term_id: 1,
+            term_base_log_position: 0,
+            log_position: 500,
+            timestamp: 5,
+            service_id: 0,
+            entry_type: ENTRY_TYPE_SNAPSHOT,
+            archive_endpoint: None,
+            is_valid: true,
+            entry_index: 1,
+        };
+        let valid_snapshot3 = RecordingLogEntry {
+            recording_id: 3,
+            leadership_term_id: 2,
+            term_base_log_position: 0,
+            log_position: 1000,
+            timestamp: 10,
+            service_id: 0,
+            entry_type: ENTRY_TYPE_SNAPSHOT,
+            archive_endpoint: None,
+            is_valid: true,
+            entry_index: 2,
+        };
+        let valid_snapshot4 = RecordingLogEntry {
+            recording_id: 4,
+            leadership_term_id: 2,
+            term_base_log_position: 0,
+            log_position: 800,
+            timestamp: 8,
+            service_id: 0,
+            entry_type: ENTRY_TYPE_SNAPSHOT,
+            archive_endpoint: None,
+            is_valid: true,
+            entry_index: 3,
+        };
+        let invalid_snapshot = RecordingLogEntry {
+            recording_id: 5,
+            leadership_term_id: 1,
+            term_base_log_position: 0,
+            log_position: 100,
+            timestamp: 1,
+            service_id: 0,
+            entry_type: ENTRY_TYPE_SNAPSHOT,
+            archive_endpoint: None,
+            is_valid: false,
+            entry_index: 4,
+        };
+        let term_entry = RecordingLogEntry {
+            recording_id: 6,
+            leadership_term_id: 1,
+            term_base_log_position: 0,
+            log_position: 100,
+            timestamp: 1,
+            service_id: NULL_VALUE as i32,
+            entry_type: ENTRY_TYPE_TERM,
+            archive_endpoint: None,
+            is_valid: true,
+            entry_index: 5,
+        };
+
+        let entries = vec![
+            &valid_snapshot1,
+            &valid_snapshot2,
+            &valid_snapshot3,
+            &valid_snapshot4,
+            &invalid_snapshot,
+            &term_entry,
+        ];
+
+        let ordered = RecordingLog::snapshot_order(entries);
+
+        // Expected sort order: (leadership_term_id, log_position, service_id)
+        // 1. term 1, pos 500, service 0 (recording 2)
+        // 2. term 2, pos 800, service 0 (recording 4)
+        // 3. term 2, pos 1000, service 0 (recording 3)
+        // 4. term 2, pos 1000, service 1 (recording 1)
+        let ids: Vec<i64> = ordered.into_iter().map(|e| e.recording_id).collect();
+        assert_eq!(ids, vec![2, 4, 3, 1]);
+    }
 }
