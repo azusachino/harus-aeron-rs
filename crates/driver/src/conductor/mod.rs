@@ -32,16 +32,16 @@ use aeron_client::driver_events::{
 use aeron_client::error_log::DistinctErrorLog;
 use aeron_client::log_buffers::LogBuffers;
 use aeron_client::logbuffer::{
-    FRAME_ALIGNMENT, align, compute_position, index_by_term_count, initial_term_id,
-    initialise_tail_with_term_id, pack_tail, position_bits_to_shift, raw_tail_volatile_active,
-    set_active_term_count, set_initial_term_id, set_mtu_length, set_raw_tail,
-    store_default_frame_header, term_id, term_offset,
+    FRAME_ALIGNMENT, align, compute_position, index_by_position, index_by_term_count,
+    initial_term_id, initialise_tail_with_term_id, pack_tail, position_bits_to_shift,
+    raw_tail_volatile_active, set_active_term_count, set_initial_term_id, set_mtu_length,
+    set_raw_tail, store_default_frame_header, term_id, term_offset,
 };
 use aeron_client::protocol::{
-    CURRENT_VERSION, DATA_HEADER_LENGTH, DATA_SESSION_ID_FIELD_OFFSET, DATA_STREAM_ID_FIELD_OFFSET,
-    DATA_TERM_ID_FIELD_OFFSET, DATA_TERM_OFFSET_FIELD_OFFSET, DataHeaderFlyweight, EOS_FLAG,
-    FLAGS_FIELD_OFFSET, FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA, HDR_TYPE_SETUP, SetupFlyweight,
-    TYPE_FIELD_OFFSET,
+    BEGIN_AND_END_FLAGS, CURRENT_VERSION, DATA_HEADER_LENGTH, DATA_SESSION_ID_FIELD_OFFSET,
+    DATA_STREAM_ID_FIELD_OFFSET, DATA_TERM_ID_FIELD_OFFSET, DATA_TERM_OFFSET_FIELD_OFFSET,
+    DataHeaderFlyweight, EOS_FLAG, FLAGS_FIELD_OFFSET, FRAME_LENGTH_FIELD_OFFSET, HDR_TYPE_DATA,
+    HDR_TYPE_SETUP, SetupFlyweight, TYPE_FIELD_OFFSET,
 };
 use aeron_client::uri::ChannelUri;
 
@@ -777,6 +777,7 @@ impl DriverConductor {
                 log_file_name: log_file_name.clone(),
                 state: PublicationState::Active,
                 time_of_last_state_change_ns: now_ns,
+                clean_position: 0,
             },
         );
 
@@ -1440,6 +1441,7 @@ impl DriverConductor {
         let header_buf = AtomicBuffer::new(&mut header_bytes);
         let header = DataHeaderFlyweight::new(header_buf.clone());
         header.set_version(CURRENT_VERSION);
+        header.set_flags(BEGIN_AND_END_FLAGS);
         header.set_header_type(HDR_TYPE_DATA);
         header.set_session_id(session_id);
         header.set_stream_id(stream_id);
@@ -1880,12 +1882,37 @@ impl DriverConductor {
             .filter_map(|link| self.counters.get(&link.subscriber_position_id))
             .map(|position| position.load(Ordering::Acquire))
             .collect();
-        let limit = positions
-            .into_iter()
-            .min()
+        let min_position = positions.into_iter().min();
+        let limit = min_position
             .map(|position| position.saturating_add(term_length / 2))
             .unwrap_or(0);
-        self.set_publication_limit(publication.publication_limit_counter_id, limit)
+        self.set_publication_limit(publication.publication_limit_counter_id, limit)?;
+
+        // Zero out consumed parts of term buffers behind subscribers (Aeron IpcPublication::cleanBufferTo)
+        if let Some(target_position) = min_position {
+            if let Some(buffers) = self.log_buffers.get(&publication_registration_id) {
+                let term_length = publication.term_length;
+                let position_bits = term_length.trailing_zeros() as usize;
+                let term_buffers = buffers.duplicate_term_buffers();
+                let mut clean_pos = publication.clean_position;
+                while target_position > clean_pos {
+                    let bytes_for_cleaning = (target_position - clean_pos) as usize;
+                    let term_offset = (clean_pos as usize) & (term_length - 1);
+                    let length = bytes_for_cleaning.min(term_length - term_offset);
+                    if length >= 8 {
+                        let dirty_term_buffer =
+                            &term_buffers[index_by_position(clean_pos, position_bits)];
+                        dirty_term_buffer.set_memory(term_offset + 8, length - 8, 0);
+                        dirty_term_buffer.put_i64_ordered(term_offset, 0);
+                    }
+                    clean_pos += length as i64;
+                }
+                if let Some(pub_mut) = self.publications.get_mut(&publication_registration_id) {
+                    pub_mut.clean_position = clean_pos;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn set_publication_limit(&self, counter_id: i32, value: i64) -> Result<()> {

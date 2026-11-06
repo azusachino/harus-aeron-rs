@@ -10,8 +10,8 @@ use aeron_client::driver_events::{
     ErrorResponseFlyweight, ON_ERROR, ON_OPERATION_SUCCESS, OperationSucceededFlyweight,
 };
 use aeron_client::driver_proxy::DriverProxy;
-use aeron_client::fragment_assembler::FragmentAssembler;
-use aeron_client::logbuffer::TERM_MIN_LENGTH;
+use aeron_client::fragment_assembler::{ControlledFragmentAssembler, FragmentAssembler};
+use aeron_client::logbuffer::{ControlledPollAction, TERM_MIN_LENGTH};
 use aeron_client::protocol::{
     DATA_HEADER_LENGTH, DataHeaderFlyweight, HDR_TYPE_DATA, HDR_TYPE_SETUP, HeaderFlyweight,
     NAK_HEADER_LENGTH, NakFlyweight, STATUS_MESSAGE_HEADER_LENGTH, SetupFlyweight,
@@ -2412,5 +2412,566 @@ fn image_should_complete_drain_state_even_if_there_are_non_active_untethered_sub
             .counters()
             .contains_key(&untethered_sub_pos_counter_id),
         "untethered subscriber position counter must be removed from conductor counters"
+    );
+}
+
+#[test]
+fn buffer_claim_should_receive_published_message_with_interleaved_abort_ipc() {
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    const STREAM_ID: i32 = 4001;
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+
+    driver.do_work().unwrap();
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let publication = publisher.publication(pub_reg).unwrap();
+
+    // 1. Publish message 1
+    let mut msg1 = *b"msg-one";
+    let len1 = msg1.len();
+    let src1 = AtomicBuffer::new(&mut msg1);
+    assert!(publication.offer(&src1, 0, len1).unwrap() > 0);
+
+    // 2. Try claim message 2
+    let (pos, claim) = publication.try_claim(200).unwrap();
+    assert!(pos > 0);
+    let claim = claim.expect("claim should succeed");
+
+    // 3. Publish message 3
+    let mut msg3 = *b"msg-three";
+    let len3 = msg3.len();
+    let src3 = AtomicBuffer::new(&mut msg3);
+    assert!(publication.offer(&src3, 0, len3).unwrap() > 0);
+
+    // 4. Abort message 2
+    claim.abort();
+
+    // 5. Poll subscriber
+    let subscription = subscriber.subscription_mut(sub_reg).unwrap();
+    let mut received = Vec::new();
+    let mut fragments = 0;
+    for _ in 0..10 {
+        fragments += subscription.poll(
+            |buf, offset, len, _hdr| {
+                let mut data = vec![0u8; len];
+                buf.get_bytes(offset, &mut data);
+                received.push(data);
+            },
+            10,
+        );
+        if fragments >= 2 {
+            break;
+        }
+    }
+    assert_eq!(fragments, 2);
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0], b"msg-one");
+    assert_eq!(received[1], b"msg-three");
+}
+
+#[test]
+fn buffer_claim_should_receive_published_message_with_interleaved_abort_udp() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let endpoint = reservation.local_addr().unwrap();
+    drop(reservation);
+    let channel = format!("aeron:udp?endpoint={endpoint}");
+
+    let mut publisher_driver = MediaDriver::launch(small_udp_config()).expect("publisher launch");
+    let mut subscriber_driver = MediaDriver::launch(small_udp_config()).expect("subscriber launch");
+    const STREAM_ID: i32 = 4002;
+
+    let mut subscriber = client_conductor(&subscriber_driver, 2);
+    let sub_reg = subscriber.add_subscription(&channel, STREAM_ID).unwrap();
+    subscriber_driver.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let mut publisher = client_conductor(&publisher_driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    publisher_driver.do_work().unwrap();
+    for (id, counter) in publisher_driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().unwrap();
+
+    subscriber_driver.do_work().unwrap();
+    for (id, counter) in subscriber_driver.conductor().counters() {
+        subscriber.register_counter(*id, counter.clone());
+    }
+    subscriber.do_work().unwrap();
+
+    for _ in 0..20 {
+        publisher_driver.do_work().unwrap();
+        if publisher_driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let publication = publisher.publication(pub_reg).unwrap();
+
+    // 1. Offer message 1
+    let mut msg1 = *b"udp-msg-one";
+    let len1 = msg1.len();
+    let src1 = AtomicBuffer::new(&mut msg1);
+    assert!(publication.offer(&src1, 0, len1).unwrap() > 0);
+
+    // 2. Try claim message 2
+    let (pos, claim) = publication.try_claim(200).unwrap();
+    assert!(pos > 0);
+    let claim = claim.expect("claim should succeed");
+
+    // 3. Offer message 3
+    let mut msg3 = *b"udp-msg-three";
+    let len3 = msg3.len();
+    let src3 = AtomicBuffer::new(&mut msg3);
+    assert!(publication.offer(&src3, 0, len3).unwrap() > 0);
+
+    // 4. Abort claim
+    claim.abort();
+
+    let mut received = Vec::new();
+    for _ in 0..100 {
+        publisher_driver.do_work().unwrap();
+        subscriber_driver.do_work().unwrap();
+        for (id, counter) in subscriber_driver.conductor().counters() {
+            subscriber.register_counter(*id, counter.clone());
+        }
+        subscriber.do_work().unwrap();
+        if let Some(sub) = subscriber.subscription_mut(sub_reg) {
+            sub.poll(
+                |buf, offset, len, _hdr| {
+                    let mut data = vec![0u8; len];
+                    buf.get_bytes(offset, &mut data);
+                    received.push(data);
+                },
+                10,
+            );
+            if received.len() >= 2 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0], b"udp-msg-one");
+    assert_eq!(received[1], b"udp-msg-three");
+}
+
+#[test]
+fn buffer_claim_should_transfer_reserved_value_ipc() {
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    const STREAM_ID: i32 = 4003;
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+
+    driver.do_work().unwrap();
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let publication = publisher.publication(pub_reg).unwrap();
+    let (pos, claim) = publication.try_claim(64).unwrap();
+    assert!(pos > 0);
+    let claim = claim.expect("claim succeeds");
+    let reserved_val = 0x1234_5678_9ABC_DEF0i64;
+    claim.set_reserved_value(reserved_val);
+    let mut payload = [42u8; 64];
+    let src = AtomicBuffer::new(&mut payload);
+    claim.put_bytes(&src, 0, 64);
+    claim.commit();
+
+    let subscription = subscriber.subscription_mut(sub_reg).unwrap();
+    let mut seen_reserved = 0i64;
+    let mut seen_length = 0usize;
+    let read = subscription.poll(
+        |_buf, _offset, len, hdr| {
+            seen_length = len;
+            seen_reserved = hdr.reserved_value();
+        },
+        10,
+    );
+    assert_eq!(read, 1);
+    assert_eq!(seen_length, 64);
+    assert_eq!(seen_reserved, reserved_val);
+}
+
+#[test]
+fn buffer_claim_should_transfer_reserved_value_udp() {
+    let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let endpoint = reservation.local_addr().unwrap();
+    drop(reservation);
+    let channel = format!("aeron:udp?endpoint={endpoint}");
+
+    let mut publisher_driver = MediaDriver::launch(small_udp_config()).expect("publisher launch");
+    let mut subscriber_driver = MediaDriver::launch(small_udp_config()).expect("subscriber launch");
+    const STREAM_ID: i32 = 4004;
+
+    let mut subscriber = client_conductor(&subscriber_driver, 2);
+    let sub_reg = subscriber.add_subscription(&channel, STREAM_ID).unwrap();
+    subscriber_driver.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let mut publisher = client_conductor(&publisher_driver, 1);
+    let pub_reg = publisher.add_publication(&channel, STREAM_ID).unwrap();
+    publisher_driver.do_work().unwrap();
+    for (id, counter) in publisher_driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().unwrap();
+
+    subscriber_driver.do_work().unwrap();
+    for (id, counter) in subscriber_driver.conductor().counters() {
+        subscriber.register_counter(*id, counter.clone());
+    }
+    subscriber.do_work().unwrap();
+
+    for _ in 0..20 {
+        publisher_driver.do_work().unwrap();
+        if publisher_driver.sender().network_publications()[0].receiver_limit() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let publication = publisher.publication(pub_reg).unwrap();
+    let (pos, claim) = publication.try_claim(64).unwrap();
+    assert!(pos > 0);
+    let claim = claim.expect("claim succeeds");
+    let reserved_val = 0x0FED_CBA9_8765_4321i64;
+    claim.set_reserved_value(reserved_val);
+    let mut payload = [77u8; 64];
+    let src = AtomicBuffer::new(&mut payload);
+    claim.put_bytes(&src, 0, 64);
+    claim.commit();
+
+    let mut seen_reserved = 0i64;
+    let mut seen_length = 0usize;
+    for _ in 0..100 {
+        publisher_driver.do_work().unwrap();
+        subscriber_driver.do_work().unwrap();
+        for (id, counter) in subscriber_driver.conductor().counters() {
+            subscriber.register_counter(*id, counter.clone());
+        }
+        subscriber.do_work().unwrap();
+        if let Some(sub) = subscriber.subscription_mut(sub_reg) {
+            let read = sub.poll(
+                |_buf, _offset, len, hdr| {
+                    seen_length = len;
+                    seen_reserved = hdr.reserved_value();
+                },
+                10,
+            );
+            if read > 0 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(seen_length, 64);
+    assert_eq!(seen_reserved, reserved_val);
+}
+
+#[test]
+fn controlled_message_poll_with_abort_break_and_continue() {
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    const STREAM_ID: i32 = 4005;
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+
+    driver.do_work().unwrap();
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let publication = publisher.publication(pub_reg).unwrap();
+    let msgs: [&[u8]; 4] = [b"msg-0", b"msg-1", b"msg-2", b"msg-3"];
+    for msg in &msgs {
+        let mut bytes = msg.to_vec();
+        let src = AtomicBuffer::new(&mut bytes);
+        assert!(publication.offer(&src, 0, msg.len()).unwrap() > 0);
+    }
+
+    let subscription = subscriber.subscription_mut(sub_reg).unwrap();
+    let mut collected = Vec::new();
+    let mut callback_count = 0;
+
+    let mut total_read = 0;
+    while total_read < 4 {
+        let read = subscription.controlled_poll(
+            |buf, offset, len, _hdr| {
+                callback_count += 1;
+                let action = match callback_count {
+                    3 => ControlledPollAction::Abort,
+                    5 => ControlledPollAction::Break,
+                    _ => ControlledPollAction::Continue,
+                };
+                if action != ControlledPollAction::Abort {
+                    let mut data = vec![0u8; len];
+                    buf.get_bytes(offset, &mut data);
+                    collected.push(data);
+                }
+                action
+            },
+            10,
+        );
+        total_read += read;
+    }
+
+    assert_eq!(collected.len(), 4);
+    assert_eq!(collected[0], b"msg-0");
+    assert_eq!(collected[1], b"msg-1");
+    assert_eq!(collected[2], b"msg-2");
+    assert_eq!(collected[3], b"msg-3");
+    // Message 2 was aborted on callback 3 and retried on callback 4; callback 5 was msg 3 returning Break
+    assert_eq!(callback_count, 5);
+}
+
+#[test]
+fn controlled_fragment_assembler_with_interleaved_abort_and_retry() {
+    let mut driver = MediaDriver::launch(small_mtu_ipc_config()).expect("launch");
+    const STREAM_ID: i32 = 4006;
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+
+    driver.do_work().unwrap();
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let publication = publisher.publication(pub_reg).unwrap();
+
+    // Message 1: 16 bytes (unfragmented, <= 64 MTU - header)
+    let msg1 = vec![1u8; 16];
+    let mut msg1_bytes = msg1.clone();
+    let src1 = AtomicBuffer::new(&mut msg1_bytes);
+    assert!(publication.offer(&src1, 0, 16).unwrap() > 0);
+
+    // Message 2: 128 bytes (fragmented across multiple frames)
+    let msg2 = vec![2u8; 128];
+    let mut msg2_bytes = msg2.clone();
+    let src2 = AtomicBuffer::new(&mut msg2_bytes);
+    assert!(publication.offer(&src2, 0, 128).unwrap() > 0);
+
+    // Message 3: 16 bytes (unfragmented)
+    let msg3 = vec![3u8; 16];
+    let mut msg3_bytes = msg3.clone();
+    let src3 = AtomicBuffer::new(&mut msg3_bytes);
+    assert!(publication.offer(&src3, 0, 16).unwrap() > 0);
+
+    let mut assembler = ControlledFragmentAssembler::default();
+    let subscription = subscriber.subscription_mut(sub_reg).unwrap();
+
+    let mut delivered = Vec::new();
+    let mut attempts = 0;
+
+    // Drain fragments through ControlledFragmentAssembler
+    while delivered.len() < 3 {
+        subscription.controlled_poll(
+            |buf, offset, len, hdr| {
+                assembler.on_fragment(buf, offset, len, hdr, |abuf, aoff, alen, _ahdr| {
+                    attempts += 1;
+                    // Abort on first delivery of msg 1 and first delivery of msg 2
+                    if attempts == 1 || attempts == 3 {
+                        ControlledPollAction::Abort
+                    } else {
+                        let mut data = vec![0u8; alen];
+                        abuf.get_bytes(aoff, &mut data);
+                        delivered.push(data);
+                        ControlledPollAction::Continue
+                    }
+                })
+            },
+            10,
+        );
+    }
+
+    assert_eq!(delivered.len(), 3);
+    assert_eq!(delivered[0], msg1);
+    assert_eq!(delivered[1], msg2);
+    assert_eq!(delivered[2], msg3);
+    assert_eq!(attempts, 5); // 1 abort + 1 ok for msg1, 1 abort + 1 ok for msg2, 1 ok for msg3
+}
+
+#[test]
+fn concurrent_publication_term_rotation_race_with_offer_and_try_claim() {
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    const STREAM_ID: i32 = 4007;
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher.add_publication("aeron:ipc", STREAM_ID).unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+
+    driver.do_work().unwrap();
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let publication = publisher.publication(pub_reg).unwrap();
+
+    const NUM_THREADS: usize = 3;
+    const MSGS_PER_THREAD: usize = 150;
+    const MSG_SIZE: usize = 512;
+    let total_expected = NUM_THREADS * MSGS_PER_THREAD;
+
+    std::thread::scope(|s| {
+        // Consumer thread: services driver duty cycle and drains subscriber
+        let consumer_handle = s.spawn(move || {
+            let mut counts_by_thread = [0usize; NUM_THREADS];
+            let mut total_received = 0;
+            while total_received < total_expected {
+                driver.do_work().unwrap();
+                let subscription = subscriber.subscription_mut(sub_reg).unwrap();
+                let read = subscription.poll(
+                    |buf, offset, len, _hdr| {
+                        assert_eq!(len, MSG_SIZE);
+                        let t_idx = buf.get_u8(offset) as usize;
+                        let seq = buf.get_i32(offset + 1) as usize;
+                        assert_eq!(seq, counts_by_thread[t_idx]);
+                        counts_by_thread[t_idx] += 1;
+                        total_received += 1;
+                    },
+                    50,
+                );
+                if read == 0 {
+                    std::thread::yield_now();
+                }
+            }
+            counts_by_thread
+        });
+
+        // Publisher threads concurrently writing messages that rotate terms
+        for t_idx in 0..NUM_THREADS {
+            s.spawn(move || {
+                for i in 0..MSGS_PER_THREAD {
+                    let mut payload = vec![0u8; MSG_SIZE];
+                    payload[0] = t_idx as u8;
+                    payload[1..5].copy_from_slice(&(i as u32).to_le_bytes());
+
+                    if t_idx == 0 {
+                        // Use try_claim
+                        let mut published = false;
+                        while !published {
+                            match publication.try_claim(MSG_SIZE) {
+                                Ok((pos, Some(claim))) if pos > 0 => {
+                                    let src = AtomicBuffer::new(&mut payload);
+                                    claim.put_bytes(&src, 0, MSG_SIZE);
+                                    claim.commit();
+                                    published = true;
+                                }
+                                _ => std::thread::yield_now(),
+                            }
+                        }
+                    } else {
+                        // Use offer
+                        let mut published = false;
+                        while !published {
+                            let src = AtomicBuffer::new(&mut payload);
+                            match publication.offer(&src, 0, MSG_SIZE) {
+                                Ok(pos) if pos > 0 => published = true,
+                                _ => std::thread::yield_now(),
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        let counts_by_thread = consumer_handle.join().unwrap();
+        for count in counts_by_thread {
+            assert_eq!(count, MSGS_PER_THREAD);
+        }
+    });
+}
+
+#[test]
+fn exclusive_publication_try_claim_commit_and_abort() {
+    let mut driver = MediaDriver::launch(small_ipc_config()).expect("launch");
+    const STREAM_ID: i32 = 4008;
+    let mut publisher = client_conductor(&driver, 1);
+    let mut subscriber = client_conductor(&driver, 2);
+
+    let pub_reg = publisher
+        .add_exclusive_publication("aeron:ipc", STREAM_ID)
+        .unwrap();
+    let sub_reg = subscriber.add_subscription("aeron:ipc", STREAM_ID).unwrap();
+
+    driver.do_work().unwrap();
+    for (id, counter) in driver.conductor().counters() {
+        publisher.register_counter(*id, counter.clone());
+        subscriber.register_counter(*id, counter.clone());
+    }
+    publisher.do_work().unwrap();
+    subscriber.do_work().unwrap();
+
+    let publication = publisher.exclusive_publication_mut(pub_reg).unwrap();
+
+    // 1. Offer message 1
+    let mut msg1 = *b"exclusive-msg-1";
+    let len1 = msg1.len();
+    let src1 = AtomicBuffer::new(&mut msg1);
+    assert!(publication.offer(&src1, 0, len1).unwrap() > 0);
+
+    // 2. Try claim message 2 and abort
+    let (pos2, claim2) = publication.try_claim(256).unwrap();
+    assert!(pos2 > 0);
+    claim2.unwrap().abort();
+
+    // 3. Try claim message 3 and commit
+    let (pos3, claim3) = publication.try_claim(128).unwrap();
+    assert!(pos3 > 0);
+    let claim3 = claim3.unwrap();
+    let mut msg3 = *b"exclusive-claimed-msg-3";
+    let len3 = msg3.len();
+    let src3 = AtomicBuffer::new(&mut msg3);
+    claim3.put_bytes(&src3, 0, len3);
+    claim3.commit();
+
+    let subscription = subscriber.subscription_mut(sub_reg).unwrap();
+    let mut received = Vec::new();
+    let read = subscription.poll(
+        |buf, offset, len, _hdr| {
+            let mut data = vec![0u8; len];
+            buf.get_bytes(offset, &mut data);
+            received.push(data);
+        },
+        10,
+    );
+    assert_eq!(read, 2);
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0], b"exclusive-msg-1");
+    assert_eq!(
+        received[1][..b"exclusive-claimed-msg-3".len()],
+        *b"exclusive-claimed-msg-3"
     );
 }
