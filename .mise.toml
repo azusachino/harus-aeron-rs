@@ -2,3 +2,5 @@
 # uv owns Python via .python-version; Bun owns the locked Astro dependencies.
 [tools]
 java = "corretto-25.0"
+bun = "1.4"
+uv = "0.13"
