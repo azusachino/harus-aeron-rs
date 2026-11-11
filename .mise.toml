@@ -1,7 +1,4 @@
 # Rust follows stable; tool CLIs stay on their selected minor release lines.
 # uv owns Python via .python-version; Bun owns the locked Astro dependencies.
 [tools]
-rust = { version = "stable", components = "rustfmt,clippy,rust-analyzer,rust-src" }
-uv = "0.13"
-bun = "1.4"
 java = "corretto-25.0"
