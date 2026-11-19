@@ -239,19 +239,13 @@ impl RetransmitHandler {
             return None;
         }
 
-        for index in 0..self.retransmit_action_pool.len() {
-            let action = self.retransmit_action_pool[index];
-            if matches!(
+        self.retransmit_action_pool.iter().position(|action| {
+            matches!(
                 action.state,
                 RetransmitActionState::Delayed | RetransmitActionState::Lingering
             ) && action.term_id == term_id
                 && action.term_offset == term_offset
-            {
-                return Some(index);
-            }
-        }
-
-        None
+        })
     }
 
     fn add_retransmit(&mut self, index: usize) -> usize {
