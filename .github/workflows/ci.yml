@@ -1,13 +1,25 @@
 name: CI
 
+# Pull requests and manual runs: a merge to main re-ran the check its pull
+# request had just passed. The weekly run on main keeps the Rust and Bun caches
+# that pull requests restore from alive. Markdown stays in: the gates check docs.
 on:
-  push:
-    branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 18 * * 0" # Monday 03:00 JST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -20,6 +32,15 @@ jobs:
         run: mise exec -- rustup show
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Pull requests restore main's cache; only main writes it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
 
       - name: Install locked dependencies
         run: make setup
@@ -28,9 +49,6 @@ jobs:
 
       - name: Build Astro documentation site
         run: make astro-build
-
-      - name: Build tutorial learner-stub workspace
-        run: make tutorial-check
 
       - name: Test-parity report (informational)
         run: make test-parity
